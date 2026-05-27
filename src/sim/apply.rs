@@ -1,0 +1,602 @@
+use rand::seq::SliceRandom;
+use rand::Rng;
+use thiserror::Error;
+
+use crate::domain::card::{Card, CardType};
+use crate::domain::combat::{CombatState, Intent};
+use crate::domain::effect::{BuffType, CardEffect};
+
+#[derive(Debug, Error)]
+pub enum SimError {
+    #[error("card index {0} out of range")]
+    InvalidCardIndex(usize),
+    #[error("not enough energy: need {need}, have {have}")]
+    NotEnoughEnergy { need: u8, have: u8 },
+    #[error("card is not playable (Status or Curse type)")]
+    CardNotPlayable,
+    #[error("invalid target index {0}")]
+    InvalidTarget(usize),
+}
+
+// ── Internal combat math ───────────────────────────────────────────────────
+
+/// Damage a single hit of `base` deals, accounting for Strength, Weak, Vulnerable.
+fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
+    let strength = state.player.buff(&BuffType::Strength);
+    let weak = state.player.buff(&BuffType::Weak) > 0;
+    let vulnerable = state.enemies[target_idx].buff(&BuffType::Vulnerable) > 0;
+
+    let raw = if strength >= 0 {
+        base + strength as u32
+    } else {
+        base.saturating_sub((-strength) as u32)
+    };
+    let after_weak = if weak { raw * 3 / 4 } else { raw };
+    if vulnerable { after_weak * 3 / 2 } else { after_weak }
+}
+
+/// Damage a single AoE hit deals to `enemy_idx`, accounting for Weak and enemy Vulnerable.
+fn compute_hit_aoe(base: u32, state: &CombatState, enemy_idx: usize) -> u32 {
+    let strength = state.player.buff(&BuffType::Strength);
+    let weak = state.player.buff(&BuffType::Weak) > 0;
+    let vulnerable = state.enemies[enemy_idx].buff(&BuffType::Vulnerable) > 0;
+
+    let raw = if strength >= 0 {
+        base + strength as u32
+    } else {
+        base.saturating_sub((-strength) as u32)
+    };
+    let after_weak = if weak { raw * 3 / 4 } else { raw };
+    if vulnerable { after_weak * 3 / 2 } else { after_weak }
+}
+
+/// Apply `dmg` to `enemy`, reducing block first then HP.
+/// Returns Thorns stacks on that enemy (caller applies to player separately).
+fn damage_enemy(state: &mut CombatState, enemy_idx: usize, dmg: u32) -> u32 {
+    let thorns = state.enemies[enemy_idx]
+        .buffs
+        .get(&BuffType::Thorns)
+        .copied()
+        .unwrap_or(0)
+        .max(0) as u32;
+
+    let enemy = &mut state.enemies[enemy_idx];
+    let absorbed = enemy.block.min(dmg);
+    enemy.block -= absorbed;
+    enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
+
+    thorns
+}
+
+/// Apply `dmg` to the player (Thorns return value from `damage_enemy`).
+fn damage_player(state: &mut CombatState, dmg: u32) {
+    let absorbed = state.player.block.min(dmg);
+    state.player.block -= absorbed;
+    state.player.hp = state.player.hp.saturating_sub(dmg - absorbed);
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+/// Draw `n` cards from the draw pile into hand.
+/// When the draw pile is empty, the discard pile is shuffled into it.
+pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
+    for _ in 0..n {
+        if state.draw_pile.is_empty() {
+            if state.discard_pile.is_empty() {
+                break;
+            }
+            state.draw_pile.append(&mut state.discard_pile);
+            state.draw_pile.shuffle(rng);
+        }
+        let card = state.draw_pile.remove(0);
+        state.hand.push(card);
+    }
+}
+
+/// Apply a single card effect to the combat state.
+///
+/// `Passive` effects are no-ops in the simulator; they are display-only.
+pub(crate) fn apply_effect(
+    state: &mut CombatState,
+    effect: &CardEffect,
+    target_idx: usize,
+    rng: &mut impl Rng,
+) {
+    match effect {
+        CardEffect::Damage(d) => {
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                let dmg = compute_hit(*d, state, target_idx);
+                let thorns = damage_enemy(state, target_idx, dmg);
+                if thorns > 0 {
+                    damage_player(state, thorns);
+                }
+            }
+        }
+
+        CardEffect::DamageAll(d) => {
+            // Collect (index, damage, thorns) before mutating.
+            let hits: Vec<(usize, u32, u32)> = (0..state.enemies.len())
+                .filter(|&i| state.enemies[i].is_alive())
+                .map(|i| {
+                    let dmg = compute_hit_aoe(*d, state, i);
+                    let thorns = state.enemies[i]
+                        .buffs
+                        .get(&BuffType::Thorns)
+                        .copied()
+                        .unwrap_or(0)
+                        .max(0) as u32;
+                    (i, dmg, thorns)
+                })
+                .collect();
+
+            for (i, dmg, thorns) in hits {
+                damage_enemy(state, i, dmg);
+                if thorns > 0 {
+                    damage_player(state, thorns);
+                }
+            }
+        }
+
+        CardEffect::DamageMulti { base, hits } => {
+            if target_idx < state.enemies.len() {
+                // Read Thorns once before the loop.
+                let thorns = state.enemies[target_idx]
+                    .buffs
+                    .get(&BuffType::Thorns)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(0) as u32;
+
+                for _ in 0..*hits {
+                    if !state.enemies[target_idx].is_alive() {
+                        break;
+                    }
+                    let dmg = compute_hit(*base, state, target_idx);
+                    damage_enemy(state, target_idx, dmg);
+                    if thorns > 0 {
+                        damage_player(state, thorns);
+                    }
+                }
+            }
+        }
+
+        CardEffect::Block(b) => {
+            let dex = state.player.buff(&BuffType::Dexterity).max(0) as u32;
+            let frail = state.player.buff(&BuffType::Frail) > 0;
+            let raw = b + dex;
+            let block = if frail { raw * 3 / 4 } else { raw };
+            state.player.block += block;
+        }
+
+        CardEffect::Draw(n) => {
+            draw_cards(state, *n as usize, rng);
+        }
+
+        CardEffect::GainEnergy(e) => {
+            state.energy = state.energy.saturating_add(*e as u8);
+        }
+
+        CardEffect::LoseHp(h) => {
+            state.player.hp = state.player.hp.saturating_sub(*h);
+        }
+
+        CardEffect::ApplyToEnemy { buff, stacks } => {
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                *state.enemies[target_idx]
+                    .buffs
+                    .entry(buff.clone())
+                    .or_insert(0) += stacks;
+            }
+        }
+
+        CardEffect::ApplyToAllEnemies { buff, stacks } => {
+            for enemy in &mut state.enemies {
+                if enemy.is_alive() {
+                    *enemy.buffs.entry(buff.clone()).or_insert(0) += stacks;
+                }
+            }
+        }
+
+        CardEffect::ApplyToSelf { buff, stacks } => {
+            *state.player.buffs.entry(buff.clone()).or_insert(0) += stacks;
+        }
+
+        CardEffect::Passive(_) => {
+            // Passive/triggered effects are not simulated.
+        }
+    }
+}
+
+/// Play the card at `card_hand_idx` targeting `target_idx`.
+///
+/// The card is validated (playable, enough energy, valid target) before any
+/// state is mutated. On success the card moves to the discard or exhaust pile
+/// and all its effects are applied in order.
+///
+/// `rng` is needed for Draw effects that may trigger a discard shuffle.
+pub fn play_card(
+    state: &mut CombatState,
+    card_hand_idx: usize,
+    target_idx: usize,
+    rng: &mut impl Rng,
+) -> Result<(), SimError> {
+    if card_hand_idx >= state.hand.len() {
+        return Err(SimError::InvalidCardIndex(card_hand_idx));
+    }
+
+    let card = &state.hand[card_hand_idx];
+
+    if !card.is_playable(state.energy) {
+        // Status/Curse cards and cost=255 (X-cost) are never playable
+        use crate::domain::card::CardType;
+        if matches!(card.card_type, CardType::Status | CardType::Curse) || card.cost == 255 {
+            return Err(SimError::CardNotPlayable);
+        }
+        return Err(SimError::NotEnoughEnergy {
+            need: card.cost,
+            have: state.energy,
+        });
+    }
+
+    // Validate target for single-target damage cards
+    let needs_target = card.effects.iter().any(|e| {
+        matches!(
+            e,
+            CardEffect::Damage(_) | CardEffect::DamageMulti { .. }
+        )
+    });
+    if needs_target && target_idx >= state.enemies.len() {
+        return Err(SimError::InvalidTarget(target_idx));
+    }
+
+    // Commit: remove from hand, spend energy
+    let card = state.hand.remove(card_hand_idx);
+    state.energy -= card.cost;
+
+    // Apply effects in order
+    let effects = card.effects.clone();
+    for effect in &effects {
+        apply_effect(state, effect, target_idx, rng);
+    }
+
+    // Powers are exhausted (removed from game); other cards go to discard unless flagged
+    if card.exhausts || card.card_type == CardType::Power {
+        state.exhaust_pile.push(card);
+    } else {
+        state.discard_pile.push(card);
+    }
+
+    Ok(())
+}
+
+/// End the player's turn: enemies act, state resets, new hand drawn.
+///
+/// Returns `true` if combat is over (won or lost) after the enemy phase.
+pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
+    // Each living enemy resets block then executes its intent
+    for i in 0..state.enemies.len() {
+        if state.enemies[i].is_alive() {
+            state.enemies[i].block = 0;
+            resolve_enemy_intent(state, i);
+        }
+    }
+
+    // Tick Poison on each living enemy (1 damage per stack, then reduce stacks by 1)
+    for enemy in &mut state.enemies {
+        if enemy.is_alive() {
+            let stacks = *enemy.buffs.get(&BuffType::Poison).unwrap_or(&0);
+            if stacks > 0 {
+                let dmg = stacks.max(0) as u32;
+                let absorbed = enemy.block.min(dmg);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
+                *enemy.buffs.entry(BuffType::Poison).or_insert(0) -= 1;
+            }
+        }
+    }
+
+    if state.is_over() {
+        return true;
+    }
+
+    // Discard hand; ethereal cards go straight to exhaust
+    let drained: Vec<Card> = state.hand.drain(..).collect();
+    for card in drained {
+        if card.ethereal {
+            state.exhaust_pile.push(card);
+        } else {
+            state.discard_pile.push(card);
+        }
+    }
+
+    // Reset player block and energy, advance turn
+    state.player.block = 0;
+    state.energy = state.energy_max;
+    state.turn += 1;
+
+    // Draw new hand
+    draw_cards(state, 5, rng);
+
+    state.is_over()
+}
+
+/// Resolve a single enemy's intent against the player.
+fn resolve_enemy_intent(state: &mut CombatState, enemy_idx: usize) {
+    let intent = state.enemies[enemy_idx].intent.clone();
+    let enemy_weak = state.enemies[enemy_idx].buff(&BuffType::Weak) > 0;
+    let player_vuln = state.player.buff(&BuffType::Vulnerable) > 0;
+
+    let hit = |base: u32| -> u32 {
+        let after_weak = if enemy_weak { base * 3 / 4 } else { base };
+        if player_vuln { after_weak * 3 / 2 } else { after_weak }
+    };
+
+    match intent {
+        Intent::Attack(d) => {
+            damage_player(state, hit(d));
+        }
+        Intent::AttackMulti { damage, hits } => {
+            // Each hit absorbed by remaining block separately
+            for _ in 0..hits {
+                damage_player(state, hit(damage));
+            }
+        }
+        Intent::Block => {
+            // Simplified: enemy gains a fixed amount of block
+            state.enemies[enemy_idx].block += 7;
+        }
+        // Buff, DebuffPlayer, Escape, Unknown — not simulated in this phase
+        _ => {}
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::card::{Card, CardType, Rarity};
+    use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
+    use crate::domain::effect::{BuffType, CardEffect};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn rng() -> StdRng {
+        StdRng::seed_from_u64(42)
+    }
+
+    fn strike() -> Card {
+        Card::new(1, "Strike", 1, CardType::Attack, Rarity::Basic, vec![CardEffect::Damage(6)])
+    }
+
+    fn defend() -> Card {
+        Card::new(2, "Defend", 1, CardType::Skill, Rarity::Basic, vec![CardEffect::Block(5)])
+    }
+
+    fn bash() -> Card {
+        Card::new(
+            3,
+            "Bash",
+            2,
+            CardType::Attack,
+            Rarity::Basic,
+            vec![
+                CardEffect::Damage(8),
+                CardEffect::ApplyToEnemy { buff: BuffType::Vulnerable, stacks: 2 },
+            ],
+        )
+    }
+
+    fn twin_strike() -> Card {
+        Card::new(
+            4,
+            "Twin Strike",
+            1,
+            CardType::Attack,
+            Rarity::Common,
+            vec![CardEffect::DamageMulti { base: 5, hits: 2 }],
+        )
+    }
+
+    fn wound() -> Card {
+        Card::new(200, "Wound", 255, CardType::Status, Rarity::Special, vec![])
+    }
+
+    fn basic_state() -> CombatState {
+        let player = PlayerState::new(80, 80);
+        let enemy = EnemyState::new("Cultist", 50, Intent::Attack(9));
+        CombatState::new(player, vec![enemy], vec![])
+    }
+
+    // ── play_card ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn strike_deals_correct_damage() {
+        let mut state = basic_state();
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 44); // 50 - 6
+        assert_eq!(state.energy, 2);          // 3 - 1
+        assert!(state.hand.is_empty());
+        assert_eq!(state.discard_pile.len(), 1);
+    }
+
+    #[test]
+    fn defend_gives_block() {
+        let mut state = basic_state();
+        state.hand.push(defend());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.player.block, 5);
+        assert_eq!(state.energy, 2);
+    }
+
+    #[test]
+    fn bash_applies_damage_and_vulnerable() {
+        let mut state = basic_state();
+        state.hand.push(bash());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 42); // 50 - 8
+        assert_eq!(state.energy, 1);          // 3 - 2
+        assert_eq!(
+            *state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap_or(&0),
+            2
+        );
+    }
+
+    #[test]
+    fn vulnerable_amplifies_next_attack() {
+        let mut state = basic_state();
+        // Apply Vulnerable first
+        *state.enemies[0].buffs.entry(BuffType::Vulnerable).or_insert(0) = 2;
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 41); // 50 - (6 * 3/2 = 9)
+    }
+
+    #[test]
+    fn strength_adds_per_hit_on_multi() {
+        let mut state = basic_state();
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) = 2;
+        state.hand.push(twin_strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // (5+2)*2 = 14
+        assert_eq!(state.enemies[0].hp, 36);
+    }
+
+    #[test]
+    fn block_absorbs_damage() {
+        let mut state = basic_state();
+        state.hand.push(strike());
+        state.enemies[0].block = 4;
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].block, 0);
+        assert_eq!(state.enemies[0].hp, 48); // 50 - max(0, 6-4) = 50-2
+    }
+
+    #[test]
+    fn wound_is_not_playable() {
+        let mut state = basic_state();
+        state.hand.push(wound());
+        let err = play_card(&mut state, 0, 0, &mut rng()).unwrap_err();
+        assert!(matches!(err, SimError::CardNotPlayable));
+        assert_eq!(state.hand.len(), 1); // Wound still in hand
+    }
+
+    #[test]
+    fn insufficient_energy_errors() {
+        let mut state = basic_state();
+        state.energy = 0;
+        state.hand.push(strike());
+        let err = play_card(&mut state, 0, 0, &mut rng()).unwrap_err();
+        assert!(matches!(err, SimError::NotEnoughEnergy { .. }));
+    }
+
+    #[test]
+    fn invalid_card_index_errors() {
+        let mut state = basic_state();
+        let err = play_card(&mut state, 99, 0, &mut rng()).unwrap_err();
+        assert!(matches!(err, SimError::InvalidCardIndex(99)));
+    }
+
+    // ── draw_cards ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn draw_cards_basic() {
+        let mut state = basic_state();
+        state.draw_pile = vec![strike(), defend()];
+        draw_cards(&mut state, 2, &mut rng());
+        assert_eq!(state.hand.len(), 2);
+        assert!(state.draw_pile.is_empty());
+    }
+
+    #[test]
+    fn draw_shuffles_discard_when_empty() {
+        let mut state = basic_state();
+        state.draw_pile = vec![];
+        state.discard_pile = vec![strike(), defend(), bash()];
+        draw_cards(&mut state, 2, &mut rng());
+        assert_eq!(state.hand.len(), 2);
+        // One card should remain in the (reshuffled) draw pile
+        assert_eq!(state.draw_pile.len(), 1);
+        assert!(state.discard_pile.is_empty());
+    }
+
+    // ── end_turn ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn end_turn_enemy_attacks_player() {
+        let mut state = basic_state(); // enemy intends Attack(9)
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 71); // 80 - 9
+    }
+
+    #[test]
+    fn end_turn_player_block_absorbs() {
+        let mut state = basic_state();
+        state.player.block = 5;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 76); // 80 - max(0, 9-5) = 80-4
+        assert_eq!(state.player.block, 0); // reset for next turn
+    }
+
+    #[test]
+    fn end_turn_resets_energy_and_advances_turn() {
+        let mut state = basic_state();
+        state.energy = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.energy, 3);
+        assert_eq!(state.turn, 2);
+    }
+
+    #[test]
+    fn end_turn_draws_five_cards() {
+        let mut state = basic_state();
+        // Put 5 strikes in the draw pile
+        state.draw_pile = (0..5).map(|_| strike()).collect();
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.hand.len(), 5);
+    }
+
+    #[test]
+    fn end_turn_ethereal_cards_exhaust() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        let ethereal = Card::new(99, "Dazed", 255, CardType::Status, Rarity::Special, vec![])
+            .with_ethereal();
+        state.hand.push(ethereal);
+        state.draw_pile = vec![];
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.exhaust_pile.len(), 1);
+    }
+
+    #[test]
+    fn poison_ticks_on_end_turn() {
+        let mut state = basic_state();
+        *state.enemies[0].buffs.entry(BuffType::Poison).or_insert(0) = 3;
+        // No attack intent so we only get poison damage
+        state.enemies[0].intent = Intent::Unknown;
+        end_turn(&mut state, &mut rng());
+        // Enemy loses 3 HP from poison, stacks reduced to 2
+        assert_eq!(state.enemies[0].hp, 47);
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Poison).unwrap(), 2);
+    }
+
+    #[test]
+    fn thorns_damages_attacker() {
+        let mut state = basic_state();
+        *state.enemies[0].buffs.entry(BuffType::Thorns).or_insert(0) = 3;
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.player.hp, 77); // 80 - 3 Thorns
+        assert_eq!(state.enemies[0].hp, 44); // still 50-6
+    }
+
+    #[test]
+    fn combat_won_when_all_enemies_dead() {
+        let mut state = basic_state();
+        state.enemies[0].hp = 1;
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert!(state.is_won());
+    }
+}
