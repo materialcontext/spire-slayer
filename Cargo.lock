@@ -774,6 +774,7 @@ name = "spire-slayer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossterm",
  "rand",
  "ratatui",
  "serde",

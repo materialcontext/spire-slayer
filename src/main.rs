@@ -1,8 +1,10 @@
 mod data;
 mod domain;
+mod input;
 mod metrics;
 mod sim;
+mod tui;
 
-fn main() {
-    println!("spire-slayer");
+fn main() -> anyhow::Result<()> {
+    tui::run_app()
 }
