@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-const API_URL: &str = "https://spire-codex.com/api/cards";
+const CARDS_API_URL: &str = "https://spire-codex.com/api/cards";
+const MONSTERS_API_URL: &str = "https://spire-codex.com/api/monsters";
+const ENCOUNTERS_API_URL: &str = "https://spire-codex.com/api/encounters";
 const CACHE_TTL_SECS: u64 = 86_400;
 
-/// Bundled card data used when the live API is unreachable.
 const SEED_JSON: &str = include_str!("../../data/cards_seed.json");
+const MONSTERS_SEED_JSON: &str = include_str!("../../data/monsters_seed.json");
+const ENCOUNTERS_SEED_JSON: &str = include_str!("../../data/encounters_seed.json");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPower {
@@ -54,13 +57,6 @@ where
     Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
-fn cache_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    [&home, ".cache", "spire-slayer", "cards.json"]
-        .iter()
-        .collect()
-}
-
 fn cache_is_fresh(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -74,41 +70,131 @@ fn cache_is_fresh(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Load all STS2 cards from the spire-codex.com API.
-///
-/// Resolution order:
-/// 1. Local cache (`~/.cache/spire-slayer/cards.json`) if less than one day old.
-/// 2. Live API — refreshes the cache on success.
-/// 3. Bundled seed data compiled into the binary.
-pub fn load_cards() -> Result<Vec<SpireApiCard>> {
-    let cache = cache_path();
+// ── Monster API ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiMoveDamage {
+    pub normal: Option<i32>,
+    pub ascension: Option<i32>,
+    pub hit_count: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiMovePower {
+    pub power_id: String,
+    pub target: Option<String>,
+    pub amount: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiMonsterMove {
+    pub id: String,
+    pub name: Option<String>,
+    pub intent: Option<String>,
+    pub damage: Option<ApiMoveDamage>,
+    pub block: Option<i32>,
+    pub heal: Option<i32>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub powers: Vec<ApiMovePower>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiInnatePower {
+    pub power_id: String,
+    pub amount: Option<i32>,
+    pub amount_ascension: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiMonster {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub monster_type: Option<String>,
+    pub min_hp: Option<i32>,
+    pub max_hp: Option<i32>,
+    pub min_hp_ascension: Option<i32>,
+    pub max_hp_ascension: Option<i32>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub moves: Vec<ApiMonsterMove>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub innate_powers: Vec<ApiInnatePower>,
+}
+
+// ── Encounter API ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiEncounterMonster {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiEncounter {
+    pub id: String,
+    pub name: String,
+    pub room_type: Option<String>,
+    pub is_weak: Option<bool>,
+    pub act: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub tags: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub monsters: Vec<ApiEncounterMonster>,
+    pub loss_text: Option<String>,
+}
+
+fn named_cache_path(name: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    [&home, ".cache", "spire-slayer", &format!("{name}.json")]
+        .iter()
+        .collect()
+}
+
+fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<(String, T)> {
+    let body = ureq::get(url).call()?.into_string()?;
+    let data = serde_json::from_str(&body)?;
+    Ok((body, data))
+}
+
+fn load_cached<T>(url: &str, cache_name: &str, seed: &str) -> Vec<T>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let cache = named_cache_path(cache_name);
 
     if cache_is_fresh(&cache) {
         if let Ok(data) = std::fs::read_to_string(&cache) {
-            if let Ok(cards) = serde_json::from_str(&data) {
-                return Ok(cards);
+            if let Ok(items) = serde_json::from_str(&data) {
+                return items;
             }
         }
     }
 
-    match fetch_from_api() {
-        Ok((body, cards)) => {
+    match fetch_json::<Vec<T>>(url) {
+        Ok((body, items)) => {
             if let Some(parent) = cache.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::write(&cache, &body);
-            return Ok(cards);
+            return items;
         }
         Err(e) => {
-            eprintln!("spire-slayer: API unavailable, using bundled card data: {e}");
+            eprintln!("spire-slayer: API unavailable ({e}), using bundled {cache_name} data");
         }
     }
 
-    Ok(serde_json::from_str(SEED_JSON)?)
+    serde_json::from_str(seed).unwrap_or_default()
 }
 
-fn fetch_from_api() -> Result<(String, Vec<SpireApiCard>)> {
-    let body = ureq::get(API_URL).call()?.into_string()?;
-    let cards = serde_json::from_str(&body)?;
-    Ok((body, cards))
+pub fn load_monsters() -> Vec<SpireApiMonster> {
+    load_cached(MONSTERS_API_URL, "monsters", MONSTERS_SEED_JSON)
+}
+
+pub fn load_encounters() -> Vec<SpireApiEncounter> {
+    load_cached(ENCOUNTERS_API_URL, "encounters", ENCOUNTERS_SEED_JSON)
+}
+
+// Refactor load_cards to use the same helper (keep original signature for compatibility)
+pub fn load_cards() -> Result<Vec<SpireApiCard>> {
+    Ok(load_cached(CARDS_API_URL, "cards", SEED_JSON))
 }

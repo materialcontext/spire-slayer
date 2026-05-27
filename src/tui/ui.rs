@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     match app.mode {
+        AppMode::EncounterPick => render_encounter_pick(frame, app, area),
         AppMode::ManualInput => render_input(frame, app, area),
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
         AppMode::CardPick => render_card_pick(frame, app, area),
@@ -224,7 +225,7 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let line = Line::from(vec![
-        Span::raw("  [s]im  [e]dit  [q]uit"),
+        Span::raw("  [s]im  [e]dit  [n]ew fight  [q]uit"),
         Span::raw(status),
         Span::raw("          Threat: "),
         Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
@@ -353,6 +354,100 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[2]);
 }
 
+fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // title
+            Constraint::Length(2), // act filter bar
+            Constraint::Min(6),    // encounter list
+            Constraint::Length(2), // hint
+        ])
+        .split(area);
+
+    let title = Paragraph::new(" ENCOUNTER PICKER — Choose your fight")
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    // Act filter chips
+    let acts = [("1", "Act 1"), ("2", "Act 2"), ("3", "Act 3"), ("boss", "Boss"), ("all", "All")];
+    let filter_spans: Vec<Span<'static>> = acts
+        .iter()
+        .flat_map(|(key, label)| {
+            let selected = app.act_filter == *key;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            vec![
+                Span::styled(format!(" {} ", label), style),
+                Span::raw("  "),
+            ]
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(filter_spans)), rows[1]);
+
+    // Encounter list
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.encounters.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No encounter data — API unavailable. Press Enter to use default, [m] for manual input.",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if app.filtered_indices.is_empty() {
+        lines.push(Line::from(Span::raw("  No encounters for this act.")));
+    } else {
+        for (row, &idx) in app.filtered_indices.iter().enumerate() {
+            let Some(enc) = app.encounters.get(idx) else { continue };
+            let selected = row == app.selected_row;
+            let (prefix, style) = if selected {
+                ("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default().fg(Color::White))
+            };
+
+            let room = enc.room_type.as_deref().unwrap_or("?");
+            let room_color = match room.to_lowercase().as_str() {
+                r if r.contains("elite") => Color::Yellow,
+                r if r.contains("boss") => Color::Red,
+                _ => Color::DarkGray,
+            };
+
+            let monster_names: Vec<String> = enc.monsters.iter().map(|m| m.name.clone()).collect();
+            let monsters_str = if monster_names.is_empty() {
+                "?".to_string()
+            } else {
+                monster_names.join(", ")
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}{}", prefix, enc.name), style),
+                Span::raw("  "),
+                Span::styled(format!("[{}]", room), Style::default().fg(room_color)),
+                Span::raw(format!("  {}", monsters_str)),
+            ]));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        rows[2],
+    );
+
+    let hint = Paragraph::new(
+        "  [1/2/3/b/a] filter act  [j/k] navigate  [Enter] select  [m] manual input  [q] quit",
+    )
+    .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[3]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,17 +459,34 @@ mod tests {
         Terminal::new(TestBackend::new(120, 30)).unwrap()
     }
 
+    fn make_empty_app() -> App {
+        App::new(vec![], vec![])
+    }
+
+    #[test]
+    fn render_encounter_pick_does_not_panic() {
+        let mut terminal = make_terminal();
+        let app = make_empty_app();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
     #[test]
     fn render_manual_input_does_not_panic() {
+        use rand::SeedableRng;
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let mut terminal = make_terminal();
-        let app = App::new();
+        let mut app = make_empty_app();
+        app.load_combat(default_combat_state());
+        let key = KeyEvent { code: KeyCode::Char('e'), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        app.handle_event(crate::input::event::AppEvent::Key(key), &mut rng);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
     #[test]
     fn render_combat_advice_does_not_panic() {
         let mut terminal = make_terminal();
-        let mut app = App::new();
+        let mut app = make_empty_app();
         app.load_combat(default_combat_state());
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
@@ -383,10 +495,25 @@ mod tests {
     fn render_combat_after_sim_does_not_panic() {
         use rand::SeedableRng;
         let mut terminal = make_terminal();
-        let mut app = App::new();
+        let mut app = make_empty_app();
         app.load_combat(default_combat_state());
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         app.run_simulation(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_encounter_with_data_does_not_panic() {
+        use crate::data::api::{ApiEncounterMonster, SpireApiEncounter};
+        let enc = SpireApiEncounter {
+            id: "test".into(), name: "Test Fight".into(),
+            room_type: Some("normal".into()), is_weak: Some(false),
+            act: Some("1".into()), tags: vec![],
+            monsters: vec![ApiEncounterMonster { id: "c".into(), name: "Cultist".into() }],
+            loss_text: None,
+        };
+        let mut terminal = make_terminal();
+        let app = App::new(vec![enc], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }
