@@ -1,0 +1,79 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BuffType {
+    // Player/enemy positive buffs
+    Strength,
+    Dexterity,
+    Thorns,
+    Metallicize,
+    Ritual,
+    // Debuffs
+    Vulnerable,
+    Weak,
+    Frail,
+    Poison,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CardEffect {
+    /// Deal damage to the target enemy.
+    Damage(u32),
+    /// Deal damage to all enemies.
+    DamageAll(u32),
+    /// Deal damage N times to the target enemy.
+    DamageMulti { base: u32, hits: u32 },
+    /// Gain block.
+    Block(u32),
+    /// Draw cards.
+    Draw(u32),
+    /// Gain energy.
+    GainEnergy(u32),
+    /// Lose HP (e.g. Hemokinesis, Offering).
+    LoseHp(u32),
+    /// Apply a buff/debuff to the target enemy.
+    ApplyToEnemy { buff: BuffType, stacks: i32 },
+    /// Apply a buff/debuff to all enemies.
+    ApplyToAllEnemies { buff: BuffType, stacks: i32 },
+    /// Apply a buff/debuff to self (player).
+    ApplyToSelf { buff: BuffType, stacks: i32 },
+    /// Placeholder for passive/triggered effects not yet simulated.
+    Passive(String),
+}
+
+impl CardEffect {
+    pub fn damage_value(&self) -> u32 {
+        match self {
+            CardEffect::Damage(d) => *d,
+            CardEffect::DamageAll(d) => *d,
+            CardEffect::DamageMulti { base, hits } => base * hits,
+            _ => 0,
+        }
+    }
+
+    pub fn block_value(&self) -> u32 {
+        match self {
+            CardEffect::Block(b) => *b,
+            _ => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn damage_value_multi() {
+        let e = CardEffect::DamageMulti { base: 5, hits: 3 };
+        assert_eq!(e.damage_value(), 15);
+    }
+
+    #[test]
+    fn buff_type_hash() {
+        use std::collections::HashMap;
+        let mut map: HashMap<BuffType, i32> = HashMap::new();
+        map.insert(BuffType::Strength, 3);
+        assert_eq!(map[&BuffType::Strength], 3);
+    }
+}
