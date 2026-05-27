@@ -18,6 +18,9 @@ pub enum Rarity {
     Common,
     Uncommon,
     Rare,
+    /// STS2 rarity tier above Rare.
+    Ancient,
+    /// Catch-all for Status, Curse, Token, Event, Quest rarities.
     Special,
 }
 

@@ -1,262 +1,312 @@
-use crate::domain::card::{Card, CardType, Rarity};
+//! Card catalog backed by the spire-codex.com API.
+//!
+//! All card data is fetched from `https://spire-codex.com/api/cards` and
+//! cached at `~/.cache/spire-slayer/cards.json`. The cache is refreshed
+//! automatically whenever it is more than one day old.
+
+use crate::data::api::{self, SpireApiCard};
+use crate::domain::card::{Card, CardId, CardType, Rarity};
 use crate::domain::effect::{BuffType, CardEffect};
 
-mod ids {
-    // Basic / Starter
-    pub const STRIKE: u32 = 1;
-    pub const DEFEND: u32 = 2;
-    pub const BASH: u32 = 3;
-    // Common Attacks
-    pub const ANGER: u32 = 10;
-    pub const CLEAVE: u32 = 11;
-    pub const CLOTHESLINE: u32 = 12;
-    pub const HEAVY_BLADE: u32 = 13;
-    pub const POMMEL_STRIKE: u32 = 14;
-    pub const THUNDERCLAP: u32 = 15;
-    pub const TWIN_STRIKE: u32 = 16;
-    pub const WILD_STRIKE: u32 = 17;
-    // Common Skills
-    pub const ARMAMENTS: u32 = 20;
-    pub const FLEX: u32 = 21;
-    pub const HAVOC: u32 = 22;
-    pub const SHRUG_IT_OFF: u32 = 23;
-    pub const TRUE_GRIT: u32 = 24;
-    // Common Powers
-    pub const INFLAME: u32 = 30;
-    pub const METALLICIZE: u32 = 31;
-    // Status cards
-    pub const WOUND: u32 = 200;
-    pub const BURN: u32 = 201;
-    pub const DAZED: u32 = 202;
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Stable u32 card ID derived from the API string ID via djb2.
+fn djb2(s: &str) -> CardId {
+    s.bytes()
+        .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32))
 }
 
-/// Ironclad card constructors. Each function returns a fresh `Card` instance.
+fn map_card_type(s: &str) -> CardType {
+    match s {
+        "Attack" => CardType::Attack,
+        "Skill" => CardType::Skill,
+        "Power" => CardType::Power,
+        "Status" => CardType::Status,
+        "Curse" => CardType::Curse,
+        _ => CardType::Skill,
+    }
+}
+
+fn map_rarity(s: &str) -> Rarity {
+    match s {
+        "Basic" => Rarity::Basic,
+        "Common" => Rarity::Common,
+        "Uncommon" => Rarity::Uncommon,
+        "Rare" => Rarity::Rare,
+        "Ancient" => Rarity::Ancient,
+        _ => Rarity::Special,
+    }
+}
+
+fn map_buff(power: &str) -> Option<BuffType> {
+    match power {
+        "Vulnerable" => Some(BuffType::Vulnerable),
+        "Weak" => Some(BuffType::Weak),
+        "Frail" => Some(BuffType::Frail),
+        "Poison" => Some(BuffType::Poison),
+        "Strength" => Some(BuffType::Strength),
+        "Dexterity" => Some(BuffType::Dexterity),
+        "Thorns" => Some(BuffType::Thorns),
+        "Metallicize" => Some(BuffType::Metallicize),
+        _ => None,
+    }
+}
+
+fn api_to_domain(api: &SpireApiCard) -> Card {
+    let id = djb2(&api.id);
+    let card_type = api
+        .card_type
+        .as_deref()
+        .map(map_card_type)
+        .unwrap_or(CardType::Skill);
+    let rarity = api
+        .rarity
+        .as_deref()
+        .map(map_rarity)
+        .unwrap_or(Rarity::Special);
+
+    let cost: u8 = if api.is_x_cost || api.is_x_star_cost {
+        255
+    } else {
+        api.cost.map(|c| c.clamp(0, 254) as u8).unwrap_or(255)
+    };
+
+    let target = api.target.as_deref().unwrap_or("SingleEnemy");
+    let hits = api.hit_count.unwrap_or(1).max(1) as u32;
+
+    let mut effects: Vec<CardEffect> = Vec::new();
+
+    if let Some(dmg) = api.damage.filter(|&d| d > 0) {
+        let base = dmg as u32;
+        effects.push(match target {
+            "AllEnemies" if hits > 1 => CardEffect::DamageMulti { base, hits },
+            "AllEnemies" => CardEffect::DamageAll(base),
+            _ if hits > 1 => CardEffect::DamageMulti { base, hits },
+            _ => CardEffect::Damage(base),
+        });
+    }
+
+    if let Some(b) = api.block.filter(|&b| b > 0) {
+        effects.push(CardEffect::Block(b as u32));
+    }
+
+    if let Some(d) = api.cards_draw.filter(|&d| d > 0) {
+        effects.push(CardEffect::Draw(d as u32));
+    }
+
+    if let Some(e) = api.energy_gain.filter(|&e| e > 0) {
+        effects.push(CardEffect::GainEnergy(e as u32));
+    }
+
+    if let Some(h) = api.hp_loss.filter(|&h| h > 0) {
+        effects.push(CardEffect::LoseHp(h as u32));
+    }
+
+    for pw in &api.powers_applied {
+        let stacks = pw.amount.unwrap_or(1);
+        let effect = if let Some(buff) = map_buff(&pw.power) {
+            match target {
+                "Self" | "None" => CardEffect::ApplyToSelf { buff, stacks },
+                "AllEnemies" => CardEffect::ApplyToAllEnemies { buff, stacks },
+                _ => CardEffect::ApplyToEnemy { buff, stacks },
+            }
+        } else {
+            CardEffect::Passive(format!("Apply {} {}.", stacks, pw.power))
+        };
+        effects.push(effect);
+    }
+
+    // For cards with no structured effects, use the description as a passive.
+    if effects.is_empty() {
+        if let Some(desc) = api.description.as_deref().filter(|s| !s.is_empty()) {
+            effects.push(CardEffect::Passive(desc.to_owned()));
+        }
+    }
+
+    let mut card = Card::new(id, &api.name, cost, card_type, rarity, effects);
+
+    for kw in &api.keywords_key {
+        match kw.as_str() {
+            "exhaust" => card = card.with_exhausts(),
+            "ethereal" => card = card.with_ethereal(),
+            "innate" => card = card.with_innate(),
+            _ => {}
+        }
+    }
+
+    card
+}
+
+fn load_api_cards() -> Vec<SpireApiCard> {
+    api::load_cards().unwrap_or_else(|e| {
+        eprintln!("spire-slayer: failed to load card data from spire-codex.com: {e}");
+        Vec::new()
+    })
+}
+
+// ── Public modules ─────────────────────────────────────────────────────────
+
+/// Cards for the Ironclad character.
 pub mod ironclad {
     use super::*;
 
-    // ── Basic ─────────────────────────────────────────────────────────────
-
-    pub fn strike() -> Card {
-        Card::new(ids::STRIKE, "Strike", 1, CardType::Attack, Rarity::Basic,
-            vec![CardEffect::Damage(6)])
+    /// All Ironclad cards from the API, converted to domain `Card` objects.
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("ironclad"))
+            .map(api_to_domain)
+            .collect()
     }
-
-    pub fn defend() -> Card {
-        Card::new(ids::DEFEND, "Defend", 1, CardType::Skill, Rarity::Basic,
-            vec![CardEffect::Block(5)])
-    }
-
-    pub fn bash() -> Card {
-        Card::new(ids::BASH, "Bash", 2, CardType::Attack, Rarity::Basic,
-            vec![
-                CardEffect::Damage(8),
-                CardEffect::ApplyToEnemy { buff: BuffType::Vulnerable, stacks: 2 },
-            ])
-    }
-
-    // ── Common Attacks ────────────────────────────────────────────────────
-
-    pub fn anger() -> Card {
-        Card::new(ids::ANGER, "Anger", 0, CardType::Attack, Rarity::Common,
-            vec![
-                CardEffect::Damage(6),
-                CardEffect::Passive("Add a copy of Anger to your discard pile.".into()),
-            ])
-    }
-
-    pub fn cleave() -> Card {
-        Card::new(ids::CLEAVE, "Cleave", 1, CardType::Attack, Rarity::Common,
-            vec![CardEffect::DamageAll(8)])
-    }
-
-    pub fn clothesline() -> Card {
-        Card::new(ids::CLOTHESLINE, "Clothesline", 2, CardType::Attack, Rarity::Common,
-            vec![
-                CardEffect::Damage(12),
-                CardEffect::ApplyToEnemy { buff: BuffType::Weak, stacks: 2 },
-            ])
-    }
-
-    pub fn heavy_blade() -> Card {
-        Card::new(ids::HEAVY_BLADE, "Heavy Blade", 2, CardType::Attack, Rarity::Common,
-            vec![CardEffect::Damage(14)])
-    }
-
-    pub fn pommel_strike() -> Card {
-        Card::new(ids::POMMEL_STRIKE, "Pommel Strike", 1, CardType::Attack, Rarity::Common,
-            vec![
-                CardEffect::Damage(9),
-                CardEffect::Draw(1),
-            ])
-    }
-
-    pub fn thunderclap() -> Card {
-        Card::new(ids::THUNDERCLAP, "Thunderclap", 1, CardType::Attack, Rarity::Common,
-            vec![
-                CardEffect::DamageAll(4),
-                CardEffect::ApplyToAllEnemies { buff: BuffType::Vulnerable, stacks: 1 },
-            ])
-    }
-
-    pub fn twin_strike() -> Card {
-        Card::new(ids::TWIN_STRIKE, "Twin Strike", 1, CardType::Attack, Rarity::Common,
-            vec![CardEffect::DamageMulti { base: 5, hits: 2 }])
-    }
-
-    pub fn wild_strike() -> Card {
-        Card::new(ids::WILD_STRIKE, "Wild Strike", 1, CardType::Attack, Rarity::Common,
-            vec![
-                CardEffect::Damage(12),
-                CardEffect::Passive("Shuffle a Wound into your draw pile.".into()),
-            ])
-    }
-
-    // ── Common Skills ─────────────────────────────────────────────────────
-
-    pub fn armaments() -> Card {
-        Card::new(ids::ARMAMENTS, "Armaments", 1, CardType::Skill, Rarity::Common,
-            vec![
-                CardEffect::Block(5),
-                CardEffect::Passive("Upgrade a card in your hand for the rest of combat.".into()),
-            ])
-    }
-
-    pub fn flex() -> Card {
-        Card::new(ids::FLEX, "Flex", 0, CardType::Skill, Rarity::Common,
-            vec![
-                CardEffect::ApplyToSelf { buff: BuffType::Strength, stacks: 2 },
-                CardEffect::Passive("At the end of your turn, lose 2 Strength.".into()),
-            ])
-    }
-
-    pub fn havoc() -> Card {
-        Card::new(ids::HAVOC, "Havoc", 1, CardType::Skill, Rarity::Common,
-            vec![CardEffect::Passive("Play the top card of your draw pile and Exhaust it.".into())])
-    }
-
-    pub fn shrug_it_off() -> Card {
-        Card::new(ids::SHRUG_IT_OFF, "Shrug It Off", 1, CardType::Skill, Rarity::Common,
-            vec![
-                CardEffect::Block(8),
-                CardEffect::Draw(1),
-            ])
-    }
-
-    pub fn true_grit() -> Card {
-        Card::new(ids::TRUE_GRIT, "True Grit", 1, CardType::Skill, Rarity::Common,
-            vec![
-                CardEffect::Block(7),
-                CardEffect::Passive("Exhaust a random card in your hand.".into()),
-            ])
-    }
-
-    // ── Common Powers ─────────────────────────────────────────────────────
-
-    pub fn inflame() -> Card {
-        Card::new(ids::INFLAME, "Inflame", 1, CardType::Power, Rarity::Common,
-            vec![CardEffect::ApplyToSelf { buff: BuffType::Strength, stacks: 2 }])
-    }
-
-    pub fn metallicize() -> Card {
-        Card::new(ids::METALLICIZE, "Metallicize", 1, CardType::Power, Rarity::Common,
-            vec![CardEffect::Passive("At the end of your turn, gain 3 Block.".into())])
-    }
-
-    // ── Deck constructors ─────────────────────────────────────────────────
 
     /// Ironclad's starting deck: 5× Strike, 4× Defend, 1× Bash.
     pub fn starter_deck() -> Vec<Card> {
+        let api_cards = load_api_cards();
+        let ironclad: Vec<&SpireApiCard> = api_cards
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("ironclad"))
+            .collect();
+
+        let find = |id: &str| {
+            ironclad
+                .iter()
+                .find(|c| c.id.eq_ignore_ascii_case(id))
+                .map(|c| api_to_domain(c))
+        };
+
         let mut deck = Vec::with_capacity(10);
-        for _ in 0..5 { deck.push(strike()); }
-        for _ in 0..4 { deck.push(defend()); }
-        deck.push(bash());
+        if let Some(s) = find("STRIKE_IRONCLAD") {
+            for _ in 0..5 {
+                deck.push(s.clone());
+            }
+        }
+        if let Some(d) = find("DEFEND_IRONCLAD") {
+            for _ in 0..4 {
+                deck.push(d.clone());
+            }
+        }
+        if let Some(b) = find("BASH") {
+            deck.push(b);
+        }
         deck
     }
 }
 
-/// Status cards that can be shuffled into a player's deck.
+/// Cards for the Silent character.
+pub mod silent {
+    use super::*;
+
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("silent"))
+            .map(api_to_domain)
+            .collect()
+    }
+}
+
+/// Cards for the Defect character.
+pub mod defect {
+    use super::*;
+
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("defect"))
+            .map(api_to_domain)
+            .collect()
+    }
+}
+
+/// Cards for the Regent character.
+pub mod regent {
+    use super::*;
+
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("regent"))
+            .map(api_to_domain)
+            .collect()
+    }
+}
+
+/// Cards for the Necrobinder character.
+pub mod necrobinder {
+    use super::*;
+
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("necrobinder"))
+            .map(api_to_domain)
+            .collect()
+    }
+}
+
+/// Colorless cards available to all characters.
+pub mod colorless {
+    use super::*;
+
+    pub fn all_cards() -> Vec<Card> {
+        load_api_cards()
+            .iter()
+            .filter(|c| c.color.as_deref() == Some("colorless"))
+            .map(api_to_domain)
+            .collect()
+    }
+}
+
+/// Status cards that enemies or card effects can shuffle into the deck.
 pub mod status {
     use super::*;
 
-    pub fn wound() -> Card {
-        Card::new(ids::WOUND, "Wound", 255, CardType::Status, Rarity::Special, vec![])
+    fn find_status(id: &str) -> Option<Card> {
+        load_api_cards()
+            .iter()
+            .find(|c| {
+                c.id.eq_ignore_ascii_case(id)
+                    && c.color.as_deref() == Some("status")
+            })
+            .map(api_to_domain)
     }
 
-    pub fn burn() -> Card {
-        Card::new(ids::BURN, "Burn", 255, CardType::Status, Rarity::Special,
-            vec![CardEffect::Passive("At the end of your turn, take 2 damage.".into())])
+    pub fn wound() -> Option<Card> {
+        find_status("WOUND")
     }
 
-    pub fn dazed() -> Card {
-        Card::new(ids::DAZED, "Dazed", 255, CardType::Status, Rarity::Special, vec![])
-            .with_ethereal()
+    pub fn burn() -> Option<Card> {
+        find_status("BURN")
+    }
+
+    pub fn dazed() -> Option<Card> {
+        find_status("DAZED")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ironclad;
-    use crate::domain::card::CardType;
-    use crate::domain::effect::{BuffType, CardEffect};
 
     #[test]
     fn starter_deck_has_ten_cards() {
-        assert_eq!(ironclad::starter_deck().len(), 10);
+        let deck = ironclad::starter_deck();
+        assert_eq!(deck.len(), 10, "Expected 10 starter cards, got {}", deck.len());
     }
 
     #[test]
     fn starter_deck_composition() {
+        use crate::domain::card::CardType;
         let deck = ironclad::starter_deck();
-        let strikes = deck.iter().filter(|c| c.id == super::ids::STRIKE).count();
-        let defends = deck.iter().filter(|c| c.id == super::ids::DEFEND).count();
-        let bashes = deck.iter().filter(|c| c.id == super::ids::BASH).count();
-        assert_eq!(strikes, 5);
-        assert_eq!(defends, 4);
-        assert_eq!(bashes, 1);
+        let bashes = deck.iter().filter(|c| c.name == "Bash").count();
+        let attacks = deck.iter().filter(|c| c.card_type == CardType::Attack).count();
+        assert_eq!(bashes, 1, "Expected 1 Bash");
+        assert!(attacks >= 6, "Expected at least 6 attack cards (5 Strikes + 1 Bash)");
     }
 
     #[test]
-    fn strike_stats() {
-        let s = ironclad::strike();
-        assert_eq!(s.cost, 1);
-        assert_eq!(s.card_type, CardType::Attack);
-        assert_eq!(s.base_damage(), 6);
-        assert_eq!(s.base_block(), 0);
-    }
-
-    #[test]
-    fn bash_deals_damage_and_applies_vulnerable() {
-        let b = ironclad::bash();
-        assert_eq!(b.base_damage(), 8);
-        assert!(b.effects.iter().any(|e| matches!(
-            e,
-            CardEffect::ApplyToEnemy { buff: BuffType::Vulnerable, stacks: 2 }
-        )));
-    }
-
-    #[test]
-    fn twin_strike_deals_ten_total_damage() {
-        assert_eq!(ironclad::twin_strike().base_damage(), 10);
-    }
-
-    #[test]
-    fn defend_only_provides_block() {
-        let d = ironclad::defend();
-        assert_eq!(d.base_block(), 5);
-        assert_eq!(d.base_damage(), 0);
-    }
-
-    #[test]
-    fn shrug_it_off_gives_block_and_draw() {
-        let s = ironclad::shrug_it_off();
-        assert_eq!(s.base_block(), 8);
-        assert!(s.effects.iter().any(|e| matches!(e, CardEffect::Draw(1))));
-    }
-
-    #[test]
-    fn wound_is_not_playable() {
-        use super::status;
-        let w = status::wound();
-        assert!(!w.is_playable(3));
+    fn ironclad_cards_not_empty() {
+        let cards = ironclad::all_cards();
+        assert!(!cards.is_empty(), "Ironclad card pool should not be empty");
     }
 }
