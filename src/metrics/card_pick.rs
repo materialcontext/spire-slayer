@@ -104,23 +104,22 @@ pub fn sim_pick_score(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
-    act: u8,
+    sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     rng: &mut impl Rng,
 ) -> Vec<CardAdvice> {
-    let act_str = act.to_string();
     let pool: Vec<&SpireApiEncounter> = all_encounters
         .iter()
         .filter(|e| {
             let a = e.act.as_deref().map(normalize_act).unwrap_or("other");
-            a == act_str.as_str()
-                && e.room_type.as_deref().map(|rt| rt != "boss").unwrap_or(true)
+            a == sub_act
+                && e.room_type.as_deref().map(|rt| rt != "Boss").unwrap_or(true)
         })
         .collect();
 
     if pool.len() < 2 || offered.is_empty() {
-        return heuristic_advice(offered, deck, act);
+        return heuristic_advice(offered, deck);
     }
 
     let enc1 = *pool.choose(rng).unwrap();
@@ -179,12 +178,12 @@ pub fn sim_pick_score(
 
 // ── Heuristic fallback ─────────────────────────────────────────────────────
 
-fn heuristic_advice(offered: &[Card], deck: &[Card], act: u8) -> Vec<CardAdvice> {
+fn heuristic_advice(offered: &[Card], deck: &[Card]) -> Vec<CardAdvice> {
     let mut advice: Vec<CardAdvice> = offered
         .iter()
         .enumerate()
         .map(|(i, card)| {
-            let score = score_single(card, deck, act);
+            let score = score_single(card, deck, 1);
             CardAdvice {
                 card_index: i,
                 score,
@@ -243,7 +242,7 @@ pub fn score_single(card: &Card, deck: &[Card], _act: u8) -> f32 {
 
 /// Rank the offered cards best-first using heuristics only (no simulation).
 pub fn pick_score(offered: &[Card], run: &RunState) -> Vec<CardAdvice> {
-    heuristic_advice(offered, &run.deck, run.act)
+    heuristic_advice(offered, &run.deck)
 }
 
 fn build_heuristic_reason(card: &Card, deck: &[Card]) -> String {
@@ -342,7 +341,7 @@ mod tests {
     fn sim_pick_fallback_when_no_encounters() {
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, 1, &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
         assert!(!advice.is_empty());
         // All scores non-negative when heuristic fallback
         for a in &advice {
@@ -354,7 +353,7 @@ mod tests {
     fn sim_pick_includes_skip_option() {
         let mut rng = StdRng::seed_from_u64(2);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike()], &deck, 80, 80, 1, &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
         assert!(advice.iter().any(|a| a.card_index == usize::MAX));
     }
 
@@ -362,7 +361,7 @@ mod tests {
     fn sim_pick_sorted_descending() {
         let mut rng = StdRng::seed_from_u64(3);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, 1, &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
         for w in advice.windows(2) {
             assert!(w[0].score >= w[1].score);
         }

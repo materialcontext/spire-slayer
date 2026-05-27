@@ -8,30 +8,52 @@ use crate::domain::catalog::ironclad;
 use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
 use crate::domain::effect::BuffType;
 
-/// Normalize the API `act` string to a short canonical form: "1", "2", "3", "boss", "other".
+/// Normalize the API `act` string to a sub-act canonical name.
+///
+/// The game randomly assigns one of two sub-acts per act at run start.
+/// Act 1: "overgrowth" | "underdocks"
+/// Act 2: "hive"
+/// Act 3: "glory"
 pub fn normalize_act(act: &str) -> &'static str {
-    match act.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()) {
-        s if s.contains('1') || s == "act1" || s == "one" => "1",
-        s if s.contains('2') || s == "act2" || s == "two" => "2",
-        s if s.contains('3') || s == "act3" || s == "three" => "3",
-        s if s.contains("boss") || s.contains("4") => "boss",
-        _ => "other",
+    let s = act.to_lowercase();
+    if s.contains("overgrowth") { return "overgrowth"; }
+    if s.contains("underdock") { return "underdocks"; }
+    if s.contains("hive") { return "hive"; }
+    if s.contains("glory") { return "glory"; }
+    if s.contains("boss") { return "boss"; }
+    "other"
+}
+
+/// All sub-act canonical names for a given act number (1-indexed).
+pub fn sub_acts_for_act(act: u8) -> &'static [&'static str] {
+    match act {
+        1 => &["overgrowth", "underdocks"],
+        2 => &["hive"],
+        3 => &["glory"],
+        _ => &[],
     }
 }
 
 pub fn encounters_for_act<'a>(
     encounters: &'a [SpireApiEncounter],
-    act_filter: &str,
+    sub_act: &str,
 ) -> Vec<&'a SpireApiEncounter> {
-    if act_filter == "all" {
+    if sub_act == "all" {
         return encounters.iter().collect();
+    }
+    // "boss" across all sub-acts
+    if sub_act == "boss" {
+        return encounters
+            .iter()
+            .filter(|e| e.room_type.as_deref() == Some("Boss"))
+            .collect();
     }
     encounters
         .iter()
         .filter(|e| {
             e.act
                 .as_deref()
-                .map(|a| normalize_act(a) == act_filter)
+                .map(|a| normalize_act(a) == sub_act)
                 .unwrap_or(false)
         })
         .collect()
@@ -192,12 +214,14 @@ mod tests {
 
     #[test]
     fn normalize_act_variants() {
-        assert_eq!(normalize_act("1"), "1");
-        assert_eq!(normalize_act("act1"), "1");
-        assert_eq!(normalize_act("Act 1"), "1");
-        assert_eq!(normalize_act("2"), "2");
+        assert_eq!(normalize_act("Act 1 - Overgrowth"), "overgrowth");
+        assert_eq!(normalize_act("act 1 - overgrowth"), "overgrowth");
+        assert_eq!(normalize_act("Act 1 - Underdocks"), "underdocks");
+        assert_eq!(normalize_act("Act 2 - Hive"), "hive");
+        assert_eq!(normalize_act("Act 3 - Glory"), "glory");
         assert_eq!(normalize_act("boss"), "boss");
         assert_eq!(normalize_act("Boss"), "boss");
+        assert_eq!(normalize_act("unknown"), "other");
     }
 
     #[test]
@@ -339,19 +363,25 @@ mod tests {
 
     #[test]
     fn encounters_for_act_filter() {
-        let make = |act: &str| SpireApiEncounter {
+        let make = |act: &str, room_type: &str| SpireApiEncounter {
             id: act.to_string(),
             name: act.to_string(),
-            room_type: None,
+            room_type: Some(room_type.to_string()),
             is_weak: None,
             act: Some(act.to_string()),
             tags: vec![],
             monsters: vec![],
             loss_text: None,
         };
-        let all = vec![make("1"), make("1"), make("2"), make("boss")];
-        assert_eq!(encounters_for_act(&all, "1").len(), 2);
-        assert_eq!(encounters_for_act(&all, "2").len(), 1);
+        let all = vec![
+            make("Act 1 - Overgrowth", "Monster"),
+            make("Act 1 - Overgrowth", "Monster"),
+            make("Act 1 - Underdocks", "Monster"),
+            make("Act 2 - Hive", "Monster"),
+        ];
+        assert_eq!(encounters_for_act(&all, "overgrowth").len(), 2);
+        assert_eq!(encounters_for_act(&all, "underdocks").len(), 1);
+        assert_eq!(encounters_for_act(&all, "hive").len(), 1);
         assert_eq!(encounters_for_act(&all, "all").len(), 4);
     }
 }

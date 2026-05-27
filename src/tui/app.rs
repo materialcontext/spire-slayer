@@ -58,7 +58,7 @@ impl App {
             selected_row: 0,
             encounters,
             monsters,
-            act_filter: "1".to_string(),
+            act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
         };
         app.refresh_filter();
@@ -118,16 +118,21 @@ impl App {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
             }
-            KeyCode::Char('1') => {
-                self.act_filter = "1".to_string();
+            // Sub-act filters: o=Overgrowth, u=Underdocks, h=Hive, g=Glory
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                self.act_filter = "overgrowth".to_string();
                 self.refresh_filter();
             }
-            KeyCode::Char('2') => {
-                self.act_filter = "2".to_string();
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                self.act_filter = "underdocks".to_string();
                 self.refresh_filter();
             }
-            KeyCode::Char('3') => {
-                self.act_filter = "3".to_string();
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                self.act_filter = "hive".to_string();
+                self.refresh_filter();
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.act_filter = "glory".to_string();
                 self.refresh_filter();
             }
             KeyCode::Char('b') | KeyCode::Char('B') => {
@@ -316,12 +321,12 @@ impl App {
         });
         let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
         let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
-        let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+        let sub_act = self.act_filter.clone();
         let stats = compute_deck_stats(
             &deck,
             hp,
             max_hp,
-            act,
+            &sub_act,
             &self.encounters,
             &self.monsters,
             rng,
@@ -351,13 +356,12 @@ impl App {
         });
         let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
         let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
-        let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
             hp,
             max_hp,
-            act,
+            &self.act_filter,
             &self.encounters,
             &self.monsters,
             rng,
@@ -486,12 +490,18 @@ mod tests {
     fn act_filter_keys_change_filter() {
         let mut app = empty_app();
         let mut rng = seeded_rng();
-        app.handle_event(make_key(KeyCode::Char('2')), &mut rng);
-        assert_eq!(app.act_filter, "2");
+        app.handle_event(make_key(KeyCode::Char('u')), &mut rng);
+        assert_eq!(app.act_filter, "underdocks");
+        app.handle_event(make_key(KeyCode::Char('h')), &mut rng);
+        assert_eq!(app.act_filter, "hive");
+        app.handle_event(make_key(KeyCode::Char('g')), &mut rng);
+        assert_eq!(app.act_filter, "glory");
         app.handle_event(make_key(KeyCode::Char('b')), &mut rng);
         assert_eq!(app.act_filter, "boss");
         app.handle_event(make_key(KeyCode::Char('a')), &mut rng);
         assert_eq!(app.act_filter, "all");
+        app.handle_event(make_key(KeyCode::Char('o')), &mut rng);
+        assert_eq!(app.act_filter, "overgrowth");
     }
 
     #[test]
@@ -500,9 +510,9 @@ mod tests {
         let enc = SpireApiEncounter {
             id: "test_enc".into(),
             name: "Test Fight".into(),
-            room_type: Some("normal".into()),
+            room_type: Some("Monster".into()),
             is_weak: Some(false),
-            act: Some("1".into()),
+            act: Some("Act 1 - Overgrowth".into()),
             tags: vec![],
             monsters: vec![ApiEncounterMonster {
                 id: "cultist".into(),
@@ -512,7 +522,7 @@ mod tests {
         };
         let mut app = App::new(vec![enc], vec![]);
         let mut rng = seeded_rng();
-        // Act filter is "1", encounter is act 1 → should be in list
+        // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
         app.handle_event(make_key(KeyCode::Enter), &mut rng);
         assert_eq!(app.mode, AppMode::CombatAdvice);
@@ -557,9 +567,9 @@ mod tests {
         let make_enc = |id: &str| SpireApiEncounter {
             id: id.into(),
             name: id.into(),
-            room_type: None,
+            room_type: Some("Monster".into()),
             is_weak: None,
-            act: Some("1".into()),
+            act: Some("Act 1 - Overgrowth".into()),
             tags: vec![],
             monsters: vec![],
             loss_text: None,

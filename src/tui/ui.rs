@@ -422,8 +422,8 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
 
         if s.encounter_count > 0 {
             let panel_label = format!(
-                "  Act {} panel ({} encounters × {} sims = {} samples):",
-                s.act,
+                "  {} panel ({} encounters × {} sims = {} samples):",
+                s.sub_act,
                 s.encounter_count,
                 s.playout_count / s.encounter_count as u32,
                 s.playout_count,
@@ -540,8 +540,15 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     frame.render_widget(title, rows[0]);
 
-    // Act filter chips
-    let acts = [("1", "Act 1"), ("2", "Act 2"), ("3", "Act 3"), ("boss", "Boss"), ("all", "All")];
+    // Sub-act filter chips
+    let acts = [
+        ("overgrowth", "Overgrowth [o]"),
+        ("underdocks", "Underdocks [u]"),
+        ("hive", "Hive [h]"),
+        ("glory", "Glory [g]"),
+        ("boss", "Boss [b]"),
+        ("all", "All [a]"),
+    ];
     let filter_spans: Vec<Span<'static>> = acts
         .iter()
         .flat_map(|(key, label)| {

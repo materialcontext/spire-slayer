@@ -34,7 +34,7 @@ pub struct DeckStats {
     pub survival_rate: f32,
     pub mean_hp_loss: f32,
     // Context
-    pub act: u8,
+    pub sub_act: String,
     pub encounter_count: usize,
     pub playout_count: u32,
 }
@@ -49,7 +49,7 @@ pub fn compute_deck_stats(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
-    act: u8,
+    sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     rng: &mut impl Rng,
@@ -63,15 +63,14 @@ pub fn compute_deck_stats(
     let attack_fraction = attack_ratio(deck);
     let block_card_count = deck.iter().filter(|c| c.base_block() > 0).count();
     let synergy_axes = synergy_score(deck);
-    let heuristic_score = deck_score(deck, act);
+    let heuristic_score = deck_score(deck, 1);
 
-    let act_str = act.to_string();
     let pool: Vec<&SpireApiEncounter> = all_encounters
         .iter()
         .filter(|e| {
             let a = e.act.as_deref().map(normalize_act).unwrap_or("other");
-            a == act_str.as_str()
-                && e.room_type.as_deref().map(|rt| rt != "boss").unwrap_or(true)
+            a == sub_act
+                && e.room_type.as_deref().map(|rt| rt != "Boss").unwrap_or(true)
         })
         .collect();
 
@@ -95,7 +94,7 @@ pub fn compute_deck_stats(
             kill_rate: 0.0,
             survival_rate: 0.0,
             mean_hp_loss: 0.0,
-            act,
+            sub_act: sub_act.to_string(),
             encounter_count: 0,
             playout_count: 0,
         };
@@ -150,7 +149,7 @@ pub fn compute_deck_stats(
         kill_rate: kills as f32 / f,
         survival_rate: survivals as f32 / f,
         mean_hp_loss: hp_losses.iter().sum::<f32>() / f,
-        act,
+        sub_act: sub_act.to_string(),
         encounter_count: sampled.len(),
         playout_count: total_playouts,
     }
@@ -198,7 +197,7 @@ mod tests {
     fn intrinsics_no_encounters() {
         let mut rng = StdRng::seed_from_u64(7);
         let deck = ironclad::starter_deck();
-        let stats = compute_deck_stats(&deck, 80, 80, 1, &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &mut rng);
         assert_eq!(stats.deck_size, 10);
         assert!((stats.cycle_turns - 2.0).abs() < 0.01);
         assert_eq!(stats.encounter_count, 0);
@@ -221,7 +220,7 @@ mod tests {
     fn block_card_count_correct() {
         let mut rng = StdRng::seed_from_u64(8);
         let deck = ironclad::starter_deck(); // 4× Defend
-        let stats = compute_deck_stats(&deck, 80, 80, 1, &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &mut rng);
         assert_eq!(stats.block_card_count, 4);
     }
 }
