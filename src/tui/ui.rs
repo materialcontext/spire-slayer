@@ -314,30 +314,55 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(2), Constraint::Min(6), Constraint::Length(2)])
         .split(area);
 
-    let title = Paragraph::new(" CARD PICK — Choose a card to add to your deck")
+    let title = Paragraph::new(" CARD PICK — Simulator-backed reward evaluation")
         .block(Block::default().borders(Borders::BOTTOM))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     frame.render_widget(title, rows[0]);
 
-    let run = app.run.as_ref();
-    let _act = run.map(|r| r.act).unwrap_or(1);
-
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, advice) in app.card_advice.iter().enumerate() {
-        let selected = i == app.selected_row;
+    for (rank, advice) in app.card_advice.iter().enumerate() {
+        let selected = rank == app.selected_row;
         let prefix = if selected { "> " } else { "  " };
-        let style = if selected {
+
+        let name = if advice.card_index == usize::MAX {
+            "— skip reward —".to_string()
+        } else {
+            format!("#{}", advice.card_index + 1)
+        };
+
+        let delta_color = if advice.delta_win_rate > 0.02 {
+            Color::Green
+        } else if advice.delta_win_rate < -0.02 {
+            Color::Red
+        } else {
+            Color::Yellow
+        };
+
+        let base_style = if selected {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
+
+        // Card name / label line
         lines.push(Line::from(Span::styled(
-            format!(
-                "{}[{}] score={:.2}  {}",
-                prefix, i + 1, advice.score, advice.reason
-            ),
-            style,
+            format!("{}{}", prefix, name),
+            base_style,
         )));
+
+        // Stats line with delta coloring
+        if advice.win_rate > 0.0 || advice.card_index == usize::MAX {
+            lines.push(Line::from(Span::styled(
+                format!("     {}", advice.reason),
+                if selected { base_style } else { Style::default().fg(delta_color) },
+            )));
+        } else {
+            // Heuristic fallback
+            lines.push(Line::from(Span::styled(
+                format!("     score={:.2}  {}", advice.score, advice.reason),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::raw("  No cards offered")));
@@ -345,11 +370,11 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .block(Block::default().title(" OFFERED CARDS ").borders(Borders::ALL)),
+            .block(Block::default().title(" OFFERED CARDS (ranked by sim) ").borders(Borders::ALL)),
         rows[1],
     );
 
-    let hint = Paragraph::new("  [j/k] navigate  [Enter] pick  [q] skip reward")
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] pick  [q] back")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, rows[2]);
 }

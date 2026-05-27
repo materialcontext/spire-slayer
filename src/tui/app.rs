@@ -9,7 +9,7 @@ use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
 use crate::domain::run::RunState;
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
-use crate::metrics::card_pick::{pick_score, CardAdvice};
+use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -235,6 +235,11 @@ impl App {
                 self.play_advice = None;
                 self.status_message.clear();
             }
+            KeyCode::Char('p') => {
+                // Simulate a card reward pick with 3 sample cards
+                let offered = sample_card_offer(rng);
+                self.load_pick(offered, rng);
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref combat) = self.combat {
                     if self.selected_row + 1 < combat.hand.len() {
@@ -295,30 +300,35 @@ impl App {
         self.mode = AppMode::CombatAdvice;
     }
 
-    pub fn load_pick(&mut self, offered: Vec<Card>) {
-        let _deck = self.run.as_ref().map(|r| r.deck.as_slice()).unwrap_or(&[]);
+    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng) {
+        let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
+            crate::domain::catalog::ironclad::starter_deck()
+        });
+        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
+        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
         let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
-        self.card_advice = pick_score(
+        self.card_advice = sim_pick_score(
             &offered,
-            &crate::domain::run::RunState {
-                class: self
-                    .run
-                    .as_ref()
-                    .map(|r| r.class.clone())
-                    .unwrap_or(crate::domain::run::PlayerClass::Ironclad),
-                floor: self.run.as_ref().map(|r| r.floor).unwrap_or(0),
-                act,
-                hp: self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80),
-                max_hp: self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80),
-                gold: self.run.as_ref().map(|r| r.gold).unwrap_or(0),
-                deck: offered.clone(),
-                relics: vec![],
-                potions: vec![],
-            },
+            &deck,
+            hp,
+            max_hp,
+            act,
+            &self.encounters,
+            &self.monsters,
+            rng,
         );
         self.selected_row = 0;
         self.mode = AppMode::CardPick;
     }
+}
+
+/// Return 3 random Ironclad cards as a simulated post-combat reward.
+fn sample_card_offer(rng: &mut impl rand::Rng) -> Vec<Card> {
+    use rand::seq::SliceRandom;
+    let mut pool = crate::domain::catalog::ironclad::all_cards();
+    pool.shuffle(rng);
+    pool.truncate(3);
+    pool
 }
 
 pub fn run_app() -> anyhow::Result<()> {
