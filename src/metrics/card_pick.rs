@@ -3,7 +3,7 @@ use rand::seq::SliceRandom;
 
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
 use crate::domain::card::{Card, Rarity};
-use crate::domain::encounter::{encounter_to_combat, normalize_act};
+use crate::domain::encounter::{encounter_to_combat_with_deck, normalize_act};
 use crate::domain::run::RunState;
 use crate::sim::playout::playout;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -36,30 +36,6 @@ struct GauntletResult {
     hp_loss_p50: f32,
 }
 
-/// Build a combat state for an encounter, replacing the player/deck.
-fn build_combat_with_deck(
-    deck: &[Card],
-    hp: u32,
-    max_hp: u32,
-    enc: &SpireApiEncounter,
-    all_monsters: &[SpireApiMonster],
-    rng: &mut impl Rng,
-) -> crate::domain::combat::CombatState {
-    let mut state = encounter_to_combat(enc, all_monsters);
-    state.player.hp = hp.max(1);
-    state.player.max_hp = max_hp;
-    state.player.block = 0;
-    state.player.buffs.clear();
-    let mut draw = deck.to_vec();
-    draw.shuffle(rng);
-    let hand: Vec<_> = draw.drain(..5.min(draw.len())).collect();
-    state.hand = hand;
-    state.draw_pile = draw;
-    state.discard_pile.clear();
-    state.energy = state.energy_max;
-    state
-}
-
 /// Run `n` chained 2-encounter playouts, returning aggregate stats.
 fn eval_gauntlet(
     deck: &[Card],
@@ -75,14 +51,14 @@ fn eval_gauntlet(
     let mut hp_deltas: Vec<i32> = Vec::with_capacity(n as usize);
 
     for _ in 0..n {
-        let s1 = build_combat_with_deck(deck, hp, max_hp, enc1, all_monsters, rng);
+        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, rng);
         let r1 = playout(s1, &GreedyDamagePolicy, rng);
         if !r1.player_alive {
             hp_deltas.push(-(hp as i32));
             continue;
         }
         let hp2 = r1.final_state.player.hp;
-        let s2 = build_combat_with_deck(deck, hp2, max_hp, enc2, all_monsters, rng);
+        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, rng);
         let r2 = playout(s2, &GreedyDamagePolicy, rng);
         hp_deltas.push(r1.player_hp_delta + r2.player_hp_delta);
         if r2.player_alive {

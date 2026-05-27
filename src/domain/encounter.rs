@@ -1,5 +1,9 @@
+use rand::Rng;
+use rand::seq::SliceRandom;
+
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
 use crate::domain::ai::build_ai_script;
+use crate::domain::card::Card;
 use crate::domain::catalog::ironclad;
 use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
 use crate::domain::effect::BuffType;
@@ -152,6 +156,33 @@ pub fn encounter_to_combat(
     let mut state = CombatState::new(player, enemies, deck);
     let hand: Vec<_> = state.draw_pile.drain(..5.min(state.draw_pile.len())).collect();
     state.hand = hand;
+    state
+}
+
+/// Like `encounter_to_combat` but uses the caller-supplied deck and HP.
+///
+/// Shuffles the deck and deals a starting hand of 5. Used by the card-pick
+/// evaluator and the deck dashboard to run simulations with arbitrary decks.
+pub fn encounter_to_combat_with_deck(
+    enc: &SpireApiEncounter,
+    all_monsters: &[SpireApiMonster],
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    rng: &mut impl Rng,
+) -> CombatState {
+    let mut state = encounter_to_combat(enc, all_monsters);
+    state.player.hp = hp.max(1);
+    state.player.max_hp = max_hp;
+    state.player.block = 0;
+    state.player.buffs.clear();
+    let mut draw = deck.to_vec();
+    draw.shuffle(rng);
+    let hand: Vec<_> = draw.drain(..5.min(draw.len())).collect();
+    state.hand = hand;
+    state.draw_pile = draw;
+    state.discard_pile.clear();
+    state.energy = state.energy_max;
     state
 }
 

@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::metrics::combat::threat_score;
+use crate::metrics::deck_dash::dist_bar;
 use crate::tui::app::{App, AppMode};
 use crate::tui::widgets::{advice_spans, enemy_row, intent_label_owned};
 
@@ -18,6 +19,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::ManualInput => render_input(frame, app, area),
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
         AppMode::CardPick => render_card_pick(frame, app, area),
+        AppMode::DeckDash => render_deck_dash(frame, app, area),
         AppMode::Exiting => {}
     }
 }
@@ -225,7 +227,7 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let line = Line::from(vec![
-        Span::raw("  [s]im  [e]dit  [n]ew fight  [q]uit"),
+        Span::raw("  [s]im  [d]eck  [p]ick  [e]dit  [n]ew fight  [q]uit"),
         Span::raw(status),
         Span::raw("          Threat: "),
         Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
@@ -379,6 +381,149 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[2]);
 }
 
+fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // title
+            Constraint::Min(12),   // stats body
+            Constraint::Length(1), // hint
+        ])
+        .split(area);
+
+    let title = Paragraph::new(" DECK DASHBOARD")
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(ref s) = app.deck_stats {
+        // ── Deck properties ────────────────────────────────────────────────
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  Deck: {} cards   Cycle: {:.1}t   Cost: {:.1}/e   Attacks: {:.0}%   Block cards: {}",
+                s.deck_size,
+                s.cycle_turns,
+                s.mean_energy_cost,
+                s.attack_fraction * 100.0,
+                s.block_card_count,
+            ),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  Synergy axes: {}   Quality score: {:.2}",
+                s.synergy_axes, s.heuristic_score
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::raw("")));
+
+        if s.encounter_count > 0 {
+            let panel_label = format!(
+                "  Act {} panel ({} encounters × {} sims = {} samples):",
+                s.act,
+                s.encounter_count,
+                s.playout_count / s.encounter_count as u32,
+                s.playout_count,
+            );
+            lines.push(Line::from(Span::styled(
+                panel_label,
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::raw("")));
+
+            // ── DPT ───────────────────────────────────────────────────────
+            lines.push(Line::from(Span::styled(
+                "  Damage Per Turn:",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )));
+            let dbar = dist_bar(s.dpt_p10, s.dpt_p50, s.dpt_p90);
+            let dpt_color = if s.dpt_p50 >= 10.0 {
+                Color::Green
+            } else if s.dpt_p50 >= 6.0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
+                    s.dpt_p10, s.dpt_p50, s.dpt_p90, s.mean_dpt
+                ),
+                Style::default().fg(dpt_color),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("    [{}]  0──────────{:.0}", dbar, s.dpt_p90),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::raw("")));
+
+            // ── BPT ───────────────────────────────────────────────────────
+            lines.push(Line::from(Span::styled(
+                "  Block Per Turn:",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            let bbar = dist_bar(s.bpt_p10, s.bpt_p50, s.bpt_p90);
+            let bpt_color = if s.bpt_p50 >= 8.0 {
+                Color::Green
+            } else if s.bpt_p50 >= 4.0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
+                    s.bpt_p10, s.bpt_p50, s.bpt_p90, s.mean_bpt
+                ),
+                Style::default().fg(bpt_color),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("    [{}]  0──────────{:.0}", bbar, s.bpt_p90),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::raw("")));
+
+            // ── Outcomes ──────────────────────────────────────────────────
+            let outcome_color = if s.kill_rate >= 0.7 {
+                Color::Green
+            } else if s.kill_rate >= 0.4 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  Kill rate: {:.0}%   Survival: {:.0}%   Avg HP loss: {:.0}",
+                    s.kill_rate * 100.0,
+                    s.survival_rate * 100.0,
+                    s.mean_hp_loss
+                ),
+                Style::default().fg(outcome_color),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  (No encounter data — load seed files to enable sim stats)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::raw("  No deck stats computed yet.")));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [d/q] close dashboard")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+}
+
 fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -524,6 +669,17 @@ mod tests {
         app.load_combat(default_combat_state());
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         app.run_simulation(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_deck_dash_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        app.load_combat(default_combat_state());
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        app.compute_deck_dash(&mut rng);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
