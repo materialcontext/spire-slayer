@@ -1,4 +1,5 @@
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
+use crate::domain::ai::build_ai_script;
 use crate::domain::catalog::ironclad;
 use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
 use crate::domain::effect::BuffType;
@@ -89,6 +90,18 @@ pub fn monster_to_enemy(monster: &SpireApiMonster) -> EnemyState {
     for power in &monster.innate_powers {
         if let Some(buff) = map_power_id(&power.power_id) {
             enemy.buffs.insert(buff, power.amount.unwrap_or(0) as i32);
+        }
+    }
+
+    // Wire up the AI move script if the monster has one
+    if let Some(script) = build_ai_script(monster) {
+        let initial_move_id = script.initial_move_id().map(String::from);
+        let initial_state_id = script.initial_state_id.clone();
+        enemy.ai_script = Some(script);
+        enemy.ai_runtime.current_state_id = initial_state_id;
+        if let Some(mid) = initial_move_id {
+            enemy.ai_runtime.last_move_id = Some(mid.clone());
+            enemy.ai_runtime.used_moves.insert(mid);
         }
     }
 
@@ -218,6 +231,7 @@ mod tests {
                 powers: vec![],
             }],
             innate_powers: vec![],
+            attack_pattern: None,
         };
         let enemy = monster_to_enemy(&monster);
         assert_eq!(enemy.name, "Cultist");
@@ -250,6 +264,7 @@ mod tests {
                 powers: vec![],
             }],
             innate_powers: vec![],
+            attack_pattern: None,
         };
         let encounter = SpireApiEncounter {
             id: "jaw_worm_fight".into(),

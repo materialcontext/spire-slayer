@@ -11,6 +11,8 @@ use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{pick_score, CardAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
+use crate::sim::playout::playout_n;
+use crate::sim::policy::GreedyDamagePolicy;
 use crate::tui::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,7 +278,11 @@ impl App {
             self.status_message = "No combat state loaded".to_string();
             return;
         };
-        let advice = best_play_sequence(combat, 500, rng);
+        let mut advice = best_play_sequence(combat, 500, rng);
+        let stats = playout_n(combat, &GreedyDamagePolicy, 50, rng);
+        advice.hp_loss_p10 = stats.hp_loss_p10;
+        advice.hp_loss_p50 = stats.hp_loss_p50;
+        advice.hp_loss_p90 = stats.hp_loss_p90;
         self.status_message = format!("{} simulations run", advice.simulation_count);
         self.play_advice = Some(advice);
         self.mode = AppMode::CombatAdvice;

@@ -119,6 +119,38 @@ pub struct SpireApiMonster {
     pub moves: Vec<ApiMonsterMove>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub innate_powers: Vec<ApiInnatePower>,
+    pub attack_pattern: Option<SpireApiAttackPattern>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAttackPattern {
+    #[serde(rename = "type")]
+    pub pattern_type: Option<String>,
+    pub initial_move: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub states: Vec<SpireApiAiState>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAiState {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub state_type: Option<String>,
+    pub move_id: Option<String>,
+    pub must_perform_once: Option<bool>,
+    pub next: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub branches: Vec<SpireApiAiBranch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAiBranch {
+    pub move_id: Option<String>,
+    pub weight: Option<f32>,
+    pub repeat: Option<String>,
+    pub max_times: Option<i32>,
+    pub condition: Option<String>,
 }
 
 // ── Encounter API ────────────────────────────────────────────────────────────

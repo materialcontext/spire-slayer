@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use crate::domain::ai::{AiRuntime, EnemyAiScript};
 use crate::domain::card::Card;
 use crate::domain::effect::BuffType;
 
@@ -57,6 +58,8 @@ pub struct EnemyState {
     pub block: u32,
     pub intent: Intent,
     pub buffs: Buffs,
+    pub ai_script: Option<EnemyAiScript>,
+    pub ai_runtime: AiRuntime,
 }
 
 impl EnemyState {
@@ -68,6 +71,8 @@ impl EnemyState {
             block: 0,
             intent,
             buffs: HashMap::new(),
+            ai_script: None,
+            ai_runtime: AiRuntime::default(),
         }
     }
 
