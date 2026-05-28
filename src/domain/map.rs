@@ -3,12 +3,18 @@
 //! Algorithm source:
 //! https://www.reddit.com/r/slaythespire/comments/ndqweh/
 //!
-//! Key rules (STS1 baseline, assumed unchanged in STS2):
-//!   - 7 columns × 15 rows, fixed for all acts
-//!   - 6 paths generated bottom-to-top; no crossing edges; first 2 starts differ
-//!   - Floor-0→1 convergent edges are trimmed
-//!   - Floor 1 = monsters, floor 9 = treasure, floor 15 = rest (pre-assigned, 1-indexed)
-//!   - Remaining rooms filled from a shuffled type bucket with adjacency constraints
+//! Full act structure (game floor numbers, 1-indexed):
+//!   - Floor  0 : Ancient event  — always present, outside this grid
+//!   - Floors 1–15 : The 15-floor map grid modelled here (array indices 0–14)
+//!   - Floor 16 : Boss fight     — always present, outside this grid
+//!
+//! Grid rules:
+//!   - 7 columns × 15 rows; 6 paths; no crossing edges; first 2 starts differ
+//!   - Floor-0→1 convergent edges trimmed
+//!   - Floor  1 (idx  0): always monsters
+//!   - Floor  9 (idx  8): always treasure
+//!   - Floor 14 (idx 13): Rest banned (floor 15 is already guaranteed rest)
+//!   - Floor 15 (idx 14): always rest
 
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -18,9 +24,9 @@ use serde::{Deserialize, Serialize};
 pub const COLS: usize = 7;
 pub const ROWS: usize = 15;
 const PATHS: usize = 6;
-const TREASURE_FLOOR: usize = 8;     // floor 9 (1-indexed), same as STS1
-const MIN_SPECIAL_FLOOR: usize = 5;  // Elite/Rest locked below floor 6 (1-indexed)
-const PENULTIMATE_REST_FLOOR: usize = ROWS - 2; // floor 14 (1-indexed): guaranteed rest in STS2
+const TREASURE_FLOOR: usize = 8;    // array idx 8  = game floor 9
+const MIN_SPECIAL_FLOOR: usize = 5; // Elite/Rest locked below array idx 5 = game floor 6
+const NO_REST_FLOOR: usize = ROWS - 2; // array idx 13 = game floor 14: Rest banned here
 
 const PCT_SHOP: f64 = 0.05;
 const PCT_REST: f64 = 0.12;
@@ -131,9 +137,8 @@ impl ActMap {
             // Floor 1 is always monsters; assign before building the bucket so no
             // bucket type can ever reach floor 0.
             room_types[0][col] = if is_conn(0, col) { Some(RoomType::Monster) } else { None };
-            if is_conn(TREASURE_FLOOR, col)         { room_types[TREASURE_FLOOR][col]         = Some(RoomType::Treasure); }
-            if is_conn(PENULTIMATE_REST_FLOOR, col) { room_types[PENULTIMATE_REST_FLOOR][col] = Some(RoomType::Rest);     }
-            if is_conn(rows - 1, col)               { room_types[rows - 1][col]               = Some(RoomType::Rest);     }
+            if is_conn(TREASURE_FLOOR, col) { room_types[TREASURE_FLOOR][col] = Some(RoomType::Treasure); }
+            if is_conn(rows - 1, col)       { room_types[rows - 1][col]       = Some(RoomType::Rest);     }
         }
 
         // ── Phase 5: Build type bucket ────────────────────────────────────────
@@ -282,8 +287,12 @@ fn is_compatible(
     prev_of: &[Vec<Vec<usize>>],
     _next_of: &[Vec<Vec<usize>>],
 ) -> bool {
-    // Elite and Rest are locked out of early floors (below floor 6, 1-indexed).
+    // Elite and Rest are locked out of early floors (below game floor 6).
     if matches!(rt, RoomType::Elite | RoomType::Rest) && floor < MIN_SPECIAL_FLOOR {
+        return false;
+    }
+    // Rest is banned on game floor 14 (array idx 13) — floor 15 is already guaranteed rest.
+    if rt == RoomType::Rest && floor == NO_REST_FLOOR {
         return false;
     }
 
@@ -405,13 +414,12 @@ mod tests {
     }
 
     #[test]
-    fn penultimate_floor_is_rest() {
+    fn no_rest_on_floor_14() {
+        // Game floor 14 (array idx 13) is banned from rest — floor 15 is already guaranteed rest.
         let map = ActMap::generate(42, 0);
         for col in 0..COLS {
-            if map.is_connected(PENULTIMATE_REST_FLOOR, col) {
-                assert_eq!(map.room_type(PENULTIMATE_REST_FLOOR, col), Some(RoomType::Rest),
-                    "floor {PENULTIMATE_REST_FLOOR} should be guaranteed rest");
-            }
+            assert_ne!(map.room_type(NO_REST_FLOOR, col), Some(RoomType::Rest),
+                "Rest found at array idx {NO_REST_FLOOR} (game floor 14)");
         }
     }
 

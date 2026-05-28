@@ -52,6 +52,7 @@ impl Potion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub class: PlayerClass,
+    /// Game floor number (0-indexed): 0 = ancient event, 1–15 = map grid, 16 = boss.
     pub floor: u8,
     pub act: u8,
     pub hp: u32,
