@@ -128,19 +128,22 @@ impl ActMap {
         // ── Phase 4: Pre-assign fixed floors ─────────────────────────────────
         let mut room_types: Vec<Vec<Option<RoomType>>> = vec![vec![None; COLS]; rows];
         for col in 0..COLS {
-            if is_conn(0, col)                      { room_types[0][col]                      = Some(RoomType::Monster);  }
+            // Floor 1 is always monsters; assign before building the bucket so no
+            // bucket type can ever reach floor 0.
+            room_types[0][col] = if is_conn(0, col) { Some(RoomType::Monster) } else { None };
             if is_conn(TREASURE_FLOOR, col)         { room_types[TREASURE_FLOOR][col]         = Some(RoomType::Treasure); }
             if is_conn(PENULTIMATE_REST_FLOOR, col) { room_types[PENULTIMATE_REST_FLOOR][col] = Some(RoomType::Rest);     }
             if is_conn(rows - 1, col)               { room_types[rows - 1][col]               = Some(RoomType::Rest);     }
         }
 
         // ── Phase 5: Build type bucket ────────────────────────────────────────
-        let connected_count: usize = (0..rows)
+        // Count connected rooms across floors 1..rows (floor 0 is pre-assigned Monster).
+        let connected_count: usize = (1..rows)
             .flat_map(|f| (0..COLS).map(move |c| (f, c)))
             .filter(|&(f, c)| is_conn(f, c))
             .count();
 
-        let pre_assigned: usize = (0..rows)
+        let pre_assigned: usize = (1..rows)
             .flat_map(|f| (0..COLS).map(move |c| (f, c)))
             .filter(|&(f, c)| room_types[f][c].is_some())
             .count();
@@ -159,7 +162,8 @@ impl ActMap {
         bucket.shuffle(&mut rng);
 
         // ── Phase 6: Assign types with constraints ────────────────────────────
-        let candidates: Vec<(usize, usize)> = (0..rows)
+        // Skip floor 0 — it's unconditionally monsters and not part of the bucket.
+        let candidates: Vec<(usize, usize)> = (1..rows)
             .flat_map(|f| (0..COLS).map(move |c| (f, c)))
             .filter(|&(f, c)| is_conn(f, c) && room_types[f][c].is_none())
             .collect();
@@ -177,7 +181,7 @@ impl ActMap {
         }
 
         // ── Phase 7: Fill leftover connected typeless rooms with monsters ─────
-        for floor in 0..rows {
+        for floor in 1..rows {
             for col in 0..COLS {
                 if is_conn(floor, col) && room_types[floor][col].is_none() {
                     room_types[floor][col] = Some(RoomType::Monster);
