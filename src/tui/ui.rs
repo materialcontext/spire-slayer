@@ -28,6 +28,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::TreasureRoom => render_treasure_room(frame, app, area),
         AppMode::Shop         => render_shop(frame, app, area),
         AppMode::AncientBoon  => render_ancient_boon(frame, app, area),
+        AppMode::Victory      => render_victory(frame, app, area),
         AppMode::Exiting      => {}
     }
 }
@@ -1043,7 +1044,7 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
+            Constraint::Length(2), // header + run stats
             Constraint::Min(0),    // map grid
             Constraint::Length(2), // choices bar
             Constraint::Length(1), // status
@@ -1056,13 +1057,20 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
         .and_then(|r| r.map_pos)
         .map(|p| format!("Floor {}/15", p.floor + 1))
         .unwrap_or_else(|| "Floor —/15".to_string());
-    let header = format!(
-        " MAP — {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
+    let header_line1 = format!(
+        " MAP \u{2014} {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
         capitalize(sub_act), floor_label,
     );
+    let run_stats_line = app.run.as_ref().map(|r| {
+        let relic_names: Vec<&str> = r.relics.iter().map(|rel| rel.name.as_str()).collect();
+        let relics_str = if relic_names.is_empty() { "none".to_string() } else { relic_names.join(", ") };
+        format!(" HP {}/{}  Gold {}  | {}", r.hp, r.max_hp, r.gold, relics_str)
+    }).unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(header)
-            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Paragraph::new(vec![
+            Line::from(Span::styled(header_line1, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(run_stats_line, Style::default().fg(Color::DarkGray))),
+        ]),
         chunks[0],
     );
 
@@ -1562,6 +1570,62 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+fn render_victory(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new("  \u{2605}  VICTORY \u{2014} The Spire Has Been Conquered!  \u{2605}")
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw("")));
+    if let Some(run) = &app.run {
+        lines.push(Line::from(Span::styled(
+            format!("  Class:    {}", run.class),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Final HP: {}/{}", run.hp, run.max_hp),
+            Style::default().fg(Color::LightGreen),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Gold:     {}", run.gold),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Deck:     {} cards", run.deck.len()),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "  Relics:".to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        for relic in &run.relics {
+            lines.push(Line::from(Span::styled(
+                format!("    \u{2022} {}", relic.name),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+
+    frame.render_widget(
+        Paragraph::new("  [n/Enter] New Run  [q] Quit"),
+        rows[2],
+    );
+}
+
 fn render_ancient_boon(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1827,6 +1891,20 @@ mod tests {
         app.shop_cards = crate::domain::catalog::ironclad::starter_deck().into_iter().take(3).collect();
         app.shop_relics = Vec::new();
         app.shop_cursor = 0;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_victory_does_not_panic() {
+        use crate::domain::run::{PlayerClass, RunState, starting_relics};
+        use crate::domain::catalog::ironclad;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let deck = ironclad::starter_deck();
+        let relic = starting_relics::ironclad();
+        let run = RunState::new(PlayerClass::Ironclad, 75, 80, deck, relic);
+        app.run = Some(run);
+        app.mode = crate::tui::app::AppMode::Victory;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 

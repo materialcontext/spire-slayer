@@ -37,6 +37,7 @@ pub enum AppMode {
     DeckDash,
     MapEv,
     AncientBoon,
+    Victory,
     ManualInput,
     Simulating,
     Exiting,
@@ -244,6 +245,7 @@ impl App {
             AppMode::DeckDash       => self.handle_key_deck_dash(key),
             AppMode::MapEv          => self.handle_key_map_ev(key),
             AppMode::AncientBoon    => self.handle_key_ancient_boon(key, rng),
+            AppMode::Victory        => self.handle_key_victory(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -1293,8 +1295,7 @@ impl App {
         let future = crate::metrics::run_ev::acts_after(&current_sub_act);
         let Some(&(next_sub_act, _)) = future.first() else {
             // No more acts — victory
-            self.status_message = "Victory! The Spire has been conquered.".to_string();
-            self.open_map_view(rng);
+            self.open_victory_screen();
             return;
         };
 
@@ -1319,6 +1320,32 @@ impl App {
         self.run_ev = None;
         self.path_choices.clear();
         self.open_ancient_boon(next_sub_act, true, rng);
+    }
+
+    pub fn open_victory_screen(&mut self) {
+        self.status_message = "You have conquered the Spire!".to_string();
+        self.mode = AppMode::Victory;
+    }
+
+    fn handle_key_victory(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => self.mode = AppMode::Exiting,
+            KeyCode::Char('n') | KeyCode::Enter => {
+                self.run = None;
+                self.map_ev = None;
+                self.run_ev = None;
+                self.path_choices.clear();
+                self.ancient_had_darv_act2 = false;
+                self.selected_row = 0;
+                self.mode = if self.characters.is_empty() {
+                    AppMode::EncounterPick
+                } else {
+                    AppMode::CharacterPick
+                };
+                self.status_message = "Choose your character.".to_string();
+            }
+            _ => {}
+        }
     }
 }
 
