@@ -108,6 +108,21 @@ impl RunState {
         self.map_pos = None;
     }
 
+    /// Heal at a rest site: restore 30% max HP (floored), capped at max.
+    pub fn heal(&mut self) {
+        let amount = ((self.max_hp as f32) * 0.30).floor() as u32;
+        self.hp = (self.hp + amount).min(self.max_hp);
+    }
+
+    /// Smith at a rest site: upgrade the card at `deck_idx`.
+    /// Returns `false` if the index is out of range or the card is already upgraded.
+    pub fn smith(&mut self, deck_idx: usize) -> bool {
+        let Some(card) = self.deck.get_mut(deck_idx) else { return false; };
+        if card.upgraded { return false; }
+        card.upgraded = true;
+        true
+    }
+
     /// Move to a new node, returning `false` if the move is illegal.
     pub fn move_to(&mut self, col: usize) -> bool {
         let Some(ref map) = self.map else { return false; };

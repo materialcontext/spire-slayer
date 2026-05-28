@@ -13,6 +13,7 @@ use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::map_ev::{compute_map_ev, MapEvData};
+use crate::metrics::rest::{advise_rest, RestAction, RestAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -23,6 +24,7 @@ pub enum AppMode {
     CharacterPick,
     EncounterPick,
     MapView,
+    RestSite,
     CombatAdvice,
     CardPick,
     DeckDash,
@@ -53,6 +55,9 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     /// Cursor index into the available map choices at the current position.
     pub map_cursor: usize,
+    /// Rest site recommendation and current selection (0=Heal, 1=Smith).
+    pub rest_advice: Option<RestAdvice>,
+    pub rest_cursor: usize,
 }
 
 impl App {
@@ -86,6 +91,8 @@ impl App {
             act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
             map_cursor: 0,
+            rest_advice: None,
+            rest_cursor: 0,
         };
         app.refresh_filter();
         app
@@ -133,6 +140,7 @@ impl App {
             AppMode::CharacterPick => self.handle_key_character(key, rng),
             AppMode::EncounterPick => self.handle_key_encounter(key, rng),
             AppMode::MapView       => self.handle_key_map_view(key),
+            AppMode::RestSite      => self.handle_key_rest_site(key),
             AppMode::ManualInput   => self.handle_key_input(key),
             AppMode::CombatAdvice  => self.handle_key_combat(key, rng),
             AppMode::CardPick      => self.handle_key_pick(key),
@@ -533,23 +541,87 @@ impl App {
         }
     }
 
-    /// Move to the currently cursor-selected map node.
+    /// Move to the currently cursor-selected map node and resolve the room.
     fn select_map_node(&mut self) {
+        use crate::domain::map::RoomType;
         let choices = self.map_choices();
         let Some(&col) = choices.get(self.map_cursor) else { return; };
         let Some(ref mut run) = self.run else { return; };
         run.move_to(col as usize);
         self.map_cursor = 0;
 
-        // TODO: in room-resolution phase, branch on room type here.
-        let msg = run.map_pos.and_then(|pos| {
-            run.map.as_ref().and_then(|m| {
-                m.room_type(pos.floor, pos.col).map(|rt| {
-                    format!("Floor {} — {} room", pos.floor + 1, rt.label())
-                })
-            })
-        }).unwrap_or_default();
-        self.status_message = msg;
+        let room = run.map_pos.and_then(|pos| {
+            run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
+        });
+
+        match room {
+            Some(RoomType::Rest) => self.open_rest_site(),
+            Some(RoomType::Treasure) => {
+                self.status_message = "Treasure chest — relic reward (not yet simulated)".to_string();
+            }
+            Some(rt) => {
+                self.status_message = format!("Floor {} — {}", self.run.as_ref().map(|r| r.floor).unwrap_or(0), rt.label());
+            }
+            None => {}
+        }
+    }
+
+    fn open_rest_site(&mut self) {
+        if let Some(ref run) = self.run {
+            let advice = advise_rest(run);
+            self.rest_cursor = match advice.action {
+                RestAction::Heal    => 0,
+                RestAction::Smith(_) => 1,
+            };
+            self.rest_advice = Some(advice);
+        }
+        self.mode = AppMode::RestSite;
+    }
+
+    fn handle_key_rest_site(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.rest_cursor = (self.rest_cursor + 1) % 2;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.rest_cursor = self.rest_cursor.saturating_sub(1).max(0);
+                if self.rest_cursor == 0 { self.rest_cursor = 0; }
+            }
+            KeyCode::Enter => self.confirm_rest(),
+            KeyCode::Esc => self.mode = AppMode::MapView,
+            KeyCode::Char('q') => self.mode = AppMode::Exiting,
+            _ => {}
+        }
+    }
+
+    fn confirm_rest(&mut self) {
+        let Some(ref run) = self.run else { return; };
+        let smith_idx = match self.rest_advice.as_ref().and_then(|a| {
+            if let RestAction::Smith(i) = a.action { Some(i) } else { None }
+        }) {
+            Some(i) => i,
+            None => {
+                // No smith candidate — treat as heal regardless of cursor.
+                let run = self.run.as_mut().unwrap();
+                run.heal();
+                self.status_message = format!("Healed to {} HP", run.hp);
+                self.mode = AppMode::MapView;
+                return;
+            }
+        };
+        let _ = run; // drop shared borrow before mut
+        let run = self.run.as_mut().unwrap();
+        if self.rest_cursor == 0 {
+            run.heal();
+            self.status_message = format!("Healed to {} HP", run.hp);
+        } else {
+            if run.smith(smith_idx) {
+                let name = run.deck[smith_idx].name.clone();
+                self.status_message = format!("Upgraded {}", name);
+            }
+        }
+        self.rest_advice = None;
+        self.mode = AppMode::MapView;
     }
 
     pub fn load_combat(&mut self, state: CombatState) {

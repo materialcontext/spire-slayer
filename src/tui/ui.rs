@@ -22,8 +22,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::CardPick => render_card_pick(frame, app, area),
         AppMode::DeckDash => render_deck_dash(frame, app, area),
         AppMode::MapEv   => render_map_ev(frame, app, area),
-        AppMode::MapView => render_map_view(frame, app, area),
-        AppMode::Exiting => {}
+        AppMode::MapView  => render_map_view(frame, app, area),
+        AppMode::RestSite => render_rest_site(frame, app, area),
+        AppMode::Exiting  => {}
     }
 }
 
@@ -1124,6 +1125,82 @@ fn map_rt_style(rt: Option<crate::domain::map::RoomType>) -> Style {
     }
 }
 
+fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::rest::RestAction;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(6),     // options
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    // Header
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let header = Paragraph::new(format!(" REST SITE   Floor {floor}   j/k select  Enter confirm  Esc back"))
+        .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Build option lines
+    let (hp, max_hp) = app.run.as_ref()
+        .map(|r| (r.hp, r.max_hp))
+        .unwrap_or((80, 80));
+    let heal_amount = ((max_hp as f32) * 0.30).floor() as u32;
+    let healed_hp = (hp + heal_amount).min(max_hp);
+
+    let smith_label = app.rest_advice.as_ref().and_then(|a| {
+        if let RestAction::Smith(idx) = a.action {
+            app.run.as_ref().and_then(|r| r.deck.get(idx)).map(|c| c.name.clone())
+        } else {
+            None
+        }
+    }).unwrap_or_else(|| "—".to_string());
+
+    let recommended = app.rest_advice.as_ref().map(|a| {
+        matches!(a.action, RestAction::Heal)
+    }).unwrap_or(true);
+    let reason = app.rest_advice.as_ref().map(|a| a.reason.as_str()).unwrap_or("");
+
+    let options = [
+        format!("Heal    restore {} HP ({} → {})", heal_amount, hp, healed_hp),
+        format!("Smith   upgrade {}", smith_label),
+    ];
+    let rec_idx: usize = if recommended { 0 } else { 1 };
+
+    let mut lines: Vec<Line> = options.iter().enumerate().map(|(i, label)| {
+        let is_cursor   = i == app.rest_cursor;
+        let is_rec      = i == rec_idx;
+        let rec_marker  = if is_rec { " ★" } else { "  " };
+        let prefix      = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Green)
+        } else if is_rec {
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![
+            Span::styled(format!("{prefix}{label}{rec_marker}"), style),
+        ])
+    }).collect();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  Advice: {reason}"), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let options_widget = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL).title(" Rest Site "));
+    frame.render_widget(options_widget, rows[1]);
+
+    // Status
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[2]);
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -1239,6 +1316,22 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(99);
         // Select a character so a run exists, then open the map view.
         app.select_character(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_rest_site_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::RestSite;
+        if let Some(ref run) = app.run {
+            let advice = crate::metrics::rest::advise_rest(run);
+            app.rest_cursor = if matches!(advice.action, crate::metrics::rest::RestAction::Heal) { 0 } else { 1 };
+            app.rest_advice = Some(advice);
+        }
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
