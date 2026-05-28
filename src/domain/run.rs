@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::domain::card::Card;
+use crate::domain::map::{ActMap, MapPos, sub_act_rows};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlayerClass {
@@ -60,6 +61,12 @@ pub struct RunState {
     pub relics: Vec<Relic>,
     /// Potion slots; None = empty slot.
     pub potions: Vec<Option<Potion>>,
+    /// Generated map for the current sub-act, if available.
+    pub map: Option<ActMap>,
+    /// Current node on the map (floor, col).
+    pub map_pos: Option<MapPos>,
+    /// Current sub-act name, e.g. "overgrowth".
+    pub sub_act: String,
 }
 
 impl RunState {
@@ -80,6 +87,9 @@ impl RunState {
             deck,
             relics: vec![starting_relic],
             potions: vec![None, None, None],
+            map: None,
+            map_pos: None,
+            sub_act: "overgrowth".to_string(),
         }
     }
 
@@ -89,6 +99,37 @@ impl RunState {
 
     pub fn has_relic(&self, name: &str) -> bool {
         self.relics.iter().any(|r| r.name == name)
+    }
+
+    /// Generate (or regenerate) the map for the current sub-act.
+    pub fn generate_map(&mut self, seed: u64, ascension: u8) {
+        let rows = sub_act_rows(&self.sub_act);
+        self.map = Some(ActMap::generate(seed, rows, ascension));
+        self.map_pos = None;
+    }
+
+    /// Move to a new node, returning `false` if the move is illegal.
+    pub fn move_to(&mut self, col: usize) -> bool {
+        let Some(ref map) = self.map else { return false; };
+        match self.map_pos {
+            None => {
+                if map.entry_nodes().contains(&(col as u8)) {
+                    self.map_pos = Some(MapPos { floor: 0, col });
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(pos) => {
+                if map.next_nodes(pos.floor, pos.col).contains(&(col as u8)) {
+                    self.map_pos = Some(MapPos { floor: pos.floor + 1, col });
+                    self.floor = (pos.floor + 1) as u8;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 }
 
