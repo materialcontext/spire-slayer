@@ -12,6 +12,7 @@ use crate::domain::run::{PlayerClass, Relic, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
+use crate::metrics::path_ev::{compute_path_choices, NodeCosts, PathChoice};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::event::{advise_event, EventOptionAdvice};
 use crate::metrics::map_ev::{compute_map_ev, events_for_sub_act, MapEvData};
@@ -60,6 +61,8 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     /// Cursor index into the available map choices at the current position.
     pub map_cursor: usize,
+    /// HP-cost estimates for each available map choice (recomputed on position change).
+    pub path_choices: Vec<PathChoice>,
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
@@ -122,6 +125,7 @@ impl App {
             act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
             map_cursor: 0,
+            path_choices: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
             active_event: None,
@@ -547,6 +551,7 @@ impl App {
             data.sub_act, data.events.len(), data.shared_event_count,
         );
         self.map_ev = Some(data);
+        self.recompute_path_choices();
         self.selected_row = 0;
         self.mode = AppMode::MapEv;
     }
@@ -587,7 +592,36 @@ impl App {
             }
         }
         self.map_cursor = 0;
+        self.recompute_path_choices();
         self.mode = AppMode::MapView;
+    }
+
+    /// Recompute per-choice HP path costs using simulated or default node costs.
+    pub fn recompute_path_choices(&mut self) {
+        use crate::domain::map::ROWS;
+        let Some(ref run) = self.run else { self.path_choices.clear(); return; };
+        let Some(ref map) = run.map else { self.path_choices.clear(); return; };
+
+        let max_hp = run.max_hp;
+        let (simulated, costs) = if let Some(ref me) = self.map_ev {
+            (true, NodeCosts::from_map_ev(me, max_hp))
+        } else {
+            (false, NodeCosts::defaults(max_hp))
+        };
+
+        let (choices, next_floor) = match run.map_pos {
+            None => (map.entry_nodes(), 0usize),
+            Some(pos) => {
+                let nf = pos.floor + 1;
+                (map.choices_from(pos).to_vec(), nf)
+            }
+        };
+
+        self.path_choices = if next_floor < ROWS {
+            compute_path_choices(map, &choices, next_floor, &costs, simulated)
+        } else {
+            vec![]
+        };
     }
 
     /// Columns available to move to from the current map position.
@@ -612,6 +646,8 @@ impl App {
         let room = run.map_pos.and_then(|pos| {
             run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
         });
+        drop(run);
+        self.recompute_path_choices();
 
         match room {
             Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {

@@ -4,6 +4,7 @@ pub mod deck;
 pub mod deck_dash;
 pub mod event;
 pub mod map_ev;
+pub mod path_ev;
 pub mod rest;
 
 pub use card_pick::{pick_score, sim_pick_score, CardAdvice};

@@ -1099,15 +1099,34 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             let rt_label = map.room_type(cf, col as usize)
                 .map(|r| r.label())
                 .unwrap_or("?");
-            let label = format!(" col{}[{}] ", col, rt_label);
-            choice_spans.push(Span::styled(
-                label,
-                if i == app.map_cursor {
-                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::LightGreen)
-                },
-            ));
+            // Annotate with path HP cost if available
+            let path_info = app.path_choices.iter().find(|pc| pc.col == col);
+            let path_str = path_info.map(|pc| {
+                let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
+                format!("{sign}{:.0}hp", pc.total_hp_delta)
+            }).unwrap_or_default();
+            let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
+            let label = if path_str.is_empty() {
+                format!(" col{}[{}] ", col, rt_label)
+            } else if best_marker {
+                format!(" col{}[{}] {} ▲ ", col, rt_label, path_str)
+            } else {
+                format!(" col{}[{}] {} ", col, rt_label, path_str)
+            };
+            let is_cursor = i == app.map_cursor;
+            let style = if is_cursor {
+                Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+            } else if best_marker {
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::LightGreen)
+            };
+            choice_spans.push(Span::styled(label, style));
+        }
+        // Show whether costs are from simulation or defaults
+        if let Some(pc) = app.path_choices.first() {
+            let tag = if pc.simulated { " [sim]" } else { " [est]" };
+            choice_spans.push(Span::styled(tag, Style::default().fg(Color::DarkGray)));
         }
     }
     frame.render_widget(
