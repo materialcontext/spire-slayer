@@ -23,8 +23,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::DeckDash => render_deck_dash(frame, app, area),
         AppMode::MapEv   => render_map_ev(frame, app, area),
         AppMode::MapView  => render_map_view(frame, app, area),
-        AppMode::RestSite => render_rest_site(frame, app, area),
-        AppMode::Exiting  => {}
+        AppMode::RestSite  => render_rest_site(frame, app, area),
+        AppMode::EventRoom => render_event_room(frame, app, area),
+        AppMode::Exiting   => {}
     }
 }
 
@@ -1125,6 +1126,78 @@ fn map_rt_style(rt: Option<crate::domain::map::RoomType>) -> Style {
     }
 }
 
+fn render_event_room(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Length(8),  // event description
+            Constraint::Min(4),     // options
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let event_name = app.active_event.as_ref().map(|e| e.name.as_str()).unwrap_or("Unknown Event");
+
+    let header = Paragraph::new(format!(
+        " EVENT   Floor {floor}   {event_name}   j/k select  Enter confirm  Esc back"
+    ))
+    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Description — first paragraph, tags stripped
+    let raw_desc = app.active_event.as_ref()
+        .and_then(|e| e.description.as_deref())
+        .unwrap_or("No description available.");
+    let stripped = strip_tags(raw_desc);
+    let first_para: String = stripped.lines().take(4).collect::<Vec<_>>().join(" ");
+    let desc = Paragraph::new(first_para)
+        .block(Block::default().borders(Borders::ALL).title(format!(" {event_name} ")))
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(desc, rows[1]);
+
+    // Options
+    let options = app.active_event.as_ref().map(|e| e.options.as_slice()).unwrap_or(&[]);
+    let recommended_idx = app.event_advice.first().map(|a| a.option_idx);
+
+    let option_lines: Vec<Line> = options.iter().enumerate().map(|(i, opt)| {
+        let is_cursor = i == app.event_cursor;
+        let is_rec    = recommended_idx == Some(i);
+        let title     = opt.title.as_deref().unwrap_or("?");
+        let opt_desc  = strip_tags(opt.description.as_deref().unwrap_or(""));
+        let reason    = app.event_advice.iter()
+            .find(|a| a.option_idx == i)
+            .map(|a| a.reason.as_str())
+            .unwrap_or("");
+        let rec_marker = if is_rec { " ★" } else { "  " };
+        let prefix     = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if is_rec {
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line_text = format!("{prefix}{title}{rec_marker}  {opt_desc:.60}  [{reason}]");
+        Line::from(vec![Span::styled(line_text, style)])
+    }).collect();
+
+    let options_widget = Paragraph::new(Text::from(option_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Options "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(options_widget, rows[2]);
+
+    // Status
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[3]);
+}
+
 fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
     use crate::metrics::rest::RestAction;
 
@@ -1316,6 +1389,26 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(99);
         // Select a character so a run exists, then open the map view.
         app.select_character(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_event_room_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        app.select_character(&mut rng);
+        // Load real events seed so the pool is non-empty.
+        app.events = crate::data::api::load_events();
+        app.mode = crate::tui::app::AppMode::EventRoom;
+        // Populate event directly (bypassing network).
+        if let Some(ev) = app.events.first().cloned() {
+            let hp_ratio = app.run.as_ref().map(|r| r.hp as f32 / r.max_hp as f32).unwrap_or(1.0);
+            app.event_advice = crate::metrics::event::advise_event(&ev.options, hp_ratio);
+            app.event_cursor = app.event_advice.first().map(|a| a.option_idx).unwrap_or(0);
+            app.active_event = Some(ev);
+        }
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 

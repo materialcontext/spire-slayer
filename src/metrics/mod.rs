@@ -2,6 +2,7 @@ pub mod card_pick;
 pub mod combat;
 pub mod deck;
 pub mod deck_dash;
+pub mod event;
 pub mod map_ev;
 pub mod rest;
 

@@ -12,7 +12,8 @@ use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
-use crate::metrics::map_ev::{compute_map_ev, MapEvData};
+use crate::metrics::event::{advise_event, EventOptionAdvice};
+use crate::metrics::map_ev::{compute_map_ev, events_for_sub_act, MapEvData};
 use crate::metrics::rest::{advise_rest, RestAction, RestAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
@@ -25,6 +26,7 @@ pub enum AppMode {
     EncounterPick,
     MapView,
     RestSite,
+    EventRoom,
     CombatAdvice,
     CardPick,
     DeckDash,
@@ -58,6 +60,10 @@ pub struct App {
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
+    /// Active event and scored options for EventRoom mode.
+    pub active_event: Option<SpireApiEvent>,
+    pub event_advice: Vec<EventOptionAdvice>,
+    pub event_cursor: usize,
 }
 
 impl App {
@@ -93,6 +99,9 @@ impl App {
             map_cursor: 0,
             rest_advice: None,
             rest_cursor: 0,
+            active_event: None,
+            event_advice: Vec::new(),
+            event_cursor: 0,
         };
         app.refresh_filter();
         app
@@ -139,8 +148,9 @@ impl App {
         match self.mode {
             AppMode::CharacterPick => self.handle_key_character(key, rng),
             AppMode::EncounterPick => self.handle_key_encounter(key, rng),
-            AppMode::MapView       => self.handle_key_map_view(key),
+            AppMode::MapView       => self.handle_key_map_view(key, rng),
             AppMode::RestSite      => self.handle_key_rest_site(key),
+            AppMode::EventRoom     => self.handle_key_event_room(key),
             AppMode::ManualInput   => self.handle_key_input(key),
             AppMode::CombatAdvice  => self.handle_key_combat(key, rng),
             AppMode::CardPick      => self.handle_key_pick(key),
@@ -172,7 +182,7 @@ impl App {
         }
     }
 
-    fn handle_key_map_view(&mut self, key: KeyEvent) {
+    fn handle_key_map_view(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
@@ -188,7 +198,7 @@ impl App {
                 if self.map_cursor > 0 { self.map_cursor -= 1; }
             }
             KeyCode::Enter => {
-                self.select_map_node();
+                self.select_map_node(rng);
             }
             _ => {}
         }
@@ -542,7 +552,7 @@ impl App {
     }
 
     /// Move to the currently cursor-selected map node and resolve the room.
-    fn select_map_node(&mut self) {
+    fn select_map_node(&mut self, rng: &mut impl rand::Rng) {
         use crate::domain::map::RoomType;
         let choices = self.map_choices();
         let Some(&col) = choices.get(self.map_cursor) else { return; };
@@ -556,6 +566,7 @@ impl App {
 
         match room {
             Some(RoomType::Rest) => self.open_rest_site(),
+            Some(RoomType::Event) => self.open_event_room(rng),
             Some(RoomType::Treasure) => {
                 self.status_message = "Treasure chest — relic reward (not yet simulated)".to_string();
             }
@@ -622,6 +633,54 @@ impl App {
         }
         self.rest_advice = None;
         self.mode = AppMode::MapView;
+    }
+
+    fn open_event_room(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_else(|| "overgrowth".to_string());
+        let hp_ratio = self.run.as_ref().map(|r| r.hp as f32 / r.max_hp as f32).unwrap_or(1.0);
+
+        let pool = events_for_sub_act(&sub_act, &self.events);
+        let event = pool.choose(rng).map(|e| (*e).clone());
+
+        self.event_advice = event.as_ref()
+            .map(|e| advise_event(&e.options, hp_ratio))
+            .unwrap_or_default();
+
+        // Set cursor to recommended option (first in sorted advice).
+        self.event_cursor = self.event_advice.first().map(|a| a.option_idx).unwrap_or(0);
+        self.active_event = event;
+        self.mode = AppMode::EventRoom;
+    }
+
+    fn handle_key_event_room(&mut self, key: KeyEvent) {
+        let n = self.active_event.as_ref().map(|e| e.options.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 { self.event_cursor = (self.event_cursor + 1).min(n - 1); }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.event_cursor > 0 { self.event_cursor -= 1; }
+            }
+            KeyCode::Enter => {
+                let title = self.active_event.as_ref()
+                    .and_then(|e| e.options.get(self.event_cursor))
+                    .and_then(|o| o.title.as_deref())
+                    .unwrap_or("?")
+                    .to_string();
+                self.status_message = format!("Chose: {title}");
+                self.active_event = None;
+                self.event_advice.clear();
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Esc => {
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            _ => {}
+        }
     }
 
     pub fn load_combat(&mut self, state: CombatState) {
