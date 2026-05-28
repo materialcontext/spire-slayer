@@ -1,0 +1,299 @@
+use rand::Rng;
+
+use crate::data::api::{SpireApiEncounter, SpireApiMonster};
+use crate::domain::card::Card;
+use crate::domain::encounter::normalize_act;
+use crate::domain::map::ActMap;
+use crate::metrics::deck_dash::compute_deck_stats;
+use crate::metrics::map_ev::{post_act_heal_hp, POST_ACT_HEAL_ASCENSION_THRESHOLD};
+use crate::metrics::path_ev::{compute_path_choices, NodeCosts};
+
+/// Ordered sub-acts for a complete run.
+const ACT_ORDER: &[&str] = &["overgrowth", "underdocks", "hive", "glory"];
+
+/// Number of randomly generated maps used to estimate a future act's path cost.
+const N_SAMPLE_MAPS: u32 = 5;
+
+// ── Public types ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct FutureActEv {
+    pub sub_act: String,
+    /// Expected net HP delta navigating this act optimally, including the boss.
+    pub expected_delta: f32,
+    /// HP at the start of this act (after the prior post-act heal, or current HP for act 1).
+    pub entry_hp: f32,
+    /// HP immediately after the act boss (before any post-act heal).
+    pub exit_hp: f32,
+    /// HP at the start of the next act after the post-act heal.
+    /// Equal to `exit_hp` for the final act (no heal after the last boss).
+    pub post_heal_hp: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunEv {
+    /// HP delta from the current map position through the current act's boss.
+    /// Already the "best path" value taken from path_choices.
+    pub current_act_remaining_delta: f32,
+    /// Projected HP immediately after the current act's boss fight.
+    pub hp_after_current_boss: f32,
+    /// HP at the start of the next act (after the post-act heal).
+    pub hp_after_current_heal: f32,
+    /// Projections for each remaining future act, in order.
+    pub future_acts: Vec<FutureActEv>,
+    /// Projected HP at the very end of the run (after the final boss, before any heal).
+    pub projected_final_hp: f32,
+    /// True when encounter simulation was used; false when falling back to defaults.
+    pub simulated: bool,
+}
+
+// ── Internal helpers ────────────────────────────────────────────────────────
+
+/// Build NodeCosts for a given sub-act by simulating against its encounter pool.
+/// Returns `(costs, simulated)` where `simulated` is false if no encounter data
+/// was available and defaults were used instead.
+fn act_node_costs(
+    sub_act: &str,
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    rng: &mut impl Rng,
+) -> (NodeCosts, bool) {
+    let filter = |room: &str| -> Vec<SpireApiEncounter> {
+        all_encounters.iter()
+            .filter(|e| {
+                let act = e.act.as_deref().map(normalize_act).unwrap_or("other");
+                act == sub_act && e.room_type.as_deref() == Some(room)
+            })
+            .cloned()
+            .collect()
+    };
+
+    let normal_enc = filter("Monster");
+    let elite_enc  = filter("Elite");
+    let boss_enc   = filter("Boss");
+    let has_data   = !normal_enc.is_empty() || !boss_enc.is_empty();
+
+    let ns = compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, rng);
+    let es = compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc,  all_monsters, rng);
+    let bs = compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc,   all_monsters, rng);
+
+    let costs = if has_data {
+        NodeCosts {
+            monster_loss: ns.mean_hp_loss,
+            elite_loss:   es.mean_hp_loss,
+            boss_loss:    bs.mean_hp_loss,
+            rest_heal:    (max_hp as f32 * 0.30).floor(),
+        }
+    } else {
+        NodeCosts::defaults(max_hp)
+    };
+
+    (costs, has_data)
+}
+
+/// Estimate the average best-path HP delta for a randomly generated act map.
+/// The boss loss is baked into the DP terminal via `costs.boss_loss`.
+fn estimate_act_delta(costs: &NodeCosts, ascension: u8, rng: &mut impl Rng) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+
+    for _ in 0..N_SAMPLE_MAPS {
+        let seed: u64 = rng.r#gen();
+        let map = ActMap::generate(seed, ascension);
+        let entries = map.entry_nodes();
+        if entries.is_empty() {
+            continue;
+        }
+        let choices = compute_path_choices(&map, &entries, 0, costs, true);
+        if let Some(best) = choices.iter().map(|c| c.total_hp_delta).reduce(f32::max) {
+            total += best;
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        total / count as f32
+    } else {
+        // Fallback: very rough estimate (8 monsters + boss)
+        -(costs.monster_loss * 8.0 + costs.boss_loss)
+    }
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/// Compute a full run projection from the current position.
+///
+/// `current_act_remaining_delta` is the best-path HP delta from the current
+/// map position through the end of the current act (including the boss fight).
+/// This value should come from `app.path_choices`.
+///
+/// `current_act_boss_simulated` should be `true` when the value came from a
+/// simulation run (i.e. `app.path_choices[*].simulated`).
+pub fn compute_run_ev(
+    deck: &[Card],
+    current_hp: u32,
+    max_hp: u32,
+    current_sub_act: &str,
+    current_act_remaining_delta: f32,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    ascension: u8,
+    current_act_simulated: bool,
+    rng: &mut impl Rng,
+) -> RunEv {
+    let hp_after_current_boss = current_hp as f32 + current_act_remaining_delta;
+
+    // If the player dies in the current act, projection ends here.
+    if hp_after_current_boss <= 0.0 {
+        return RunEv {
+            current_act_remaining_delta,
+            hp_after_current_boss: 0.0,
+            hp_after_current_heal: 0.0,
+            future_acts: vec![],
+            projected_final_hp: 0.0,
+            simulated: current_act_simulated,
+        };
+    }
+
+    let heal_target = post_act_heal_hp(max_hp, ascension);
+    let hp_after_current_heal = heal_target; // post-act heal always sets HP to target
+
+    // Remaining acts after the current one.
+    let future_sub_acts: Vec<&str> = ACT_ORDER.iter()
+        .copied()
+        .skip_while(|&a| a != current_sub_act)
+        .skip(1)
+        .collect();
+
+    let mut entry_hp = hp_after_current_heal;
+    let mut future_acts: Vec<FutureActEv> = Vec::new();
+    let mut all_simulated = current_act_simulated;
+
+    for (i, &sub_act) in future_sub_acts.iter().enumerate() {
+        let is_last = i == future_sub_acts.len() - 1;
+
+        let (costs, has_data) = act_node_costs(
+            sub_act,
+            deck,
+            entry_hp as u32,
+            max_hp,
+            all_encounters,
+            all_monsters,
+            rng,
+        );
+        if !has_data {
+            all_simulated = false;
+        }
+
+        let expected_delta = estimate_act_delta(&costs, ascension, rng);
+        let exit_hp = (entry_hp + expected_delta).max(0.0);
+        // No post-act heal after the final boss — the run ends there.
+        let post_heal = if is_last { exit_hp } else { heal_target };
+
+        future_acts.push(FutureActEv {
+            sub_act: sub_act.to_string(),
+            expected_delta,
+            entry_hp,
+            exit_hp,
+            post_heal_hp: post_heal,
+        });
+
+        if exit_hp <= 0.0 {
+            // Projected death — no point simulating further acts.
+            break;
+        }
+        entry_hp = post_heal;
+    }
+
+    let projected_final_hp = future_acts.last()
+        .map(|a| a.exit_hp)
+        .unwrap_or(hp_after_current_boss);
+
+    RunEv {
+        current_act_remaining_delta,
+        hp_after_current_boss,
+        hp_after_current_heal,
+        future_acts,
+        projected_final_hp,
+        simulated: all_simulated,
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn rng() -> StdRng {
+        StdRng::seed_from_u64(99)
+    }
+
+    fn deck() -> Vec<Card> {
+        crate::domain::catalog::ironclad::starter_deck()
+    }
+
+    #[test]
+    fn post_act_heal_ascension_thresholds() {
+        assert_eq!(post_act_heal_hp(80, 0), 80.0);
+        assert_eq!(post_act_heal_hp(80, 5), 80.0);
+        assert_eq!(post_act_heal_hp(80, POST_ACT_HEAL_ASCENSION_THRESHOLD), 64.0);
+        assert_eq!(post_act_heal_hp(80, 10), 64.0);
+    }
+
+    #[test]
+    fn run_ev_from_overgrowth_has_three_future_acts() {
+        let result = compute_run_ev(
+            &deck(), 60, 80, "overgrowth", -20.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        // overgrowth → underdocks → hive → glory
+        assert_eq!(result.future_acts.len(), 3);
+        assert_eq!(result.future_acts[0].sub_act, "underdocks");
+        assert_eq!(result.future_acts[2].sub_act, "glory");
+    }
+
+    #[test]
+    fn run_ev_from_glory_has_no_future_acts() {
+        let result = compute_run_ev(
+            &deck(), 60, 80, "glory", -20.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        assert!(result.future_acts.is_empty());
+        assert_eq!(result.projected_final_hp, result.hp_after_current_boss);
+    }
+
+    #[test]
+    fn last_future_act_has_no_post_heal() {
+        let result = compute_run_ev(
+            &deck(), 80, 80, "overgrowth", 0.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        let last = result.future_acts.last().unwrap();
+        // No post-act heal after the final boss.
+        assert_eq!(last.post_heal_hp, last.exit_hp);
+    }
+
+    #[test]
+    fn projected_death_short_circuits() {
+        // Remaining delta kills the player.
+        let result = compute_run_ev(
+            &deck(), 10, 80, "overgrowth", -50.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        assert_eq!(result.hp_after_current_boss, 0.0);
+        assert!(result.future_acts.is_empty());
+    }
+
+    #[test]
+    fn estimate_act_delta_is_finite() {
+        let costs = NodeCosts::defaults(80);
+        let delta = estimate_act_delta(&costs, 0, &mut rng());
+        assert!(delta.is_finite());
+    }
+}

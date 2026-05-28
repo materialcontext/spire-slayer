@@ -30,12 +30,16 @@ pub struct MapEvData {
     pub sub_act: String,
     pub normal: NodeEv,
     pub elite: NodeEv,
+    pub boss: NodeEv,
     pub treasure: NodeEv,
     pub rest: NodeEv,
     pub shop: NodeEv,
     pub event_node: NodeEv,
     pub events: Vec<EventSummary>,
     pub shared_event_count: usize,
+    /// HP the player will have at the start of the next act (post-act heal).
+    /// Full heal at ascension < 6; 80 % of max HP at ascension ≥ 6.
+    pub post_act_heal_hp: f32,
 }
 
 // ── Event filtering ───────────────────────────────────────────────────────────
@@ -114,10 +118,23 @@ fn combat_node_ev(
     }
 }
 
+/// Post-act heal target HP.
+/// Below this ascension level the ancient heals to full; at or above it heals to 80 %.
+pub const POST_ACT_HEAL_ASCENSION_THRESHOLD: u8 = 6;
+
+pub fn post_act_heal_hp(max_hp: u32, ascension: u8) -> f32 {
+    if ascension < POST_ACT_HEAL_ASCENSION_THRESHOLD {
+        max_hp as f32
+    } else {
+        (max_hp as f32 * 0.80).floor()
+    }
+}
+
 pub fn compute_map_ev(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
+    ascension: u8,
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
@@ -143,9 +160,19 @@ pub fn compute_map_ev(
     let elite_stats =
         compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, rng);
 
+    // Simulate vs. boss encounters for this sub-act.
+    let boss_enc: Vec<SpireApiEncounter> = all_encounters
+        .iter()
+        .filter(|e| e.room_type.as_deref() == Some("Boss"))
+        .cloned()
+        .collect();
+    let boss_stats =
+        compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, rng);
+
     let normal = combat_node_ev("Normal", "gold + card", &normal_stats, 0);
     let elite_star_bonus: i8 = if elite_stats.survival_rate >= 0.70 { 1 } else { 0 };
     let elite = combat_node_ev("Elite", "relic + card + gold", &elite_stats, elite_star_bonus);
+    let boss = combat_node_ev("Boss", "relic + 3 rare cards", &boss_stats, -1);
 
     let hp_frac = hp as f32 / max_hp.max(1) as f32;
     let rest_stars: u8 = if hp_frac < 0.60 { 3 } else { 2 };
@@ -213,12 +240,14 @@ pub fn compute_map_ev(
         sub_act: sub_act.to_string(),
         normal,
         elite,
+        boss,
         treasure,
         rest,
         shop,
         event_node,
         events,
         shared_event_count,
+        post_act_heal_hp: post_act_heal_hp(max_hp, ascension),
     }
 }
 
@@ -313,7 +342,7 @@ mod tests {
         use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let data = compute_map_ev(&deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], &mut rng);
         assert_eq!(data.sub_act, "overgrowth");
         assert_eq!(data.treasure.stars, 3);
         assert_eq!(data.events.len(), 0);

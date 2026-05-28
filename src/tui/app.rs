@@ -13,6 +13,7 @@ use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts, PathChoice};
+use crate::metrics::run_ev::{compute_run_ev, RunEv};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::event::{advise_event, EventOptionAdvice};
 use crate::metrics::map_ev::{compute_map_ev, events_for_sub_act, MapEvData};
@@ -48,6 +49,7 @@ pub struct App {
     pub card_advice: Vec<CardAdvice>,
     pub deck_stats: Option<DeckStats>,
     pub map_ev: Option<MapEvData>,
+    pub run_ev: Option<RunEv>,
     pub input: Option<ManualInputState>,
     pub status_message: String,
     pub selected_row: usize,
@@ -115,6 +117,7 @@ impl App {
             card_advice: Vec::new(),
             deck_stats: None,
             map_ev: None,
+            run_ev: None,
             input: None,
             status_message: String::new(),
             selected_row: 0,
@@ -534,13 +537,22 @@ impl App {
         let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
             crate::domain::catalog::ironclad::starter_deck()
         });
-        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
-        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        let hp = self.run.as_ref().map(|r| r.hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.hp))
+            .unwrap_or(80);
+        let max_hp = self.run.as_ref().map(|r| r.max_hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
+            .unwrap_or(80);
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+        let sub_act = self.run.as_ref().map(|r| r.sub_act.clone())
+            .unwrap_or_else(|| self.act_filter.clone());
+
         let data = compute_map_ev(
             &deck,
             hp,
             max_hp,
-            &self.act_filter,
+            ascension,
+            &sub_act,
             &self.encounters,
             &self.monsters,
             &self.events,
@@ -552,6 +564,30 @@ impl App {
         );
         self.map_ev = Some(data);
         self.recompute_path_choices();
+
+        // Compute full run projection.
+        let best_remaining = if self.path_choices.is_empty() {
+            // No more map floors — only the boss remains.
+            -self.map_ev.as_ref().map(|me| me.boss.mean_hp_loss).unwrap_or(35.0)
+        } else {
+            self.path_choices.iter()
+                .map(|pc| pc.total_hp_delta)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let current_simulated = self.path_choices.first().map(|pc| pc.simulated).unwrap_or(false);
+        self.run_ev = Some(compute_run_ev(
+            &deck,
+            hp,
+            max_hp,
+            &sub_act,
+            best_remaining,
+            &self.encounters,
+            &self.monsters,
+            ascension,
+            current_simulated,
+            rng,
+        ));
+
         self.selected_row = 0;
         self.mode = AppMode::MapEv;
     }
@@ -588,7 +624,7 @@ impl App {
         if let Some(ref mut run) = self.run {
             if run.map.is_none() {
                 let seed: u64 = rng.r#gen();
-                run.generate_map(seed, 0);
+                run.generate_map(seed, run.ascension);
             }
         }
         self.map_cursor = 0;

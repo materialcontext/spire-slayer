@@ -73,6 +73,8 @@ pub struct RunState {
     pub rare_offset: i32,
     /// Number of card removals purchased at a shop this run (affects removal price).
     pub card_removals_bought: u32,
+    /// Current ascension level (0 = normal mode).
+    pub ascension: u8,
 }
 
 impl RunState {
@@ -98,6 +100,7 @@ impl RunState {
             sub_act: "overgrowth".to_string(),
             rare_offset: -5,
             card_removals_bought: 0,
+            ascension: 0,
         }
     }
 

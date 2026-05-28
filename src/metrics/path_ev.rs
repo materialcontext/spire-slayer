@@ -8,6 +8,8 @@ pub struct NodeCosts {
     pub monster_loss: f32,
     /// Mean HP lost in an Elite room.
     pub elite_loss: f32,
+    /// Mean HP lost in the act Boss fight.
+    pub boss_loss: f32,
     /// HP gained by resting (floor(max_hp × 0.30)).
     pub rest_heal: f32,
 }
@@ -17,6 +19,7 @@ impl NodeCosts {
         Self {
             monster_loss: map_ev.normal.mean_hp_loss,
             elite_loss: map_ev.elite.mean_hp_loss,
+            boss_loss: map_ev.boss.mean_hp_loss,
             rest_heal: (max_hp as f32 * 0.30).floor(),
         }
     }
@@ -25,6 +28,7 @@ impl NodeCosts {
         Self {
             monster_loss: 10.0,
             elite_loss: 25.0,
+            boss_loss: 35.0,
             rest_heal: (max_hp as f32 * 0.30).floor(),
         }
     }
@@ -90,7 +94,8 @@ pub fn compute_path_choices(
 
             let successors = map.next_nodes(floor, col);
             let best_successor: f32 = if successors.is_empty() {
-                0.0 // floor 14 (top-most rest) has no successors
+                // Floor 14 is the last rest before the boss. The boss fight follows.
+                -costs.boss_loss
             } else {
                 successors.iter()
                     .filter_map(|&c| {
@@ -190,7 +195,7 @@ mod tests {
         // A path through a rest site should have a higher (less negative) delta.
         let map = ActMap::generate(42, 0);
         let entries = map.entry_nodes();
-        let costs = NodeCosts { monster_loss: 10.0, elite_loss: 25.0, rest_heal: 24.0 };
+        let costs = NodeCosts { monster_loss: 10.0, elite_loss: 25.0, boss_loss: 35.0, rest_heal: 24.0 };
         let result = compute_path_choices(&map, &entries, 0, &costs, false);
         // All deltas should be finite
         for pc in &result {

@@ -595,6 +595,7 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
         for node in [
             &data.normal,
             &data.elite,
+            &data.boss,
             &data.treasure,
             &data.rest,
             &data.shop,
@@ -694,6 +695,68 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled(
                 "  (no events for this sub-act — change filter with [o/u/h/g])",
                 Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // ── Run Projection ─────────────────────────────────────────────────────
+        if let Some(ref ev) = app.run_ev {
+            lines.push(Line::from(Span::raw("")));
+            let sim_tag = if ev.simulated { "[sim]" } else { "[est]" };
+            lines.push(Line::from(Span::styled(
+                format!("  ── Run Projection {sim_tag} ──────────────────────────────"),
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let delta = ev.current_act_remaining_delta;
+            let after_boss = ev.hp_after_current_boss.max(0.0);
+            let sign = if delta >= 0.0 { "+" } else { "" };
+            let boss_color = if after_boss <= 0.0 { Color::Red } else if after_boss < 30.0 { Color::Yellow } else { Color::White };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  Act remaining:  {sign}{delta:.0} HP   → {after_boss:.0} HP after boss",
+                ),
+                Style::default().fg(boss_color),
+            )));
+
+            if ev.hp_after_current_boss > 0.0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  Post-act heal:  → {:.0} HP", ev.hp_after_current_heal),
+                    Style::default().fg(Color::LightGreen),
+                )));
+            }
+
+            for act_ev in &ev.future_acts {
+                let name = capitalize(&act_ev.sub_act);
+                let d = act_ev.expected_delta;
+                let sign = if d >= 0.0 { "+" } else { "" };
+                let exit = act_ev.exit_hp.max(0.0);
+                let color = if exit <= 0.0 { Color::Red } else if exit < 30.0 { Color::Yellow } else { Color::White };
+                lines.push(Line::from(Span::styled(
+                    format!("  {name:<12}  {sign}{d:.0} HP   → {exit:.0} HP after boss"),
+                    Style::default().fg(color),
+                )));
+                if act_ev.exit_hp > 0.0 && act_ev.post_heal_hp != act_ev.exit_hp {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Post-act heal:  → {:.0} HP", act_ev.post_heal_hp),
+                        Style::default().fg(Color::LightGreen),
+                    )));
+                }
+                if act_ev.exit_hp <= 0.0 {
+                    break;
+                }
+            }
+
+            let final_hp = ev.projected_final_hp.max(0.0);
+            let (final_color, final_tag) = if final_hp <= 0.0 {
+                (Color::Red, " ⚠ LETHAL")
+            } else if final_hp < 20.0 {
+                (Color::Yellow, " ⚠ CRITICAL")
+            } else {
+                (Color::LightGreen, "")
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  Projected finish: {final_hp:.0} HP{final_tag}"),
+                Style::default().fg(final_color).add_modifier(Modifier::BOLD),
             )));
         }
     } else {
