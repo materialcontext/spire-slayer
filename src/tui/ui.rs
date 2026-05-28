@@ -20,6 +20,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
         AppMode::CardPick => render_card_pick(frame, app, area),
         AppMode::DeckDash => render_deck_dash(frame, app, area),
+        AppMode::MapEv => render_map_ev(frame, app, area),
         AppMode::Exiting => {}
     }
 }
@@ -227,7 +228,7 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let line = Line::from(vec![
-        Span::raw("  [s]im  [d]eck  [p]ick  [e]dit  [n]ew fight  [q]uit"),
+        Span::raw("  [s]im  [d]eck  [p]ick  [v]map  [e]dit  [n]ew  [q]uit"),
         Span::raw(status),
         Span::raw("          Threat: "),
         Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
@@ -524,6 +525,166 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[2]);
 }
 
+fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // title
+            Constraint::Min(10),    // body
+            Constraint::Length(1),  // hint
+        ])
+        .split(area);
+
+    let title_text = format!(
+        " MAP PLANNER — {}",
+        app.map_ev.as_ref().map(|d| d.sub_act.as_str()).unwrap_or("—")
+    );
+    let title = Paragraph::new(title_text)
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(ref data) = app.map_ev {
+        // ── Node EV table ──────────────────────────────────────────────────────
+        let header = format!(
+            "  {:<10}  {:>8}  {:>8}  {:<22}  {}",
+            "NODE", "HP RISK", "SURV%", "REWARD", "SCORE"
+        );
+        lines.push(Line::from(Span::styled(header, Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(62)),
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        for node in [
+            &data.normal,
+            &data.elite,
+            &data.treasure,
+            &data.rest,
+            &data.shop,
+        ] {
+            let hp_col = if node.encounter_count > 0 {
+                format!("-{:.0}", node.mean_hp_loss)
+            } else {
+                "—".to_string()
+            };
+            let surv_col = if node.encounter_count > 0 {
+                format!("{:.0}%", node.survival_rate * 100.0)
+            } else {
+                "—".to_string()
+            };
+            let stars: String = "★".repeat(node.stars as usize)
+                + &"☆".repeat(3usize.saturating_sub(node.stars as usize));
+            let row = format!(
+                "  {:<10}  {:>8}  {:>8}  {:<22}  {}",
+                node.label, hp_col, surv_col, node.reward, stars,
+            );
+            let color = node_color(node);
+            lines.push(Line::from(Span::styled(row, Style::default().fg(color))));
+        }
+
+        // Event node row: encounter_count holds total event count
+        let ev = &data.event_node;
+        let ev_reward = format!("{} ({} events)", ev.reward, ev.encounter_count);
+        let ev_stars: String = "★".repeat(ev.stars as usize)
+            + &"☆".repeat(3usize.saturating_sub(ev.stars as usize));
+        let ev_row = format!(
+            "  {:<10}  {:>8}  {:>8}  {:<22}  {}",
+            ev.label, "—", "—", ev_reward, ev_stars,
+        );
+        lines.push(Line::from(Span::styled(ev_row, Style::default().fg(Color::Cyan))));
+
+        lines.push(Line::from(Span::raw("")));
+
+        // ── Events list ────────────────────────────────────────────────────────
+        let event_header = format!(
+            "  Events — {} + {} shared:",
+            data.sub_act,
+            data.shared_event_count,
+        );
+        lines.push(Line::from(Span::styled(
+            event_header,
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        for (i, ev) in data.events.iter().enumerate() {
+            let selected = i == app.selected_row;
+            let indicator = if selected { "▶" } else { " " };
+            let act_tag = if ev.is_shared {
+                "[Shared]".to_string()
+            } else {
+                // Abbreviate long act strings
+                ev.act
+                    .replace("Act 1 - Overgrowth", "Overgrowth")
+                    .replace("Act 1 - Underdocks", "Underdocks")
+                    .replace("Act 2 - Hive", "Hive")
+                    .replace("Act 3 - Glory", "Glory")
+            };
+            let opts = ev.option_titles.join(" / ");
+            let opts_trunc = if opts.len() > 34 {
+                format!("{}…", &opts[..33])
+            } else {
+                opts
+            };
+            let row_text = format!(
+                "  {} {:<24} {:<14}  {}",
+                indicator,
+                if ev.name.len() > 23 { format!("{}…", &ev.name[..22]) } else { ev.name.clone() },
+                act_tag,
+                opts_trunc,
+            );
+            let style = if selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(row_text, style)));
+
+            if selected && !ev.description.is_empty() {
+                let desc = &ev.description;
+                let truncated = if desc.len() > 100 {
+                    format!("{}…", &desc[..99])
+                } else {
+                    desc.clone()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", truncated),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+
+        if data.events.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no events for this sub-act — change filter with [o/u/h/g])",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::raw("  No map data computed yet.")));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [j/k] scroll events  [v/q] close")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+}
+
+fn node_color(node: &crate::metrics::map_ev::NodeEv) -> Color {
+    match node.stars {
+        3 => Color::Green,
+        2 => Color::Yellow,
+        _ => Color::Red,
+    }
+}
+
 fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -619,7 +780,7 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let hint = Paragraph::new(
-        "  [1/2/3/b/a] filter act  [j/k] navigate  [Enter] select  [m] manual input  [q] quit",
+        "  [o/u/h/g/b/a] filter  [j/k] navigate  [Enter] select  [v] map  [m] manual  [q] quit",
     )
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, rows[3]);
@@ -637,7 +798,7 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![])
+        App::new(vec![], vec![], vec![])
     }
 
     #[test]
@@ -691,6 +852,16 @@ mod tests {
     }
 
     #[test]
+    fn render_map_ev_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        app.open_map_ev(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
     fn render_encounter_with_data_does_not_panic() {
         use crate::data::api::{ApiEncounterMonster, SpireApiEncounter};
         let enc = SpireApiEncounter {
@@ -701,7 +872,7 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![enc], vec![]);
+        let app = App::new(vec![enc], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }
