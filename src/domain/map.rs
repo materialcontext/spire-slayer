@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 pub const COLS: usize = 7;
 pub const ROWS: usize = 15;
 const PATHS: usize = 6;
-const TREASURE_FLOOR: usize = 8; // floor 9 (1-indexed), same as STS1
-const MIN_SPECIAL_FLOOR: usize = 5; // Elite/Rest locked below floor 6 (1-indexed)
-const NO_REST_FLOOR: usize = ROWS - 2; // Rest banned on floor 14 (1-indexed)
+const TREASURE_FLOOR: usize = 8;     // floor 9 (1-indexed), same as STS1
+const MIN_SPECIAL_FLOOR: usize = 5;  // Elite/Rest locked below floor 6 (1-indexed)
+const PENULTIMATE_REST_FLOOR: usize = ROWS - 2; // floor 14 (1-indexed): guaranteed rest in STS2
 
 const PCT_SHOP: f64 = 0.05;
 const PCT_REST: f64 = 0.12;
@@ -128,9 +128,10 @@ impl ActMap {
         // ── Phase 4: Pre-assign fixed floors ─────────────────────────────────
         let mut room_types: Vec<Vec<Option<RoomType>>> = vec![vec![None; COLS]; rows];
         for col in 0..COLS {
-            if is_conn(0, col)              { room_types[0][col]              = Some(RoomType::Monster);  }
-            if is_conn(TREASURE_FLOOR, col) { room_types[TREASURE_FLOOR][col] = Some(RoomType::Treasure); }
-            if is_conn(rows - 1, col)       { room_types[rows - 1][col]       = Some(RoomType::Rest);     }
+            if is_conn(0, col)                      { room_types[0][col]                      = Some(RoomType::Monster);  }
+            if is_conn(TREASURE_FLOOR, col)         { room_types[TREASURE_FLOOR][col]         = Some(RoomType::Treasure); }
+            if is_conn(PENULTIMATE_REST_FLOOR, col) { room_types[PENULTIMATE_REST_FLOOR][col] = Some(RoomType::Rest);     }
+            if is_conn(rows - 1, col)               { room_types[rows - 1][col]               = Some(RoomType::Rest);     }
         }
 
         // ── Phase 5: Build type bucket ────────────────────────────────────────
@@ -275,29 +276,19 @@ fn is_compatible(
     col: usize,
     room_types: &[Vec<Option<RoomType>>],
     prev_of: &[Vec<Vec<usize>>],
-    next_of: &[Vec<Vec<usize>>],
+    _next_of: &[Vec<Vec<usize>>],
 ) -> bool {
     // Elite and Rest are locked out of early floors (below floor 6, 1-indexed).
     if matches!(rt, RoomType::Elite | RoomType::Rest) && floor < MIN_SPECIAL_FLOOR {
         return false;
     }
-    // Rest is banned on the second-to-last floor (floor 14, 1-indexed).
-    if rt == RoomType::Rest && floor == NO_REST_FLOOR {
-        return false;
-    }
 
-    if floor == 0 { return true; } // no parents to check
+    if floor == 0 { return true; }
 
-    let check_parent = matches!(rt, RoomType::Elite | RoomType::Shop | RoomType::Rest);
-
-    for &prev_col in &prev_of[floor][col] {
-        // Rule 1: parent can't be the same type (for Elite/Shop/Rest).
-        if check_parent && room_types[floor - 1][prev_col] == Some(rt) {
-            return false;
-        }
-        // Rule 2: siblings (sharing this parent) can't be the same type.
-        for &sibling in &next_of[floor - 1][prev_col] {
-            if sibling != col && room_types[floor][sibling] == Some(rt) {
+    // Parent room can't be same type as this room (for Elite/Shop/Rest).
+    if matches!(rt, RoomType::Elite | RoomType::Shop | RoomType::Rest) {
+        for &prev_col in &prev_of[floor][col] {
+            if room_types[floor - 1][prev_col] == Some(rt) {
                 return false;
             }
         }
@@ -410,11 +401,13 @@ mod tests {
     }
 
     #[test]
-    fn no_rest_on_second_to_last_floor() {
+    fn penultimate_floor_is_rest() {
         let map = ActMap::generate(42, 0);
         for col in 0..COLS {
-            assert_ne!(map.room_type(NO_REST_FLOOR, col), Some(RoomType::Rest),
-                "Rest found at floor {NO_REST_FLOOR} (second-to-last)");
+            if map.is_connected(PENULTIMATE_REST_FLOOR, col) {
+                assert_eq!(map.room_type(PENULTIMATE_REST_FLOOR, col), Some(RoomType::Rest),
+                    "floor {PENULTIMATE_REST_FLOOR} should be guaranteed rest");
+            }
         }
     }
 
