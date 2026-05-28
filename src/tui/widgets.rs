@@ -80,6 +80,22 @@ pub fn advice_spans(advice: &PlayAdvice, hand: &[Card]) -> Text<'static> {
     ))));
 
     lines.push(Line::from(Span::raw(format!("  Reason: {}", advice.rationale))));
+
+    let dist_color = if advice.hp_loss_p90 >= 20.0 {
+        Color::Red
+    } else if advice.hp_loss_p90 >= 10.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  HP risk: p10={:.0}  p50={:.0}  p90={:.0}",
+            advice.hp_loss_p10, advice.hp_loss_p50, advice.hp_loss_p90
+        ),
+        Style::default().fg(dist_color),
+    )));
+
     lines.push(Line::from(Span::raw(format!(
         "  Simulations: {}",
         advice.simulation_count

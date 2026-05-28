@@ -9,8 +9,11 @@ use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
 use crate::domain::run::RunState;
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
-use crate::metrics::card_pick::{pick_score, CardAdvice};
+use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
+use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
+use crate::sim::playout::playout_n;
+use crate::sim::policy::GreedyDamagePolicy;
 use crate::tui::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +21,7 @@ pub enum AppMode {
     EncounterPick,
     CombatAdvice,
     CardPick,
+    DeckDash,
     ManualInput,
     Simulating,
     Exiting,
@@ -29,6 +33,7 @@ pub struct App {
     pub run: Option<RunState>,
     pub play_advice: Option<PlayAdvice>,
     pub card_advice: Vec<CardAdvice>,
+    pub deck_stats: Option<DeckStats>,
     pub input: Option<ManualInputState>,
     pub status_message: String,
     pub selected_row: usize,
@@ -47,12 +52,13 @@ impl App {
             run: None,
             play_advice: None,
             card_advice: Vec::new(),
+            deck_stats: None,
             input: None,
             status_message: String::new(),
             selected_row: 0,
             encounters,
             monsters,
-            act_filter: "1".to_string(),
+            act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
         };
         app.refresh_filter();
@@ -102,6 +108,7 @@ impl App {
             AppMode::ManualInput => self.handle_key_input(key),
             AppMode::CombatAdvice => self.handle_key_combat(key, rng),
             AppMode::CardPick => self.handle_key_pick(key),
+            AppMode::DeckDash => self.handle_key_deck_dash(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -111,16 +118,21 @@ impl App {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
             }
-            KeyCode::Char('1') => {
-                self.act_filter = "1".to_string();
+            // Sub-act filters: o=Overgrowth, u=Underdocks, h=Hive, g=Glory
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                self.act_filter = "overgrowth".to_string();
                 self.refresh_filter();
             }
-            KeyCode::Char('2') => {
-                self.act_filter = "2".to_string();
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                self.act_filter = "underdocks".to_string();
                 self.refresh_filter();
             }
-            KeyCode::Char('3') => {
-                self.act_filter = "3".to_string();
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                self.act_filter = "hive".to_string();
+                self.refresh_filter();
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                self.act_filter = "glory".to_string();
                 self.refresh_filter();
             }
             KeyCode::Char('b') | KeyCode::Char('B') => {
@@ -233,6 +245,14 @@ impl App {
                 self.play_advice = None;
                 self.status_message.clear();
             }
+            KeyCode::Char('d') => {
+                self.compute_deck_dash(rng);
+            }
+            KeyCode::Char('p') => {
+                // Simulate a card reward pick with 3 sample cards
+                let offered = sample_card_offer(rng);
+                self.load_pick(offered, rng);
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref combat) = self.combat {
                     if self.selected_row + 1 < combat.hand.len() {
@@ -244,6 +264,15 @@ impl App {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_deck_dash(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Char('d') => {
+                self.mode = AppMode::CombatAdvice;
             }
             _ => {}
         }
@@ -276,10 +305,42 @@ impl App {
             self.status_message = "No combat state loaded".to_string();
             return;
         };
-        let advice = best_play_sequence(combat, 500, rng);
+        let mut advice = best_play_sequence(combat, 500, rng);
+        let stats = playout_n(combat, &GreedyDamagePolicy, 50, rng);
+        advice.hp_loss_p10 = stats.hp_loss_p10;
+        advice.hp_loss_p50 = stats.hp_loss_p50;
+        advice.hp_loss_p90 = stats.hp_loss_p90;
         self.status_message = format!("{} simulations run", advice.simulation_count);
         self.play_advice = Some(advice);
         self.mode = AppMode::CombatAdvice;
+    }
+
+    pub fn compute_deck_dash(&mut self, rng: &mut impl rand::Rng) {
+        let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
+            crate::domain::catalog::ironclad::starter_deck()
+        });
+        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
+        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        let sub_act = self.act_filter.clone();
+        let stats = compute_deck_stats(
+            &deck,
+            hp,
+            max_hp,
+            &sub_act,
+            &self.encounters,
+            &self.monsters,
+            rng,
+        );
+        self.status_message = if stats.encounter_count == 0 {
+            "Deck stats (no encounter data — intrinsics only)".to_string()
+        } else {
+            format!(
+                "Deck stats: {} encounters × {} sims",
+                stats.encounter_count, stats.playout_count / stats.encounter_count as u32
+            )
+        };
+        self.deck_stats = Some(stats);
+        self.mode = AppMode::DeckDash;
     }
 
     pub fn load_combat(&mut self, state: CombatState) {
@@ -289,30 +350,34 @@ impl App {
         self.mode = AppMode::CombatAdvice;
     }
 
-    pub fn load_pick(&mut self, offered: Vec<Card>) {
-        let _deck = self.run.as_ref().map(|r| r.deck.as_slice()).unwrap_or(&[]);
-        let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
-        self.card_advice = pick_score(
+    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng) {
+        let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
+            crate::domain::catalog::ironclad::starter_deck()
+        });
+        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
+        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        self.card_advice = sim_pick_score(
             &offered,
-            &crate::domain::run::RunState {
-                class: self
-                    .run
-                    .as_ref()
-                    .map(|r| r.class.clone())
-                    .unwrap_or(crate::domain::run::PlayerClass::Ironclad),
-                floor: self.run.as_ref().map(|r| r.floor).unwrap_or(0),
-                act,
-                hp: self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80),
-                max_hp: self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80),
-                gold: self.run.as_ref().map(|r| r.gold).unwrap_or(0),
-                deck: offered.clone(),
-                relics: vec![],
-                potions: vec![],
-            },
+            &deck,
+            hp,
+            max_hp,
+            &self.act_filter,
+            &self.encounters,
+            &self.monsters,
+            rng,
         );
         self.selected_row = 0;
         self.mode = AppMode::CardPick;
     }
+}
+
+/// Return 3 random Ironclad cards as a simulated post-combat reward.
+fn sample_card_offer(rng: &mut impl rand::Rng) -> Vec<Card> {
+    use rand::seq::SliceRandom;
+    let mut pool = crate::domain::catalog::ironclad::all_cards();
+    pool.shuffle(rng);
+    pool.truncate(3);
+    pool
 }
 
 pub fn run_app() -> anyhow::Result<()> {
@@ -425,12 +490,18 @@ mod tests {
     fn act_filter_keys_change_filter() {
         let mut app = empty_app();
         let mut rng = seeded_rng();
-        app.handle_event(make_key(KeyCode::Char('2')), &mut rng);
-        assert_eq!(app.act_filter, "2");
+        app.handle_event(make_key(KeyCode::Char('u')), &mut rng);
+        assert_eq!(app.act_filter, "underdocks");
+        app.handle_event(make_key(KeyCode::Char('h')), &mut rng);
+        assert_eq!(app.act_filter, "hive");
+        app.handle_event(make_key(KeyCode::Char('g')), &mut rng);
+        assert_eq!(app.act_filter, "glory");
         app.handle_event(make_key(KeyCode::Char('b')), &mut rng);
         assert_eq!(app.act_filter, "boss");
         app.handle_event(make_key(KeyCode::Char('a')), &mut rng);
         assert_eq!(app.act_filter, "all");
+        app.handle_event(make_key(KeyCode::Char('o')), &mut rng);
+        assert_eq!(app.act_filter, "overgrowth");
     }
 
     #[test]
@@ -439,9 +510,9 @@ mod tests {
         let enc = SpireApiEncounter {
             id: "test_enc".into(),
             name: "Test Fight".into(),
-            room_type: Some("normal".into()),
+            room_type: Some("Monster".into()),
             is_weak: Some(false),
-            act: Some("1".into()),
+            act: Some("Act 1 - Overgrowth".into()),
             tags: vec![],
             monsters: vec![ApiEncounterMonster {
                 id: "cultist".into(),
@@ -451,7 +522,7 @@ mod tests {
         };
         let mut app = App::new(vec![enc], vec![]);
         let mut rng = seeded_rng();
-        // Act filter is "1", encounter is act 1 → should be in list
+        // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
         app.handle_event(make_key(KeyCode::Enter), &mut rng);
         assert_eq!(app.mode, AppMode::CombatAdvice);
@@ -496,9 +567,9 @@ mod tests {
         let make_enc = |id: &str| SpireApiEncounter {
             id: id.into(),
             name: id.into(),
-            room_type: None,
+            room_type: Some("Monster".into()),
             is_weak: None,
-            act: Some("1".into()),
+            act: Some("Act 1 - Overgrowth".into()),
             tags: vec![],
             monsters: vec![],
             loss_text: None,

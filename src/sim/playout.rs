@@ -32,6 +32,11 @@ pub struct PlayoutStats {
     pub win_rate: f32,
     /// Fraction of playouts where the player survived the enemy phase.
     pub survival_rate: f32,
+    /// HP lost by the player at the 10th/50th/90th percentile (higher = worse).
+    /// Positive values mean damage taken; 0 means no damage at that percentile.
+    pub hp_loss_p10: f32,
+    pub hp_loss_p50: f32,
+    pub hp_loss_p90: f32,
 }
 
 // ── Core playout ───────────────────────────────────────────────────────────
@@ -92,6 +97,14 @@ pub fn playout(mut state: CombatState, policy: &dyn Policy, rng: &mut impl Rng) 
     }
 }
 
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((p / 100.0) * (sorted.len() - 1) as f32).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 /// Run `n` independent playouts from the same initial state.
 ///
 /// Returns aggregate statistics. Useful for estimating win probability across
@@ -109,12 +122,14 @@ pub fn playout_n(
     let mut total_hp_delta = 0i64;
     let mut wins = 0u32;
     let mut survivals = 0u32;
+    let mut hp_losses: Vec<f32> = Vec::with_capacity(n as usize);
 
     for _ in 0..n {
         let result = playout(state.clone(), policy, rng);
         total_damage += result.damage_dealt as u64;
         total_block += result.block_gained as u64;
         total_hp_delta += result.player_hp_delta as i64;
+        hp_losses.push((-result.player_hp_delta).max(0) as f32);
         if result.player_alive && result.combat_over && result.damage_dealt >= state.enemies.iter().map(|e| e.hp).sum::<u32>() {
             wins += 1;
         }
@@ -123,6 +138,8 @@ pub fn playout_n(
         }
     }
 
+    hp_losses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     let f = n as f32;
     PlayoutStats {
         mean_damage_dealt: total_damage as f32 / f,
@@ -130,6 +147,9 @@ pub fn playout_n(
         mean_player_hp_delta: total_hp_delta as f32 / f,
         win_rate: wins as f32 / f,
         survival_rate: survivals as f32 / f,
+        hp_loss_p10: percentile(&hp_losses, 10.0),
+        hp_loss_p50: percentile(&hp_losses, 50.0),
+        hp_loss_p90: percentile(&hp_losses, 90.0),
     }
 }
 

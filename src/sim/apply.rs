@@ -2,9 +2,11 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use thiserror::Error;
 
+use crate::domain::ai::{AiCondition, AiRuntime, AiStateKind, EnemyAiScript, RepeatConstraint};
 use crate::domain::card::{Card, CardType};
-use crate::domain::combat::{CombatState, Intent};
+use crate::domain::combat::{CombatState, EnemyState, Intent};
 use crate::domain::effect::{BuffType, CardEffect};
+use crate::domain::encounter::map_intent;
 
 #[derive(Debug, Error)]
 pub enum SimError {
@@ -272,11 +274,136 @@ pub fn play_card(
 /// End the player's turn: enemies act, state resets, new hand drawn.
 ///
 /// Returns `true` if combat is over (won or lost) after the enemy phase.
+/// Step the enemy's move AI: determine next intent and advance internal state.
+/// No-ops if the enemy has no AI script (preserves existing test behaviour).
+pub fn advance_enemy_ai(enemy: &mut EnemyState, slot_index: usize, rng: &mut impl Rng) {
+    let Some(ref script) = enemy.ai_script else { return };
+
+    // Starting from the current state (a Move state), find what state comes next.
+    let current_id = enemy.ai_runtime.current_state_id.clone();
+    let next_state_id = match script.states.get(&current_id).map(|s| &s.kind) {
+        Some(AiStateKind::Move { next, .. }) => {
+            next.clone().unwrap_or_else(|| current_id.clone())
+        }
+        // Already at a routing node (shouldn't be normal); stay put
+        _ => current_id.clone(),
+    };
+
+    let (resolved_move_id, resolved_state_id) =
+        resolve_to_move(&next_state_id, script, &enemy.ai_runtime, enemy.hp, enemy.max_hp, slot_index, rng);
+
+    if let Some(move_id) = resolved_move_id {
+        let runtime = &mut enemy.ai_runtime;
+        if runtime.last_move_id.as_deref() == Some(&move_id) {
+            runtime.consecutive_count += 1;
+        } else {
+            runtime.consecutive_count = 1;
+        }
+        runtime.last_move_id = Some(move_id.clone());
+        runtime.used_moves.insert(move_id.clone());
+        runtime.current_state_id = resolved_state_id;
+
+        if let Some(data) = script.moves.get(&move_id) {
+            enemy.intent = map_intent(&data.intent_str, data.damage, data.hits);
+        }
+    }
+}
+
+/// Resolve a state ID to (move_id, landing_state_id), following one level of
+/// routing (Random/Conditional → Move). Returns (None, id) if unresolvable.
+fn resolve_to_move(
+    state_id: &str,
+    script: &EnemyAiScript,
+    runtime: &AiRuntime,
+    hp: u32,
+    max_hp: u32,
+    slot_index: usize,
+    rng: &mut impl Rng,
+) -> (Option<String>, String) {
+    let Some(state) = script.states.get(state_id) else {
+        return (None, state_id.to_string());
+    };
+
+    match &state.kind {
+        AiStateKind::Move { move_id, .. } => (Some(move_id.clone()), state_id.to_string()),
+
+        AiStateKind::Random { branches } => {
+            // Filter by repeat constraints; fall back to full list if all ineligible
+            let eligible: Vec<_> = branches.iter().filter(|b| is_eligible(b, runtime)).collect();
+            let pool: Vec<_> = if eligible.is_empty() { branches.iter().collect() } else { eligible };
+
+            // Weighted selection
+            let total: f32 = pool.iter().map(|b| b.weight).sum();
+            let total = if total <= 0.0 { pool.len() as f32 } else { total };
+            let mut r = rng.r#gen::<f32>() * total;
+            let chosen = pool.iter().find(|b| { r -= b.weight; r <= 0.0 }).unwrap_or(&pool[0]);
+
+            let landing = script
+                .find_state_by_move_id(&chosen.move_id)
+                .map(|s| s.id.clone())
+                .unwrap_or_else(|| state_id.to_string());
+            (Some(chosen.move_id.clone()), landing)
+        }
+
+        AiStateKind::Conditional { branches } => {
+            let picked = branches
+                .iter()
+                .find(|b| eval_condition(&b.condition, hp, max_hp, slot_index))
+                .or_else(|| branches.first());
+
+            match picked {
+                Some(b) => {
+                    let landing = script
+                        .find_state_by_move_id(&b.move_id)
+                        .map(|s| s.id.clone())
+                        .unwrap_or_else(|| state_id.to_string());
+                    (Some(b.move_id.clone()), landing)
+                }
+                None => (None, state_id.to_string()),
+            }
+        }
+    }
+}
+
+fn is_eligible(branch: &crate::domain::ai::RandomBranch, runtime: &AiRuntime) -> bool {
+    match &branch.repeat {
+        RepeatConstraint::CanRepeatForever => true,
+        RepeatConstraint::CannotRepeat => {
+            runtime.last_move_id.as_deref() != Some(&branch.move_id)
+        }
+        RepeatConstraint::CanRepeatXTimes => {
+            runtime.last_move_id.as_deref() != Some(&branch.move_id)
+                || runtime.consecutive_count < branch.max_times
+        }
+        RepeatConstraint::UseOnlyOnce => !runtime.used_moves.contains(&branch.move_id),
+    }
+}
+
+fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -> bool {
+    match cond {
+        AiCondition::HpAtOrAboveHalf => hp * 2 >= max_hp,
+        AiCondition::HpBelowHalf => hp * 2 < max_hp,
+        AiCondition::SlotIndex(i) => slot_index == *i,
+        AiCondition::AlwaysTrue => true,
+    }
+}
+
 pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
-    // Each living enemy resets block then executes its intent
+    // Each living enemy resets block, gains block from current move, then executes intent
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
             state.enemies[i].block = 0;
+            // Apply block component of current move before the player can respond
+            if let Some(ref script) = state.enemies[i].ai_script {
+                let block = state.enemies[i]
+                    .ai_runtime
+                    .last_move_id
+                    .as_deref()
+                    .and_then(|id| script.moves.get(id))
+                    .map(|m| m.block)
+                    .unwrap_or(0);
+                state.enemies[i].block = block;
+            }
             resolve_enemy_intent(state, i);
         }
     }
@@ -297,6 +424,13 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
 
     if state.is_over() {
         return true;
+    }
+
+    // Advance each living enemy's AI to set next turn's intent
+    for i in 0..state.enemies.len() {
+        if state.enemies[i].is_alive() {
+            advance_enemy_ai(&mut state.enemies[i], i, rng);
+        }
     }
 
     // Discard hand; ethereal cards go straight to exhaust

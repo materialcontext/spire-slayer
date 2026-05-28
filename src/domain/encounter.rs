@@ -1,32 +1,59 @@
+use rand::Rng;
+use rand::seq::SliceRandom;
+
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
+use crate::domain::ai::build_ai_script;
+use crate::domain::card::Card;
 use crate::domain::catalog::ironclad;
 use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
 use crate::domain::effect::BuffType;
 
-/// Normalize the API `act` string to a short canonical form: "1", "2", "3", "boss", "other".
+/// Normalize the API `act` string to a sub-act canonical name.
+///
+/// The game randomly assigns one of two sub-acts per act at run start.
+/// Act 1: "overgrowth" | "underdocks"
+/// Act 2: "hive"
+/// Act 3: "glory"
 pub fn normalize_act(act: &str) -> &'static str {
-    match act.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()) {
-        s if s.contains('1') || s == "act1" || s == "one" => "1",
-        s if s.contains('2') || s == "act2" || s == "two" => "2",
-        s if s.contains('3') || s == "act3" || s == "three" => "3",
-        s if s.contains("boss") || s.contains("4") => "boss",
-        _ => "other",
+    let s = act.to_lowercase();
+    if s.contains("overgrowth") { return "overgrowth"; }
+    if s.contains("underdock") { return "underdocks"; }
+    if s.contains("hive") { return "hive"; }
+    if s.contains("glory") { return "glory"; }
+    if s.contains("boss") { return "boss"; }
+    "other"
+}
+
+/// All sub-act canonical names for a given act number (1-indexed).
+pub fn sub_acts_for_act(act: u8) -> &'static [&'static str] {
+    match act {
+        1 => &["overgrowth", "underdocks"],
+        2 => &["hive"],
+        3 => &["glory"],
+        _ => &[],
     }
 }
 
 pub fn encounters_for_act<'a>(
     encounters: &'a [SpireApiEncounter],
-    act_filter: &str,
+    sub_act: &str,
 ) -> Vec<&'a SpireApiEncounter> {
-    if act_filter == "all" {
+    if sub_act == "all" {
         return encounters.iter().collect();
+    }
+    // "boss" across all sub-acts
+    if sub_act == "boss" {
+        return encounters
+            .iter()
+            .filter(|e| e.room_type.as_deref() == Some("Boss"))
+            .collect();
     }
     encounters
         .iter()
         .filter(|e| {
             e.act
                 .as_deref()
-                .map(|a| normalize_act(a) == act_filter)
+                .map(|a| normalize_act(a) == sub_act)
                 .unwrap_or(false)
         })
         .collect()
@@ -92,6 +119,18 @@ pub fn monster_to_enemy(monster: &SpireApiMonster) -> EnemyState {
         }
     }
 
+    // Wire up the AI move script if the monster has one
+    if let Some(script) = build_ai_script(monster) {
+        let initial_move_id = script.initial_move_id().map(String::from);
+        let initial_state_id = script.initial_state_id.clone();
+        enemy.ai_script = Some(script);
+        enemy.ai_runtime.current_state_id = initial_state_id;
+        if let Some(mid) = initial_move_id {
+            enemy.ai_runtime.last_move_id = Some(mid.clone());
+            enemy.ai_runtime.used_moves.insert(mid);
+        }
+    }
+
     enemy
 }
 
@@ -142,18 +181,47 @@ pub fn encounter_to_combat(
     state
 }
 
+/// Like `encounter_to_combat` but uses the caller-supplied deck and HP.
+///
+/// Shuffles the deck and deals a starting hand of 5. Used by the card-pick
+/// evaluator and the deck dashboard to run simulations with arbitrary decks.
+pub fn encounter_to_combat_with_deck(
+    enc: &SpireApiEncounter,
+    all_monsters: &[SpireApiMonster],
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    rng: &mut impl Rng,
+) -> CombatState {
+    let mut state = encounter_to_combat(enc, all_monsters);
+    state.player.hp = hp.max(1);
+    state.player.max_hp = max_hp;
+    state.player.block = 0;
+    state.player.buffs.clear();
+    let mut draw = deck.to_vec();
+    draw.shuffle(rng);
+    let hand: Vec<_> = draw.drain(..5.min(draw.len())).collect();
+    state.hand = hand;
+    state.draw_pile = draw;
+    state.discard_pile.clear();
+    state.energy = state.energy_max;
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn normalize_act_variants() {
-        assert_eq!(normalize_act("1"), "1");
-        assert_eq!(normalize_act("act1"), "1");
-        assert_eq!(normalize_act("Act 1"), "1");
-        assert_eq!(normalize_act("2"), "2");
+        assert_eq!(normalize_act("Act 1 - Overgrowth"), "overgrowth");
+        assert_eq!(normalize_act("act 1 - overgrowth"), "overgrowth");
+        assert_eq!(normalize_act("Act 1 - Underdocks"), "underdocks");
+        assert_eq!(normalize_act("Act 2 - Hive"), "hive");
+        assert_eq!(normalize_act("Act 3 - Glory"), "glory");
         assert_eq!(normalize_act("boss"), "boss");
         assert_eq!(normalize_act("Boss"), "boss");
+        assert_eq!(normalize_act("unknown"), "other");
     }
 
     #[test]
@@ -218,6 +286,7 @@ mod tests {
                 powers: vec![],
             }],
             innate_powers: vec![],
+            attack_pattern: None,
         };
         let enemy = monster_to_enemy(&monster);
         assert_eq!(enemy.name, "Cultist");
@@ -250,6 +319,7 @@ mod tests {
                 powers: vec![],
             }],
             innate_powers: vec![],
+            attack_pattern: None,
         };
         let encounter = SpireApiEncounter {
             id: "jaw_worm_fight".into(),
@@ -293,19 +363,25 @@ mod tests {
 
     #[test]
     fn encounters_for_act_filter() {
-        let make = |act: &str| SpireApiEncounter {
+        let make = |act: &str, room_type: &str| SpireApiEncounter {
             id: act.to_string(),
             name: act.to_string(),
-            room_type: None,
+            room_type: Some(room_type.to_string()),
             is_weak: None,
             act: Some(act.to_string()),
             tags: vec![],
             monsters: vec![],
             loss_text: None,
         };
-        let all = vec![make("1"), make("1"), make("2"), make("boss")];
-        assert_eq!(encounters_for_act(&all, "1").len(), 2);
-        assert_eq!(encounters_for_act(&all, "2").len(), 1);
+        let all = vec![
+            make("Act 1 - Overgrowth", "Monster"),
+            make("Act 1 - Overgrowth", "Monster"),
+            make("Act 1 - Underdocks", "Monster"),
+            make("Act 2 - Hive", "Monster"),
+        ];
+        assert_eq!(encounters_for_act(&all, "overgrowth").len(), 2);
+        assert_eq!(encounters_for_act(&all, "underdocks").len(), 1);
+        assert_eq!(encounters_for_act(&all, "hive").len(), 1);
         assert_eq!(encounters_for_act(&all, "all").len(), 4);
     }
 }

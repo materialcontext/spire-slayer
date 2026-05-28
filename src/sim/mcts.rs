@@ -23,6 +23,10 @@ pub struct PlayAdvice {
     pub rationale: String,
     /// Number of candidate sequences evaluated.
     pub simulation_count: u32,
+    /// HP-loss distribution across stochastic playouts (positive = damage taken).
+    pub hp_loss_p10: f32,
+    pub hp_loss_p50: f32,
+    pub hp_loss_p90: f32,
 }
 
 // ── Core algorithm ─────────────────────────────────────────────────────────
@@ -54,6 +58,9 @@ pub fn best_play_sequence(
             expected_hp_retained: state.player.hp as f32,
             rationale: "No playable cards — pass turn.".to_string(),
             simulation_count: 0,
+            hp_loss_p10: 0.0,
+            hp_loss_p50: 0.0,
+            hp_loss_p90: 0.0,
         };
     }
 
@@ -91,6 +98,9 @@ pub fn best_play_sequence(
         expected_hp_retained: best_hp,
         rationale,
         simulation_count: sim_count,
+        hp_loss_p10: 0.0,
+        hp_loss_p50: 0.0,
+        hp_loss_p90: 0.0,
     }
 }
 

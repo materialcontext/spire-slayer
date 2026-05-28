@@ -6,11 +6,13 @@ use std::time::SystemTime;
 const CARDS_API_URL: &str = "https://spire-codex.com/api/cards";
 const MONSTERS_API_URL: &str = "https://spire-codex.com/api/monsters";
 const ENCOUNTERS_API_URL: &str = "https://spire-codex.com/api/encounters";
+const EVENTS_API_URL: &str = "https://spire-codex.com/api/events";
 const CACHE_TTL_SECS: u64 = 86_400;
 
 const SEED_JSON: &str = include_str!("../../data/cards_seed.json");
 const MONSTERS_SEED_JSON: &str = include_str!("../../data/monsters_seed.json");
 const ENCOUNTERS_SEED_JSON: &str = include_str!("../../data/encounters_seed.json");
+const EVENTS_SEED_JSON: &str = include_str!("../../data/events_seed.json");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPower {
@@ -119,6 +121,38 @@ pub struct SpireApiMonster {
     pub moves: Vec<ApiMonsterMove>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub innate_powers: Vec<ApiInnatePower>,
+    pub attack_pattern: Option<SpireApiAttackPattern>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAttackPattern {
+    #[serde(rename = "type")]
+    pub pattern_type: Option<String>,
+    pub initial_move: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub states: Vec<SpireApiAiState>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAiState {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub state_type: Option<String>,
+    pub move_id: Option<String>,
+    pub must_perform_once: Option<bool>,
+    pub next: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub branches: Vec<SpireApiAiBranch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAiBranch {
+    pub move_id: Option<String>,
+    pub weight: Option<f32>,
+    pub repeat: Option<String>,
+    pub max_times: Option<i32>,
+    pub condition: Option<String>,
 }
 
 // ── Encounter API ────────────────────────────────────────────────────────────
@@ -141,6 +175,44 @@ pub struct SpireApiEncounter {
     #[serde(default, deserialize_with = "null_as_default")]
     pub monsters: Vec<ApiEncounterMonster>,
     pub loss_text: Option<String>,
+}
+
+// ── Event API ─────────────────────────────────────────────────────────────────
+
+/// A single outcome/choice branch within an event.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiEventChoice {
+    pub id: Option<String>,
+    pub text: Option<String>,
+    pub description: Option<String>,
+    /// Outcomes this choice can produce (e.g. "gold", "hp_loss", "card", "relic").
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub outcomes: Vec<ApiEventOutcome>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiEventOutcome {
+    #[serde(rename = "type")]
+    pub outcome_type: Option<String>,
+    pub amount: Option<i32>,
+    pub description: Option<String>,
+    /// If true this outcome leads to combat.
+    pub combat: Option<bool>,
+    pub encounter_id: Option<String>,
+}
+
+/// A spire-codex event entry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiEvent {
+    pub id: String,
+    pub name: String,
+    pub act: Option<String>,
+    pub room_type: Option<String>,
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub choices: Vec<ApiEventChoice>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub tags: Vec<String>,
 }
 
 fn named_cache_path(name: &str) -> PathBuf {
@@ -192,6 +264,10 @@ pub fn load_monsters() -> Vec<SpireApiMonster> {
 
 pub fn load_encounters() -> Vec<SpireApiEncounter> {
     load_cached(ENCOUNTERS_API_URL, "encounters", ENCOUNTERS_SEED_JSON)
+}
+
+pub fn load_events() -> Vec<SpireApiEvent> {
+    load_cached(EVENTS_API_URL, "events", EVENTS_SEED_JSON)
 }
 
 // Refactor load_cards to use the same helper (keep original signature for compatibility)
