@@ -6,6 +6,7 @@ use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, Spir
 use crate::domain::card::Card;
 use crate::domain::catalog;
 use crate::domain::combat::CombatState;
+use crate::domain::reward::{sample_offer, RewardKind};
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
 use crate::domain::run::{PlayerClass, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
@@ -358,8 +359,10 @@ impl App {
                 self.compute_deck_dash(rng);
             }
             KeyCode::Char('p') => {
-                let color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
-                let offered = sample_card_offer(color, rng);
+                let pool = card_pool_for_run(self);
+                // Preview: use a throwaway offset so the real run's offset is unchanged.
+                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+                let offered = sample_offer(&pool, RewardKind::Monster, &mut preview_offset, rng);
                 self.load_pick(offered, rng, AppMode::CombatAdvice);
             }
             KeyCode::Char('v') => {
@@ -577,9 +580,15 @@ impl App {
         });
 
         match room {
-            Some(RoomType::Monster) | Some(RoomType::Elite) => {
-                let color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
-                let offered = sample_card_offer(color, rng);
+            Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {
+                let kind = if rt == RoomType::Elite { RewardKind::Elite } else { RewardKind::Monster };
+                let pool = card_pool_for_run(self);
+                let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
+                let offered = if let Some(off) = offset {
+                    sample_offer(&pool, kind, off, rng)
+                } else {
+                    pool.into_iter().take(3).collect()
+                };
                 self.load_pick(offered, rng, AppMode::MapView);
             }
             Some(RoomType::Rest) => self.open_rest_site(),
@@ -751,12 +760,9 @@ impl App {
 }
 
 /// Return 3 random cards from the current character's pool as a simulated reward.
-fn sample_card_offer(color: &str, rng: &mut impl rand::Rng) -> Vec<Card> {
-    use rand::seq::SliceRandom;
-    let mut pool = catalog::cards_for_character(color);
-    pool.shuffle(rng);
-    pool.truncate(3);
-    pool
+fn card_pool_for_run(app: &App) -> Vec<Card> {
+    let color = app.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+    catalog::cards_for_character(color)
 }
 
 /// Derive the character color string (used by the card catalog) from a PlayerClass.
@@ -1022,18 +1028,23 @@ mod tests {
         app
     }
 
+    fn make_offer(app: &App, rng: &mut StdRng) -> Vec<Card> {
+        let pool = card_pool_for_run(app);
+        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+        sample_offer(&pool, RewardKind::Monster, &mut offset, rng)
+    }
+
     #[test]
     fn card_pick_from_map_adds_to_deck() {
         let mut rng = seeded_rng();
         let mut app = app_with_run();
         let deck_before = app.run.as_ref().unwrap().deck.len();
 
-        let offered = sample_card_offer("ironclad", &mut rng);
+        let offered = make_offer(&app, &mut rng);
         app.load_pick(offered, &mut rng, AppMode::MapView);
         assert_eq!(app.mode, AppMode::CardPick);
         assert!(!app.offered_cards.is_empty());
 
-        // Navigate to the first non-skip option and confirm.
         let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);
         app.selected_row = first_card_rank;
         app.handle_event(make_key(KeyCode::Enter), &mut rng);
@@ -1048,7 +1059,7 @@ mod tests {
         let mut app = app_with_run();
         let deck_before = app.run.as_ref().unwrap().deck.len();
 
-        let offered = sample_card_offer("ironclad", &mut rng);
+        let offered = make_offer(&app, &mut rng);
         app.load_pick(offered, &mut rng, AppMode::MapView);
 
         let skip_rank = app.card_advice.iter().position(|a| a.card_index == usize::MAX).unwrap();
@@ -1065,7 +1076,7 @@ mod tests {
         let mut app = app_with_run();
         let deck_before = app.run.as_ref().unwrap().deck.len();
 
-        let offered = sample_card_offer("ironclad", &mut rng);
+        let offered = make_offer(&app, &mut rng);
         app.load_pick(offered, &mut rng, AppMode::CombatAdvice);
 
         let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);

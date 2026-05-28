@@ -68,6 +68,9 @@ pub struct RunState {
     pub map_pos: Option<MapPos>,
     /// Current sub-act name, e.g. "overgrowth".
     pub sub_act: String,
+    /// Rare-card offset for card rewards (percentage points).
+    /// Starts at -5, increments +1 per non-rare card rolled (cap +40), resets to -5 on rare.
+    pub rare_offset: i32,
 }
 
 impl RunState {
@@ -91,6 +94,7 @@ impl RunState {
             map: None,
             map_pos: None,
             sub_act: "overgrowth".to_string(),
+            rare_offset: -5,
         }
     }
 
