@@ -71,6 +71,8 @@ pub struct RunState {
     /// Rare-card offset for card rewards (percentage points).
     /// Starts at -5, increments +1 per non-rare card rolled (cap +40), resets to -5 on rare.
     pub rare_offset: i32,
+    /// Number of card removals purchased at a shop this run (affects removal price).
+    pub card_removals_bought: u32,
 }
 
 impl RunState {
@@ -95,6 +97,7 @@ impl RunState {
             map_pos: None,
             sub_act: "overgrowth".to_string(),
             rare_offset: -5,
+            card_removals_bought: 0,
         }
     }
 

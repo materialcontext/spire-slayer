@@ -1378,13 +1378,15 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(2),  // header
             Constraint::Min(8),     // cards
             Constraint::Length(6),  // relics
+            Constraint::Length(2),  // removal service
             Constraint::Length(1),  // hint
             Constraint::Length(1),  // status
         ])
         .split(area);
 
     let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
-    let header = Paragraph::new(format!(" SHOP   Floor {floor}   ↑↓ navigate  Enter buy  Esc leave"))
+    let gold = app.run.as_ref().map(|r| r.gold).unwrap_or(0);
+    let header = Paragraph::new(format!(" SHOP   Floor {floor}   Gold: {gold}g   ↑↓ navigate  Enter buy  Esc leave"))
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
     frame.render_widget(header, rows[0]);
 
@@ -1394,18 +1396,23 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
         let is_cursor = i == app.shop_cursor;
         let advice = app.shop_card_advice.iter().find(|a| a.card_index == i);
         let prefix = if is_cursor { "▶ " } else { "  " };
-        let cursor_style = if is_cursor {
+        let price = app.shop_card_prices.get(i).copied().unwrap_or(0);
+        let is_discounted = app.shop_discounted_card_idx == Some(i);
+        let discount_marker = if is_discounted { " [SALE]" } else { "" };
+        let reason = advice.map(|a| a.reason.as_str()).unwrap_or("");
+        let label = format!("{prefix}{}{discount_marker}  {price}g   {reason}", card.name);
+        let style = if is_cursor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if is_discounted {
+            Style::default().fg(Color::LightGreen)
         } else {
             Style::default().fg(Color::White)
         };
-        let reason = advice.map(|a| a.reason.as_str()).unwrap_or("");
-        let label = format!("{prefix}{}   {reason}", card.name);
-        Line::from(vec![Span::styled(label, cursor_style)])
+        Line::from(vec![Span::styled(label, style)])
     }).collect();
 
     let cards_widget = Paragraph::new(Text::from(card_lines))
-        .block(Block::default().borders(Borders::ALL).title(" Cards "))
+        .block(Block::default().borders(Borders::ALL).title(" Cards (5 class · 2 colorless) "))
         .wrap(Wrap { trim: false });
     frame.render_widget(cards_widget, rows[1]);
 
@@ -1414,8 +1421,9 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
         let cursor_idx = n_cards + i;
         let is_cursor = cursor_idx == app.shop_cursor;
         let prefix = if is_cursor { "▶ " } else { "  " };
+        let price = app.shop_relic_prices.get(i).copied().unwrap_or(0);
         let desc = strip_tags(relic.description.as_deref().unwrap_or(""));
-        let label = format!("{prefix}{} — {:.60}", relic.name, desc);
+        let label = format!("{prefix}{}  {price}g — {:.55}", relic.name, desc);
         let style = if is_cursor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
         } else {
@@ -1429,14 +1437,33 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
     frame.render_widget(relics_widget, rows[2]);
 
+    // Card Removal Service
+    let removal_cursor = n_cards + app.shop_relics.len();
+    let removal_is_cursor = app.shop_cursor == removal_cursor;
+    let removal_line = if app.shop_has_removal {
+        let price = app.shop_removal_price;
+        let prefix = if removal_is_cursor { "▶ " } else { "  " };
+        let style = if removal_is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Line::from(vec![Span::styled(format!("{prefix}Card Removal Service  {price}g"), style)])
+    } else {
+        Line::from(vec![Span::styled("  Card Removal Service  [sold]", Style::default().fg(Color::DarkGray))])
+    };
+    let removal_widget = Paragraph::new(Text::from(vec![removal_line]))
+        .block(Block::default().borders(Borders::ALL).title(" Services "));
+    frame.render_widget(removal_widget, rows[3]);
+
     let hint = Paragraph::new("  ↑↓ navigate  Enter buy  Esc leave")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[3]);
+    frame.render_widget(hint, rows[4]);
 
     let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
     let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, rows[4]);
+    frame.render_widget(status, rows[5]);
 }
 
 fn capitalize(s: &str) -> String {

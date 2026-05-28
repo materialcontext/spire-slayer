@@ -80,7 +80,13 @@ pub struct App {
     /// Shop inventory.
     pub shop_cards: Vec<Card>,
     pub shop_card_advice: Vec<CardAdvice>,
+    pub shop_card_prices: Vec<u32>,
     pub shop_relics: Vec<SpireApiRelic>,
+    pub shop_relic_prices: Vec<u32>,
+    /// Index into shop_cards that has the 50% discount (None = no discount shown yet).
+    pub shop_discounted_card_idx: Option<usize>,
+    pub shop_has_removal: bool,
+    pub shop_removal_price: u32,
     pub shop_cursor: usize,
 }
 
@@ -128,7 +134,12 @@ impl App {
             relic_cursor: 0,
             shop_cards: Vec::new(),
             shop_card_advice: Vec::new(),
+            shop_card_prices: Vec::new(),
             shop_relics: Vec::new(),
+            shop_relic_prices: Vec::new(),
+            shop_discounted_card_idx: None,
+            shop_has_removal: false,
+            shop_removal_price: 75,
             shop_cursor: 0,
         };
         app.refresh_filter();
@@ -785,42 +796,133 @@ impl App {
 
     fn open_shop(&mut self, rng: &mut impl rand::Rng) {
         use rand::seq::SliceRandom;
+        use crate::domain::card::{CardType, Rarity};
         use crate::metrics::card_pick::pick_score;
 
-        // 5 cards at shop rarity weights
-        let pool = card_pool_for_run(self);
-        let mut offset_copy = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
-        let mut cards = sample_offer(&pool, RewardKind::Shop, &mut offset_copy, rng);
-        let extra = sample_offer(&pool, RewardKind::Shop, &mut offset_copy, rng);
-        cards.extend(extra);
-        cards.truncate(5);
+        let class_color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+        let class_pool = catalog::cards_for_character(class_color);
 
-        // 2 shop relics
-        let class_pool = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
-        let relic_pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+        // ── 5 colored cards: 2 Attack + 2 Skill + 1 Power ─────────────────
+        let mut shop_cards: Vec<Card> = Vec::with_capacity(7);
+        let mut shop_card_prices: Vec<u32> = Vec::with_capacity(7);
+
+        let card_slots: &[(CardType, usize)] = &[
+            (CardType::Attack, 2),
+            (CardType::Skill, 2),
+            (CardType::Power, 1),
+        ];
+        for (ct, count) in card_slots {
+            let type_pool: Vec<&Card> = class_pool.iter()
+                .filter(|c| c.card_type == *ct
+                    && matches!(c.rarity, Rarity::Common | Rarity::Uncommon | Rarity::Rare))
+                .collect();
+            for _ in 0..*count {
+                let rarity = shop_card_rarity(rng);
+                let rarity_pool: Vec<&Card> = type_pool.iter()
+                    .filter(|c| c.rarity == rarity)
+                    .copied()
+                    .collect();
+                let pick_pool: &[&Card] = if rarity_pool.is_empty() { &type_pool } else { &rarity_pool };
+                if let Some(card) = pick_pool.choose(rng).map(|c| (*c).clone()) {
+                    let price = colored_card_price(&rarity, rng);
+                    shop_cards.push(card);
+                    shop_card_prices.push(price);
+                }
+            }
+        }
+
+        // ── 2 colorless cards: 1 Uncommon + 1 Rare ────────────────────────
+        let colorless_pool = catalog::colorless::all_cards();
+        for target_rarity in &[Rarity::Uncommon, Rarity::Rare] {
+            let rarity_pool: Vec<&Card> = colorless_pool.iter()
+                .filter(|c| c.rarity == *target_rarity)
+                .collect();
+            if let Some(card) = rarity_pool.choose(rng).map(|c| (*c).clone()) {
+                let price = colorless_card_price(target_rarity, rng);
+                shop_cards.push(card);
+                shop_card_prices.push(price);
+            }
+        }
+
+        // ── 3 relics: 2 weighted + 1 Shop Relic always ────────────────────
+        const SHOP_BLACKLIST: &[&str] = &[
+            "AMETHYST_AUBERGINE", "BOWLER_HAT", "LUCKY_FYSH", "OLD_COIN", "THE_COURIER",
+        ];
+        let relic_regular_pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
             let rarity = r.rarity.as_deref().unwrap_or("");
             let p = r.pool.as_deref().unwrap_or("shared");
-            rarity == "Shop Relic" && (p == "shared" || p == class_pool)
+            matches!(rarity, "Common Relic" | "Uncommon Relic" | "Rare Relic")
+                && (p == "shared" || p == class_color)
+                && !SHOP_BLACKLIST.contains(&r.id.as_str())
         }).collect();
-        let shop_relics: Vec<SpireApiRelic> = relic_pool
-            .choose_multiple(rng, 2)
-            .map(|r| (*r).clone())
-            .collect();
 
-        // Score the cards
-        let advice = if let Some(run) = &self.run {
-            pick_score(&cards, run)
+        let mut shop_relics: Vec<SpireApiRelic> = Vec::with_capacity(3);
+        let mut shop_relic_prices: Vec<u32> = Vec::with_capacity(3);
+
+        for _ in 0..2 {
+            let rarity_str = relic_regular_rarity(rng);
+            let already_taken: std::collections::HashSet<&str> = shop_relics.iter().map(|r| r.id.as_str()).collect();
+            // Prefer requested rarity; fall back to any rarity if the bucket is empty.
+            let filtered: Vec<&SpireApiRelic> = relic_regular_pool.iter()
+                .filter(|r| r.rarity.as_deref().unwrap_or("") == rarity_str && !already_taken.contains(r.id.as_str()))
+                .copied()
+                .collect();
+            let fallback: Vec<&SpireApiRelic> = relic_regular_pool.iter()
+                .filter(|r| !already_taken.contains(r.id.as_str()))
+                .copied()
+                .collect();
+            let pick_pool = if filtered.is_empty() { &fallback } else { &filtered };
+            if let Some(r) = pick_pool.choose(rng).map(|r| (*r).clone()) {
+                let price = relic_price(r.rarity.as_deref().unwrap_or(""), rng);
+                shop_relics.push(r);
+                shop_relic_prices.push(price);
+            }
+        }
+
+        // Rightmost relic is always a Shop Relic
+        let shop_relic_pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            rarity == "Shop Relic" && (p == "shared" || p == class_color)
+        }).collect();
+        if let Some(r) = shop_relic_pool.choose(rng).map(|r| (*r).clone()) {
+            let price: u32 = rng.gen_range(170..=230);
+            shop_relics.push(r);
+            shop_relic_prices.push(price);
+        }
+
+        // ── One random card gets 50% discount ─────────────────────────────
+        let discounted_idx = if !shop_cards.is_empty() {
+            let idx = rng.gen_range(0..shop_cards.len());
+            shop_card_prices[idx] = (shop_card_prices[idx] / 2).max(1);
+            Some(idx)
         } else {
-            cards.iter().enumerate().map(|(i, _)| crate::metrics::card_pick::CardAdvice {
+            None
+        };
+
+        // ── Removal service ────────────────────────────────────────────────
+        let removals = self.run.as_ref().map(|r| r.card_removals_bought).unwrap_or(0);
+        let removal_price = 75 + 25 * removals;
+
+        // ── Score the cards ────────────────────────────────────────────────
+        let advice = if let Some(run) = &self.run {
+            pick_score(&shop_cards, run)
+        } else {
+            shop_cards.iter().enumerate().map(|(i, _)| crate::metrics::card_pick::CardAdvice {
                 card_index: i, score: 0.0, reason: String::new(),
                 win_rate: 0.0, mean_hp_delta: 0.0, hp_loss_p50: 0.0,
                 delta_win_rate: 0.0, delta_hp: 0.0,
             }).collect()
         };
 
-        self.shop_cards = cards;
+        self.shop_cards = shop_cards;
         self.shop_card_advice = advice;
+        self.shop_card_prices = shop_card_prices;
         self.shop_relics = shop_relics;
+        self.shop_relic_prices = shop_relic_prices;
+        self.shop_discounted_card_idx = discounted_idx;
+        self.shop_has_removal = true;
+        self.shop_removal_price = removal_price;
         self.shop_cursor = 0;
         self.mode = AppMode::Shop;
     }
@@ -828,7 +930,8 @@ impl App {
     fn handle_key_shop(&mut self, key: KeyEvent) {
         let n_cards = self.shop_cards.len();
         let n_relics = self.shop_relics.len();
-        let total = n_cards + n_relics;
+        let has_removal = self.shop_has_removal;
+        let total = n_cards + n_relics + if has_removal { 1 } else { 0 };
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 if total > 0 { self.shop_cursor = (self.shop_cursor + 1).min(total - 1); }
@@ -839,34 +942,73 @@ impl App {
             KeyCode::Enter => {
                 if self.shop_cursor < n_cards {
                     let card = self.shop_cards.get(self.shop_cursor).cloned();
+                    let price = self.shop_card_prices.get(self.shop_cursor).copied().unwrap_or(0);
                     if let (Some(card), Some(run)) = (card, self.run.as_mut()) {
+                        if run.gold < price {
+                            self.status_message = format!("Not enough gold ({}/{}g)", run.gold, price);
+                            return;
+                        }
+                        run.gold -= price;
                         let name = card.name.clone();
                         run.deck.push(card);
-                        self.status_message = format!("Bought {} ({} cards)", name, run.deck.len());
+                        self.status_message = format!("Bought {} for {}g ({} cards, {}g left)", name, price, run.deck.len(), run.gold);
                         self.shop_cards.remove(self.shop_cursor);
+                        self.shop_card_prices.remove(self.shop_cursor);
+                        if let Some(ref mut di) = self.shop_discounted_card_idx {
+                            if *di == self.shop_cursor {
+                                self.shop_discounted_card_idx = None;
+                            } else if *di > self.shop_cursor {
+                                *di -= 1;
+                            }
+                        }
                         self.shop_card_advice.retain(|a| a.card_index != self.shop_cursor);
-                        if self.shop_cursor >= self.shop_cards.len() {
-                            self.shop_cursor = self.shop_cursor.saturating_sub(1);
+                        if self.shop_cursor >= self.shop_cards.len() && self.shop_cursor > 0 {
+                            self.shop_cursor -= 1;
                         }
                     }
-                } else {
+                } else if self.shop_cursor < n_cards + n_relics {
                     let relic_idx = self.shop_cursor - n_cards;
                     let relic = self.shop_relics.get(relic_idx).cloned();
+                    let price = self.shop_relic_prices.get(relic_idx).copied().unwrap_or(0);
                     if let (Some(relic), Some(run)) = (relic, self.run.as_mut()) {
+                        if run.gold < price {
+                            self.status_message = format!("Not enough gold ({}/{}g)", run.gold, price);
+                            return;
+                        }
+                        run.gold -= price;
                         let desc = relic.description.clone().unwrap_or_default();
                         run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
-                        self.status_message = format!("Bought {}", relic.name);
+                        self.status_message = format!("Bought {} for {}g ({}g left)", relic.name, price, run.gold);
                         self.shop_relics.remove(relic_idx);
-                        if self.shop_cursor >= self.shop_cards.len() + self.shop_relics.len() {
-                            self.shop_cursor = self.shop_cursor.saturating_sub(1);
+                        self.shop_relic_prices.remove(relic_idx);
+                        let new_total = self.shop_cards.len() + self.shop_relics.len() + if self.shop_has_removal { 1 } else { 0 };
+                        if self.shop_cursor >= new_total && self.shop_cursor > 0 {
+                            self.shop_cursor -= 1;
                         }
+                    }
+                } else if has_removal && self.shop_cursor == n_cards + n_relics {
+                    let price = self.shop_removal_price;
+                    if let Some(run) = self.run.as_mut() {
+                        if run.gold < price {
+                            self.status_message = format!("Not enough gold ({}/{}g)", run.gold, price);
+                            return;
+                        }
+                        run.gold -= price;
+                        run.card_removals_bought += 1;
+                        self.shop_removal_price = 75 + 25 * run.card_removals_bought;
+                        self.shop_has_removal = false;
+                        self.status_message = format!("Card removal purchased for {}g ({}g left)", price, run.gold);
+                        if self.shop_cursor > 0 { self.shop_cursor -= 1; }
                     }
                 }
             }
             KeyCode::Esc => {
                 self.shop_cards.clear();
                 self.shop_card_advice.clear();
+                self.shop_card_prices.clear();
                 self.shop_relics.clear();
+                self.shop_relic_prices.clear();
+                self.shop_discounted_card_idx = None;
                 self.mode = AppMode::MapView;
             }
             KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
@@ -928,6 +1070,50 @@ impl App {
 fn card_pool_for_run(app: &App) -> Vec<Card> {
     let color = app.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
     catalog::cards_for_character(color)
+}
+
+/// Pick a rarity for a shop card: 54% Common, 37% Uncommon, 9% Rare.
+fn shop_card_rarity(rng: &mut impl rand::Rng) -> crate::domain::card::Rarity {
+    use crate::domain::card::Rarity;
+    let roll: u32 = rng.gen_range(0..100);
+    if roll < 54 { Rarity::Common } else if roll < 91 { Rarity::Uncommon } else { Rarity::Rare }
+}
+
+/// Price for a colored card at shop.
+fn colored_card_price(rarity: &crate::domain::card::Rarity, rng: &mut impl rand::Rng) -> u32 {
+    use crate::domain::card::Rarity;
+    match rarity {
+        Rarity::Common   => rng.gen_range(48..=53),
+        Rarity::Uncommon => rng.gen_range(71..=79),
+        Rarity::Rare     => rng.gen_range(143..=158),
+        _                => rng.gen_range(48..=53),
+    }
+}
+
+/// Price for a colorless card at shop.
+fn colorless_card_price(rarity: &crate::domain::card::Rarity, rng: &mut impl rand::Rng) -> u32 {
+    use crate::domain::card::Rarity;
+    match rarity {
+        Rarity::Uncommon => rng.gen_range(82..=90),
+        Rarity::Rare     => rng.gen_range(164..=181),
+        _                => rng.gen_range(82..=90),
+    }
+}
+
+/// Pick a rarity string for a regular shop relic: 50% Common, 33% Uncommon, 17% Rare.
+fn relic_regular_rarity(rng: &mut impl rand::Rng) -> &'static str {
+    let roll: u32 = rng.gen_range(0..100);
+    if roll < 50 { "Common Relic" } else if roll < 83 { "Uncommon Relic" } else { "Rare Relic" }
+}
+
+/// Price for a shop relic based on its rarity string.
+fn relic_price(rarity: &str, rng: &mut impl rand::Rng) -> u32 {
+    match rarity {
+        "Common Relic"   => rng.gen_range(149..=201),
+        "Uncommon Relic" => rng.gen_range(191..=259),
+        "Rare Relic"     => rng.gen_range(234..=316),
+        _                => rng.gen_range(149..=201),
+    }
 }
 
 /// Derive the character color string (used by the card catalog) from a PlayerClass.
