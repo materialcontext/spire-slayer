@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::domain::card::Card;
-use crate::domain::map::{ActMap, MapPos, sub_act_rows};
+use crate::domain::map::{ActMap, MapPos};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlayerClass {
@@ -103,8 +103,7 @@ impl RunState {
 
     /// Generate (or regenerate) the map for the current sub-act.
     pub fn generate_map(&mut self, seed: u64, ascension: u8) {
-        let rows = sub_act_rows(&self.sub_act);
-        self.map = Some(ActMap::generate(seed, rows, ascension));
+        self.map = Some(ActMap::generate(seed, ascension));
         self.map_pos = None;
     }
 

@@ -1,13 +1,13 @@
-//! Act map generation — STS reverse-engineered algorithm adapted for STS2.
+//! Act map generation — STS reverse-engineered algorithm.
 //!
 //! Algorithm source:
 //! https://www.reddit.com/r/slaythespire/comments/ndqweh/
 //!
-//! Key rules:
-//!   - 7 columns × N rows (N varies per sub-act)
-//!   - 6 paths generated top-to-bottom; no crossing edges; first 2 starts differ
+//! Key rules (STS1 baseline, assumed unchanged in STS2):
+//!   - 7 columns × 15 rows, fixed for all acts
+//!   - 6 paths generated bottom-to-top; no crossing edges; first 2 starts differ
 //!   - Floor-0→1 convergent edges are trimmed
-//!   - Floor 1 = monsters, floor ~9/15 = treasure, last floor = rest (pre-assigned)
+//!   - Floor 1 = monsters, floor 9 = treasure, floor 15 = rest (pre-assigned, 1-indexed)
 //!   - Remaining rooms filled from a shuffled type bucket with adjacency constraints
 
 use rand::seq::SliceRandom;
@@ -16,23 +16,17 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 pub const COLS: usize = 7;
+pub const ROWS: usize = 15;
 const PATHS: usize = 6;
+const TREASURE_FLOOR: usize = 8; // floor 9 (1-indexed), same as STS1
+const MIN_SPECIAL_FLOOR: usize = 5; // Elite/Rest locked below floor 6 (1-indexed)
+const NO_REST_FLOOR: usize = ROWS - 2; // Rest banned on floor 14 (1-indexed)
 
 const PCT_SHOP: f64 = 0.05;
 const PCT_REST: f64 = 0.12;
 const PCT_EVENT: f64 = 0.22;
 const PCT_ELITE: f64 = 0.08;
 const PCT_ELITE_A1: f64 = 0.128; // 0.08 * 1.6 at ascension >= 1
-
-/// STS2 row counts per sub-act from the /api/acts endpoint.
-pub fn sub_act_rows(sub_act: &str) -> usize {
-    match sub_act {
-        "overgrowth" | "underdocks" => 15,
-        "hive" => 14,
-        "glory" => 13,
-        _ => 15,
-    }
-}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,9 +78,9 @@ pub struct ActMap {
 impl ActMap {
     /// Generate a new act map deterministically from `seed`.
     ///
-    /// - `rows`: number of floors — use `sub_act_rows(sub_act)`
     /// - `ascension`: current ascension level (≥1 boosts elite %)
-    pub fn generate(seed: u64, rows: usize, ascension: u8) -> Self {
+    pub fn generate(seed: u64, ascension: u8) -> Self {
+        let rows = ROWS;
         let mut rng = StdRng::seed_from_u64(seed);
 
         // ── Phase 1: Build path adjacency ────────────────────────────────────
@@ -132,16 +126,11 @@ impl ActMap {
         };
 
         // ── Phase 4: Pre-assign fixed floors ─────────────────────────────────
-        // Treasure floor scales from STS1's floor 9-of-15 → index 8.
-        let treasure_floor = ((8.0 * (rows - 1) as f64) / 14.0).round() as usize;
-
         let mut room_types: Vec<Vec<Option<RoomType>>> = vec![vec![None; COLS]; rows];
         for col in 0..COLS {
-            if is_conn(0, col) { room_types[0][col] = Some(RoomType::Monster); }
-            if treasure_floor > 0 && treasure_floor < rows - 1 && is_conn(treasure_floor, col) {
-                room_types[treasure_floor][col] = Some(RoomType::Treasure);
-            }
-            if is_conn(rows - 1, col) { room_types[rows - 1][col] = Some(RoomType::Rest); }
+            if is_conn(0, col)              { room_types[0][col]              = Some(RoomType::Monster);  }
+            if is_conn(TREASURE_FLOOR, col) { room_types[TREASURE_FLOOR][col] = Some(RoomType::Treasure); }
+            if is_conn(rows - 1, col)       { room_types[rows - 1][col]       = Some(RoomType::Rest);     }
         }
 
         // ── Phase 5: Build type bucket ────────────────────────────────────────
@@ -169,10 +158,6 @@ impl ActMap {
         bucket.shuffle(&mut rng);
 
         // ── Phase 6: Assign types with constraints ────────────────────────────
-        // "Elite/Rest can't be below floor 6" — scale proportionally for short acts.
-        let min_special_floor = ((5.0 * (rows - 1) as f64) / 14.0).round() as usize;
-        let no_rest_floor = rows - 2; // Rest banned on second-to-last floor
-
         let candidates: Vec<(usize, usize)> = (0..rows)
             .flat_map(|f| (0..COLS).map(move |c| (f, c)))
             .filter(|&(f, c)| is_conn(f, c) && room_types[f][c].is_none())
@@ -181,8 +166,7 @@ impl ActMap {
         'outer: for (floor, col) in candidates {
             for i in 0..bucket.len() {
                 let rt = bucket[i];
-                if is_compatible(rt, floor, col, min_special_floor, no_rest_floor,
-                                 &room_types, &prev_of, &next_of) {
+                if is_compatible(rt, floor, col, &room_types, &prev_of, &next_of) {
                     room_types[floor][col] = Some(rt);
                     bucket.remove(i);
                     continue 'outer;
@@ -289,18 +273,16 @@ fn is_compatible(
     rt: RoomType,
     floor: usize,
     col: usize,
-    min_special_floor: usize,
-    no_rest_floor: usize,
     room_types: &[Vec<Option<RoomType>>],
     prev_of: &[Vec<Vec<usize>>],
     next_of: &[Vec<Vec<usize>>],
 ) -> bool {
-    // Elite and Rest are locked out of early floors.
-    if matches!(rt, RoomType::Elite | RoomType::Rest) && floor < min_special_floor {
+    // Elite and Rest are locked out of early floors (below floor 6, 1-indexed).
+    if matches!(rt, RoomType::Elite | RoomType::Rest) && floor < MIN_SPECIAL_FLOOR {
         return false;
     }
-    // Rest is banned on the second-to-last floor.
-    if rt == RoomType::Rest && floor == no_rest_floor {
+    // Rest is banned on the second-to-last floor (floor 14, 1-indexed).
+    if rt == RoomType::Rest && floor == NO_REST_FLOOR {
         return false;
     }
 
@@ -351,15 +333,15 @@ mod tests {
 
     #[test]
     fn generates_correct_dimensions() {
-        let map = ActMap::generate(42, 15, 0);
-        assert_eq!(map.rows, 15);
-        assert_eq!(map.room_types.len(), 15);
+        let map = ActMap::generate(42, 0);
+        assert_eq!(map.rows, ROWS);
+        assert_eq!(map.room_types.len(), ROWS);
         for row in &map.room_types { assert_eq!(row.len(), COLS); }
     }
 
     #[test]
     fn floor_zero_all_monsters() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         for col in 0..COLS {
             if map.is_connected(0, col) {
                 assert_eq!(map.room_type(0, col), Some(RoomType::Monster));
@@ -369,17 +351,17 @@ mod tests {
 
     #[test]
     fn treasure_floor_correct() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         for col in 0..COLS {
-            if map.is_connected(8, col) {
-                assert_eq!(map.room_type(8, col), Some(RoomType::Treasure));
+            if map.is_connected(TREASURE_FLOOR, col) {
+                assert_eq!(map.room_type(TREASURE_FLOOR, col), Some(RoomType::Treasure));
             }
         }
     }
 
     #[test]
     fn last_floor_is_rest() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         let last = map.rows - 1;
         for col in 0..COLS {
             if map.is_connected(last, col) {
@@ -391,7 +373,7 @@ mod tests {
     #[test]
     fn at_least_two_entry_nodes() {
         for seed in 0u64..20 {
-            let map = ActMap::generate(seed, 15, 0);
+            let map = ActMap::generate(seed, 0);
             assert!(map.entry_nodes().len() >= 2, "seed {seed}: fewer than 2 entry nodes");
         }
     }
@@ -399,13 +381,13 @@ mod tests {
     #[test]
     fn no_crossing_edges() {
         for seed in 0u64..30 {
-            assert_no_crossings(&ActMap::generate(seed, 15, 0));
+            assert_no_crossings(&ActMap::generate(seed, 0));
         }
     }
 
     #[test]
     fn all_connected_nodes_have_type() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         for floor in 0..map.rows {
             for col in 0..COLS {
                 if map.is_connected(floor, col) {
@@ -417,22 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn variable_row_acts() {
-        for (sub_act, expected_rows) in [("overgrowth", 15), ("hive", 14), ("glory", 13)] {
-            let rows = sub_act_rows(sub_act);
-            assert_eq!(rows, expected_rows);
-            let map = ActMap::generate(7, rows, 0);
-            assert_eq!(map.rows, rows);
-            assert!(map.entry_nodes().len() >= 2);
-            assert_no_crossings(&map);
-        }
-    }
-
-    #[test]
     fn no_elite_on_early_floors() {
-        let map = ActMap::generate(42, 15, 0);
-        let min_special = ((5.0 * 14.0_f64) / 14.0).round() as usize;
-        for floor in 0..min_special {
+        let map = ActMap::generate(42, 0);
+        for floor in 0..MIN_SPECIAL_FLOOR {
             for col in 0..COLS {
                 assert_ne!(map.room_type(floor, col), Some(RoomType::Elite),
                     "Elite found at floor {floor}");
@@ -442,17 +411,16 @@ mod tests {
 
     #[test]
     fn no_rest_on_second_to_last_floor() {
-        let map = ActMap::generate(42, 15, 0);
-        let penultimate = map.rows - 2;
+        let map = ActMap::generate(42, 0);
         for col in 0..COLS {
-            assert_ne!(map.room_type(penultimate, col), Some(RoomType::Rest),
-                "Rest found at floor {penultimate} (second-to-last)");
+            assert_ne!(map.room_type(NO_REST_FLOOR, col), Some(RoomType::Rest),
+                "Rest found at floor {NO_REST_FLOOR} (second-to-last)");
         }
     }
 
     #[test]
     fn no_convergent_floor0_edges() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         let mut seen_dsts: HashSet<u8> = HashSet::new();
         for col in 0..COLS {
             for &dst in map.next_nodes(0, col) {
@@ -464,7 +432,7 @@ mod tests {
 
     #[test]
     fn choices_from_returns_next_nodes() {
-        let map = ActMap::generate(42, 15, 0);
+        let map = ActMap::generate(42, 0);
         if let Some(start) = map.entry_nodes().first().copied() {
             let pos = MapPos { floor: 0, col: start as usize };
             let choices = map.choices_from(pos);
