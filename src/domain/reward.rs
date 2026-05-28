@@ -81,7 +81,8 @@ struct ByRarity<'a> {
 impl<'a> ByRarity<'a> {
     fn new(pool: &'a [Card]) -> Self {
         Self {
-            rares:     pool.iter().filter(|c| matches!(c.rarity, Rarity::Rare | Rarity::Ancient)).collect(),
+            // Ancient rarity is for relics only; it never appears in card rewards.
+            rares:     pool.iter().filter(|c| c.rarity == Rarity::Rare).collect(),
             uncommons: pool.iter().filter(|c| c.rarity == Rarity::Uncommon).collect(),
             commons:   pool.iter().filter(|c| c.rarity == Rarity::Common).collect(),
         }
@@ -91,7 +92,7 @@ impl<'a> ByRarity<'a> {
     /// that tier is empty.
     fn pick(&self, target: Rarity, rng: &mut impl Rng) -> Option<&'a Card> {
         match target {
-            Rarity::Rare | Rarity::Ancient => {
+            Rarity::Rare => {
                 self.rares.choose(rng)
                     .or_else(|| self.uncommons.choose(rng))
                     .or_else(|| self.commons.choose(rng))
@@ -130,7 +131,7 @@ mod tests {
         let mut rng = rng();
         for _ in 0..20 {
             let offer = sample_offer(&pool, RewardKind::Boss, &mut offset, &mut rng);
-            assert!(offer.iter().all(|c| matches!(c.rarity, Rarity::Rare | Rarity::Ancient)));
+            assert!(offer.iter().all(|c| c.rarity == Rarity::Rare));
         }
     }
 
@@ -183,7 +184,7 @@ mod tests {
             let mut offset = INITIAL_RARE_OFFSET;
             let offer = sample_offer(&pool, RewardKind::Monster, &mut offset, &mut rng);
             assert!(
-                offer.iter().all(|c| !matches!(c.rarity, Rarity::Rare | Rarity::Ancient)),
+                offer.iter().all(|c| c.rarity != Rarity::Rare),
                 "first monster offer should never contain a rare (offset starts at -5)"
             );
         }
@@ -203,8 +204,8 @@ mod tests {
             let elite_offer = sample_offer(&pool, RewardKind::Elite, &mut offset, &mut rng);
             let mut offset2 = 10_i32;
             let monster_offer = sample_offer(&pool, RewardKind::Monster, &mut offset2, &mut rng);
-            elite_rares   += elite_offer.iter().filter(|c| matches!(c.rarity, Rarity::Rare | Rarity::Ancient)).count() as u32;
-            monster_rares += monster_offer.iter().filter(|c| matches!(c.rarity, Rarity::Rare | Rarity::Ancient)).count() as u32;
+            elite_rares   += elite_offer.iter().filter(|c| c.rarity == Rarity::Rare).count() as u32;
+            monster_rares += monster_offer.iter().filter(|c| c.rarity == Rarity::Rare).count() as u32;
         }
 
         assert!(
