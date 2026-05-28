@@ -393,6 +393,30 @@ fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -
 }
 
 pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
+    // Tick Poison on each living enemy (1 damage per stack, then reduce stacks by 1)
+    for enemy in &mut state.enemies {
+        if enemy.is_alive() {
+            let stacks = *enemy.buffs.get(&BuffType::Poison).unwrap_or(&0);
+            if stacks > 0 {
+                let dmg = stacks.max(0) as u32;
+                let absorbed = enemy.block.min(dmg);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
+                *enemy.buffs.entry(BuffType::Poison).or_insert(0) -= 1;
+            }
+        }
+    }
+
+    // Discard hand; ethereal cards go straight to exhaust
+    let drained: Vec<Card> = state.hand.drain(..).collect();
+    for card in drained {
+        if card.ethereal {
+            state.exhaust_pile.push(card);
+        } else {
+            state.discard_pile.push(card);
+        }
+    }
+
     // Each living enemy acts: apply per-turn buffs, resolve intent
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
@@ -429,20 +453,6 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // Tick Poison on each living enemy (1 damage per stack, then reduce stacks by 1)
-    for enemy in &mut state.enemies {
-        if enemy.is_alive() {
-            let stacks = *enemy.buffs.get(&BuffType::Poison).unwrap_or(&0);
-            if stacks > 0 {
-                let dmg = stacks.max(0) as u32;
-                let absorbed = enemy.block.min(dmg);
-                enemy.block -= absorbed;
-                enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
-                *enemy.buffs.entry(BuffType::Poison).or_insert(0) -= 1;
-            }
-        }
-    }
-
     // Decrement timed debuffs on living enemies (Vulnerable, Weak, Frail expire after N turns)
     for enemy in &mut state.enemies {
         if enemy.is_alive() {
@@ -468,16 +478,6 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
             advance_enemy_ai(&mut state.enemies[i], i, rng);
-        }
-    }
-
-    // Discard hand; ethereal cards go straight to exhaust
-    let drained: Vec<Card> = state.hand.drain(..).collect();
-    for card in drained {
-        if card.ethereal {
-            state.exhaust_pile.push(card);
-        } else {
-            state.discard_pile.push(card);
         }
     }
 
