@@ -1,4 +1,4 @@
-use crate::domain::combat::CombatState;
+use crate::domain::combat::{CombatState, Intent};
 use crate::metrics::combat as metrics;
 
 // ── Action ─────────────────────────────────────────────────────────────────
@@ -13,15 +13,36 @@ pub struct Action {
 
 // ── Target selection ───────────────────────────────────────────────────────
 
-/// Focus-fire: choose the living enemy with the lowest current HP.
+/// Choose the best target given current state.
+///
+/// Default: lowest-HP living enemy (focus-fire to reduce incoming attacks).
+/// Turn-1 exception: when all living enemies share the same name, prefer the
+/// self-buffing one so it cannot compound its power before being killed.
 pub fn select_target(state: &CombatState) -> usize {
-    state
+    let living: Vec<(usize, &_)> = state
         .enemies
         .iter()
         .enumerate()
         .filter(|(_, e)| e.is_alive())
+        .collect();
+
+    if living.is_empty() {
+        return 0;
+    }
+
+    if state.turn == 1 && living.len() > 1 {
+        let all_same_type = living.windows(2).all(|w| w[0].1.name == w[1].1.name);
+        if all_same_type {
+            if let Some(&(i, _)) = living.iter().find(|(_, e)| e.intent == Intent::Buff) {
+                return i;
+            }
+        }
+    }
+
+    living
+        .iter()
         .min_by_key(|(_, e)| e.hp)
-        .map(|(i, _)| i)
+        .map(|&(i, _)| i)
         .unwrap_or(0)
 }
 

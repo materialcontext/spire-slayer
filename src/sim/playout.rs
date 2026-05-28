@@ -39,6 +39,77 @@ pub struct PlayoutStats {
     pub hp_loss_p90: f32,
 }
 
+/// Result of a complete multi-turn combat simulation.
+#[derive(Debug, Clone)]
+pub struct CombatResult {
+    /// HP change to the player over the full fight (negative = net damage taken).
+    pub player_hp_delta: i32,
+    /// Number of turns elapsed when combat ended.
+    pub turns: u32,
+    pub player_alive: bool,
+    pub combat_won: bool,
+    /// State snapshot at the end of combat.
+    pub final_state: CombatState,
+}
+
+// Safety cap; prevents infinite loops against unkillable enemies.
+const MAX_TURNS: u32 = 50;
+
+/// Simulate a full combat to completion (win, loss, or turn limit).
+///
+/// If the state has no hand yet (e.g. freshly constructed), an opening hand
+/// is drawn before the first turn. Otherwise plays from the existing hand.
+pub fn run_combat(
+    mut state: CombatState,
+    policy: &dyn Policy,
+    rng: &mut impl Rng,
+) -> CombatResult {
+    let initial_hp = state.player.hp;
+
+    if state.hand.is_empty() {
+        let n = state.hand_size as usize;
+        apply::draw_cards(&mut state, n, rng);
+    }
+
+    loop {
+        // Player phase: play cards until policy passes or combat ends
+        loop {
+            if state.is_over() { break; }
+            match policy.select_action(&state) {
+                None => break,
+                Some(action) => {
+                    if apply::play_card(
+                        &mut state,
+                        action.card_hand_idx,
+                        action.target_idx,
+                        rng,
+                    ).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if state.is_over() || state.turn >= MAX_TURNS {
+            break;
+        }
+
+        apply::end_turn(&mut state, rng);
+
+        if state.is_over() {
+            break;
+        }
+    }
+
+    CombatResult {
+        player_hp_delta: state.player.hp as i32 - initial_hp as i32,
+        turns: state.turn,
+        player_alive: state.player.is_alive(),
+        combat_won: state.is_won(),
+        final_state: state,
+    }
+}
+
 // ── Core playout ───────────────────────────────────────────────────────────
 
 /// Execute one full turn using `policy`, then run the enemy phase.
@@ -250,4 +321,67 @@ mod tests {
         let stats = playout_n(&state, &GreedyDamagePolicy, 20, &mut rng());
         assert!((stats.win_rate - 1.0).abs() < f32::EPSILON);
     }
+
+    // ── run_combat ─────────────────────────────────────────────────────────
+
+    fn make_state_with_draw(hand: Vec<Card>, draw: Vec<Card>, enemy_hp: u32, enemy_intent: Intent) -> CombatState {
+        let player = PlayerState::new(80, 80);
+        let enemy = EnemyState::new("Enemy", enemy_hp, enemy_intent);
+        let mut state = CombatState::new(player, vec![enemy], draw);
+        state.hand = hand;
+        state
+    }
+
+    #[test]
+    fn run_combat_one_shot_kill() {
+        // Player kills on turn 1; combat_won and alive
+        let state = make_state(vec![strike()], 6, Intent::Attack(5));
+        let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
+        assert!(result.combat_won);
+        assert!(result.player_alive);
+        assert_eq!(result.turns, 1);
+    }
+
+    #[test]
+    fn run_combat_multi_turn_kill() {
+        // Turn 1: 1 Strike (6 dmg) → 12 HP left. Turn 2: draws 3 more Strikes → kills.
+        // Fight spans at least 2 turns.
+        let draw_pile = vec![strike(), strike()];
+        let state = make_state_with_draw(vec![strike()], draw_pile, 18, Intent::Attack(3));
+        let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
+        assert!(result.combat_won);
+        assert!(result.player_alive);
+        assert!(result.turns >= 2);
+    }
+
+    #[test]
+    fn run_combat_player_dies() {
+        // Enemy hits for 80 each turn and player has no cards
+        let state = make_state(vec![], 999, Intent::Attack(80));
+        let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
+        assert!(!result.player_alive);
+        assert!(!result.combat_won);
+    }
+
+    #[test]
+    fn run_combat_hp_delta_accumulates() {
+        // Enemy hits for 5 per turn; player draws nothing, fight goes to turn limit
+        let state = make_state(vec![], 999, Intent::Attack(5));
+        let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
+        // HP delta must be negative (took damage over multiple turns)
+        assert!(result.player_hp_delta < 0);
+    }
+
+    #[test]
+    fn run_combat_draws_opening_hand_when_empty() {
+        // State has no hand but a draw pile — run_combat should deal it
+        let player = PlayerState::new(80, 80);
+        let enemy = EnemyState::new("Enemy", 6, Intent::Attack(0));
+        let draw = vec![strike()];
+        let state = CombatState::new(player, vec![enemy], draw);
+        assert!(state.hand.is_empty());
+        let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
+        assert!(result.combat_won);
+    }
+
 }

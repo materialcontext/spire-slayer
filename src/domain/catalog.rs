@@ -47,7 +47,7 @@ fn map_buff(power: &str) -> Option<BuffType> {
         "Strength" => Some(BuffType::Strength),
         "Dexterity" => Some(BuffType::Dexterity),
         "Thorns" => Some(BuffType::Thorns),
-        "Metallicize" => Some(BuffType::Metallicize),
+        "Metallicize" | "Plating" => Some(BuffType::Plating),
         _ => None,
     }
 }

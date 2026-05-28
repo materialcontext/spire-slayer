@@ -49,6 +49,14 @@ pub struct AiState {
     pub kind: AiStateKind,
 }
 
+/// A power (buff/debuff) applied when an enemy executes a move.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovePower {
+    pub power_id: String,
+    pub target: Option<String>,
+    pub amount: i32,
+}
+
 /// Raw move data stored in the script — Intent-type-agnostic so we avoid
 /// circular imports between domain/ai and domain/combat.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +65,7 @@ pub struct AiMoveData {
     pub damage: u32,
     pub hits: u32,
     pub block: u32,
+    pub powers: Vec<MovePower>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +127,12 @@ pub fn build_ai_script(monster: &SpireApiMonster) -> Option<EnemyAiScript> {
                 .max(1) as u32;
             let block = m.block.unwrap_or(0).max(0) as u32;
             let intent_str = m.intent.clone().unwrap_or_else(|| "Unknown".into());
-            (m.id.clone(), AiMoveData { intent_str, damage, hits, block })
+            let powers = m.powers.iter().map(|p| MovePower {
+                power_id: p.power_id.clone(),
+                target: p.target.clone(),
+                amount: p.amount.unwrap_or(0),
+            }).collect();
+            (m.id.clone(), AiMoveData { intent_str, damage, hits, block, powers })
         })
         .collect();
 

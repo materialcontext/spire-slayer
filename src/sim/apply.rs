@@ -229,9 +229,8 @@ pub fn play_card(
     let card = &state.hand[card_hand_idx];
 
     if !card.is_playable(state.energy) {
-        // Status/Curse cards and cost=255 (X-cost) are never playable
         use crate::domain::card::CardType;
-        if matches!(card.card_type, CardType::Status | CardType::Curse) || card.cost == 255 {
+        if matches!(card.card_type, CardType::Status | CardType::Curse) {
             return Err(SimError::CardNotPlayable);
         }
         return Err(SimError::NotEnoughEnergy {
@@ -253,7 +252,9 @@ pub fn play_card(
 
     // Commit: remove from hand, spend energy
     let card = state.hand.remove(card_hand_idx);
-    state.energy -= card.cost;
+    // X-cost (255) spends all remaining energy; regular cards spend their printed cost
+    let cost_spent = if card.cost == 255 { state.energy } else { card.cost };
+    state.energy -= cost_spent;
 
     // Apply effects in order
     let effects = card.effects.clone();
@@ -389,11 +390,24 @@ fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -
 }
 
 pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
-    // Each living enemy resets block, gains block from current move, then executes intent
+    // Each living enemy acts: apply per-turn buffs, resolve intent
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
+            // Ritual: gain Strength at start of each turn
+            let ritual = *state.enemies[i].buffs.get(&BuffType::Ritual).unwrap_or(&0);
+            if ritual > 0 {
+                *state.enemies[i].buffs.entry(BuffType::Strength).or_insert(0) += ritual;
+            }
+
+            // Reset block, then apply Plating (grants block, decrements by 1)
             state.enemies[i].block = 0;
-            // Apply block component of current move before the player can respond
+            let plating = *state.enemies[i].buffs.get(&BuffType::Plating).unwrap_or(&0);
+            if plating > 0 {
+                state.enemies[i].block += plating as u32;
+                *state.enemies[i].buffs.entry(BuffType::Plating).or_insert(0) -= 1;
+            }
+
+            // Apply block component of current move
             if let Some(ref script) = state.enemies[i].ai_script {
                 let block = state.enemies[i]
                     .ai_runtime
@@ -402,8 +416,12 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
                     .and_then(|id| script.moves.get(id))
                     .map(|m| m.block)
                     .unwrap_or(0);
-                state.enemies[i].block = block;
+                state.enemies[i].block += block;
             }
+
+            // Apply powers from this move (Buff/DebuffPlayer intents)
+            apply_move_powers(state, i);
+
             resolve_enemy_intent(state, i);
         }
     }
@@ -449,9 +467,48 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     state.turn += 1;
 
     // Draw new hand
-    draw_cards(state, 5, rng);
+    draw_cards(state, state.hand_size as usize, rng);
 
     state.is_over()
+}
+
+/// Apply buff/debuff powers from the enemy's current move to enemy or player.
+/// Called unconditionally each turn so Buff/DebuffPlayer intents take effect.
+fn apply_move_powers(state: &mut CombatState, enemy_idx: usize) {
+    let powers: Vec<(String, Option<String>, i32)> = {
+        let enemy = &state.enemies[enemy_idx];
+        let Some(ref script) = enemy.ai_script else { return };
+        let Some(ref move_id) = enemy.ai_runtime.last_move_id else { return };
+        let Some(data) = script.moves.get(move_id.as_str()) else { return };
+        data.powers.iter().map(|p| (p.power_id.clone(), p.target.clone(), p.amount)).collect()
+    };
+
+    for (power_id, target, amount) in powers {
+        let Some(buff) = map_power_id_to_buff(&power_id) else { continue };
+        let targets_player = target.as_deref()
+            .map(|t| t.to_lowercase().contains("player"))
+            .unwrap_or(false);
+        if targets_player {
+            *state.player.buffs.entry(buff).or_insert(0) += amount;
+        } else {
+            *state.enemies[enemy_idx].buffs.entry(buff).or_insert(0) += amount;
+        }
+    }
+}
+
+fn map_power_id_to_buff(id: &str) -> Option<BuffType> {
+    match id.to_lowercase().as_str() {
+        "strength" => Some(BuffType::Strength),
+        "dexterity" => Some(BuffType::Dexterity),
+        "vulnerable" => Some(BuffType::Vulnerable),
+        "weak" => Some(BuffType::Weak),
+        "frail" => Some(BuffType::Frail),
+        "poison" => Some(BuffType::Poison),
+        "thorns" | "sharp_hide" => Some(BuffType::Thorns),
+        "plating" | "metallicize" => Some(BuffType::Plating),
+        "ritual" => Some(BuffType::Ritual),
+        _ => None,
+    }
 }
 
 /// Resolve a single enemy's intent against the player.
@@ -476,10 +533,9 @@ fn resolve_enemy_intent(state: &mut CombatState, enemy_idx: usize) {
             }
         }
         Intent::Block => {
-            // Simplified: enemy gains a fixed amount of block
-            state.enemies[enemy_idx].block += 7;
+            // Block is set from move data before this is called; nothing more to do.
         }
-        // Buff, DebuffPlayer, Escape, Unknown — not simulated in this phase
+        // Buff, DebuffPlayer, Escape, Unknown — handled by apply_move_powers
         _ => {}
     }
 }
