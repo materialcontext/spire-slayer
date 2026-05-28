@@ -21,7 +21,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
         AppMode::CardPick => render_card_pick(frame, app, area),
         AppMode::DeckDash => render_deck_dash(frame, app, area),
-        AppMode::MapEv => render_map_ev(frame, app, area),
+        AppMode::MapEv   => render_map_ev(frame, app, area),
+        AppMode::MapView => render_map_view(frame, app, area),
         AppMode::Exiting => {}
     }
 }
@@ -935,6 +936,202 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[3]);
 }
 
+fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::domain::map::{ActMap, MapPos, RoomType, COLS, ROWS};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(0),    // map grid
+            Constraint::Length(2), // choices bar
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    // ── Header ─────────────────────────────────────────────────────────────────
+    let sub_act = app.run.as_ref().map(|r| r.sub_act.as_str()).unwrap_or("—");
+    let floor_label = app.run.as_ref()
+        .and_then(|r| r.map_pos)
+        .map(|p| format!("Floor {}/15", p.floor + 1))
+        .unwrap_or_else(|| "Floor —/15".to_string());
+    let header = format!(
+        " MAP — {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
+        capitalize(sub_act), floor_label,
+    );
+    frame.render_widget(
+        Paragraph::new(header)
+            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+
+    // ── Map grid ───────────────────────────────────────────────────────────────
+    let (run, map) = match app.run.as_ref().and_then(|r| r.map.as_ref().map(|m| (r, m))) {
+        Some(pair) => pair,
+        None => {
+            frame.render_widget(
+                Paragraph::new("  No map — press [t] to generate.")
+                    .block(Block::default().borders(Borders::ALL)),
+                chunks[1],
+            );
+            render_statusbar(frame, app, chunks[3]);
+            return;
+        }
+    };
+
+    let cur_pos    = run.map_pos;
+    let choices    = app.map_choices();
+    let choices_floor: Option<usize> = match cur_pos {
+        None      => Some(0),
+        Some(pos) => if pos.floor + 1 < ROWS { Some(pos.floor + 1) } else { None },
+    };
+    let selected_col = choices.get(app.map_cursor).copied();
+
+    const LABEL_W: usize = 4;
+    const COL_W:   usize = 5; // " [X] "
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(ROWS * 2);
+
+    for floor in (0..ROWS).rev() {
+        let game_floor  = floor + 1;
+        let is_cur      = cur_pos.map(|p| p.floor) == Some(floor);
+        let cur_floor_n = cur_pos.map(|p| p.floor);
+
+        // ── Node row ──────────────────────────────────────────────────────────
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        let label = if is_cur {
+            format!("{:2}▶ ", game_floor)
+        } else {
+            format!("{:2}  ", game_floor)
+        };
+        spans.push(Span::styled(
+            label,
+            if is_cur {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+
+        for col in 0..COLS {
+            let rt        = map.room_type(floor, col);
+            let is_me     = cur_pos == Some(MapPos { floor, col });
+            let is_choice = choices_floor == Some(floor) && choices.contains(&(col as u8));
+            let is_sel    = choices_floor == Some(floor) && selected_col == Some(col as u8);
+            let is_past   = cur_floor_n.map(|cf| floor < cf).unwrap_or(false);
+
+            let symbol = rt.map(|r| format!("[{}]", r.label())).unwrap_or_else(|| "   ".into());
+            let cell   = format!(" {} ", symbol);
+
+            let style = if is_me {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if is_sel {
+                Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+            } else if is_choice {
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+            } else if rt.is_none() {
+                Style::default()
+            } else if is_past {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                map_rt_style(rt)
+            };
+
+            spans.push(Span::styled(cell, style));
+        }
+
+        lines.push(Line::from(spans));
+
+        // ── Connection row (edges from floor-1 → floor) ───────────────────────
+        if floor > 0 {
+            lines.push(map_connection_row(floor - 1, map, LABEL_W, COL_W));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" MAP ")),
+        chunks[1],
+    );
+
+    // ── Choices bar ────────────────────────────────────────────────────────────
+    let mut choice_spans: Vec<Span<'static>> = vec![Span::raw("  Choices: ")];
+    if choices.is_empty() {
+        choice_spans.push(Span::styled(
+            "none (you are at the top)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        let cf = choices_floor.unwrap_or(0);
+        for (i, &col) in choices.iter().enumerate() {
+            let rt_label = map.room_type(cf, col as usize)
+                .map(|r| r.label())
+                .unwrap_or("?");
+            let label = format!(" col{}[{}] ", col, rt_label);
+            choice_spans.push(Span::styled(
+                label,
+                if i == app.map_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::LightGreen)
+                },
+            ));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(choice_spans)).block(Block::default().borders(Borders::TOP)),
+        chunks[2],
+    );
+
+    render_statusbar(frame, app, chunks[3]);
+}
+
+/// Build the connection row between array floor `floor_idx` and `floor_idx + 1`.
+/// Uses `|` for straight edges, `/` for up-left, `\` for up-right.
+fn map_connection_row(floor_idx: usize, map: &crate::domain::map::ActMap,
+                      label_w: usize, col_w: usize) -> Line<'static> {
+    let total = label_w + crate::domain::map::COLS * col_w;
+    let mut buf: Vec<char> = vec![' '; total];
+
+    for col in 0..crate::domain::map::COLS {
+        for &dst in map.next_nodes(floor_idx, col) {
+            let dst = dst as usize;
+            let src_cx = label_w + col * col_w + col_w / 2;
+            let dst_cx = label_w + dst * col_w + col_w / 2;
+            let mid    = (src_cx + dst_cx) / 2;
+            let ch = if col == dst { '|' } else if dst < col { '/' } else { '\\' };
+            if mid < buf.len() { buf[mid] = ch; }
+        }
+    }
+
+    Line::from(Span::styled(
+        buf.into_iter().collect::<String>(),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+fn map_rt_style(rt: Option<crate::domain::map::RoomType>) -> Style {
+    use crate::domain::map::RoomType;
+    match rt {
+        Some(RoomType::Monster)  => Style::default().fg(Color::White),
+        Some(RoomType::Elite)    => Style::default().fg(Color::LightRed),
+        Some(RoomType::Event)    => Style::default().fg(Color::Yellow),
+        Some(RoomType::Shop)     => Style::default().fg(Color::Cyan),
+        Some(RoomType::Rest)     => Style::default().fg(Color::LightGreen),
+        Some(RoomType::Treasure) => Style::default().fg(Color::LightYellow),
+        Some(RoomType::Boss)     => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        None                     => Style::default(),
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None    => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,6 +1228,17 @@ mod tests {
         let mut app = make_empty_app();
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         app.open_map_ev(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_map_view_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        // Select a character so a run exists, then open the map view.
+        app.select_character(&mut rng);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 

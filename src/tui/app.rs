@@ -22,6 +22,7 @@ use crate::tui::ui;
 pub enum AppMode {
     CharacterPick,
     EncounterPick,
+    MapView,
     CombatAdvice,
     CardPick,
     DeckDash,
@@ -50,6 +51,8 @@ pub struct App {
     pub events: Vec<SpireApiEvent>,
     pub act_filter: String,
     pub filtered_indices: Vec<usize>,
+    /// Cursor index into the available map choices at the current position.
+    pub map_cursor: usize,
 }
 
 impl App {
@@ -82,6 +85,7 @@ impl App {
             events,
             act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
+            map_cursor: 0,
         };
         app.refresh_filter();
         app
@@ -126,18 +130,19 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match self.mode {
-            AppMode::CharacterPick => self.handle_key_character(key),
+            AppMode::CharacterPick => self.handle_key_character(key, rng),
             AppMode::EncounterPick => self.handle_key_encounter(key, rng),
-            AppMode::ManualInput => self.handle_key_input(key),
-            AppMode::CombatAdvice => self.handle_key_combat(key, rng),
-            AppMode::CardPick => self.handle_key_pick(key),
-            AppMode::DeckDash => self.handle_key_deck_dash(key),
-            AppMode::MapEv => self.handle_key_map_ev(key),
+            AppMode::MapView       => self.handle_key_map_view(key),
+            AppMode::ManualInput   => self.handle_key_input(key),
+            AppMode::CombatAdvice  => self.handle_key_combat(key, rng),
+            AppMode::CardPick      => self.handle_key_pick(key),
+            AppMode::DeckDash      => self.handle_key_deck_dash(key),
+            AppMode::MapEv         => self.handle_key_map_ev(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
 
-    fn handle_key_character(&mut self, key: KeyEvent) {
+    fn handle_key_character(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
@@ -153,7 +158,29 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                self.select_character();
+                self.select_character(rng);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_map_view(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            KeyCode::Esc | KeyCode::Char('t') => {
+                self.mode = AppMode::EncounterPick;
+            }
+            KeyCode::Char('j') | KeyCode::Right => {
+                let n = self.map_choices().len();
+                if n > 0 { self.map_cursor = (self.map_cursor + 1).min(n - 1); }
+            }
+            KeyCode::Char('k') | KeyCode::Left => {
+                if self.map_cursor > 0 { self.map_cursor -= 1; }
+            }
+            KeyCode::Enter => {
+                self.select_map_node();
             }
             _ => {}
         }
@@ -221,6 +248,9 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.open_map_ev(rng);
+            }
+            KeyCode::Char('t') => {
+                if self.run.is_some() { self.open_map_view(rng); }
             }
             KeyCode::Char('m') => {
                 // Manual input fallback
@@ -310,6 +340,9 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.open_map_ev(rng);
+            }
+            KeyCode::Char('t') => {
+                self.open_map_view(rng);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref combat) = self.combat {
@@ -451,34 +484,72 @@ impl App {
         self.mode = AppMode::MapEv;
     }
 
-    pub fn select_character(&mut self) {
-        let Some(char_data) = self.characters.get(self.selected_row) else {
-            return;
-        };
-        // Clone the fields we need before any mutable borrows.
-        let hp = char_data.starting_hp.unwrap_or(75).max(1) as u32;
-        let gold = char_data.starting_gold.unwrap_or(99) as u32;
+    pub fn select_character(&mut self, rng: &mut impl rand::Rng) {
+        let Some(char_data) = self.characters.get(self.selected_row) else { return; };
+        let hp       = char_data.starting_hp.unwrap_or(75).max(1) as u32;
+        let gold     = char_data.starting_gold.unwrap_or(99) as u32;
         let deck_ids = char_data.starting_deck.clone();
-        let color = char_data.color.clone().unwrap_or_default();
+        let color    = char_data.color.clone().unwrap_or_default();
         let char_name = char_data.name.clone();
 
-        let deck = catalog::deck_from_ids(&deck_ids);
+        let deck  = catalog::deck_from_ids(&deck_ids);
         let class = class_from_color(&color);
         let relic = starting_relics::for_class(&class);
 
-        let mut run = RunState::new(class, hp, hp, deck, relic);
-        run.gold = gold;
-
-        self.act_filter = "overgrowth".to_string();
-        self.refresh_filter();
+        let mut run  = RunState::new(class, hp, hp, deck, relic);
+        run.gold     = gold;
+        run.sub_act  = "overgrowth".to_string();
 
         self.status_message = format!(
-            "Playing as {} — HP {}, {} starting cards",
+            "Playing as {} — HP {}, {} starting cards — choose your path",
             char_name, hp, run.deck.len(),
         );
         self.run = Some(run);
+        self.act_filter = "overgrowth".to_string();
+        self.refresh_filter();
         self.selected_row = 0;
-        self.mode = AppMode::EncounterPick;
+        self.open_map_view(rng);
+    }
+
+    /// Generate the map (if not already present) and switch to MapView.
+    pub fn open_map_view(&mut self, rng: &mut impl rand::Rng) {
+        if let Some(ref mut run) = self.run {
+            if run.map.is_none() {
+                let seed: u64 = rng.r#gen();
+                run.generate_map(seed, 0);
+            }
+        }
+        self.map_cursor = 0;
+        self.mode = AppMode::MapView;
+    }
+
+    /// Columns available to move to from the current map position.
+    pub fn map_choices(&self) -> Vec<u8> {
+        let Some(ref run) = self.run else { return vec![]; };
+        let Some(ref map) = run.map else { return vec![]; };
+        match run.map_pos {
+            None      => map.entry_nodes(),
+            Some(pos) => map.choices_from(pos).to_vec(),
+        }
+    }
+
+    /// Move to the currently cursor-selected map node.
+    fn select_map_node(&mut self) {
+        let choices = self.map_choices();
+        let Some(&col) = choices.get(self.map_cursor) else { return; };
+        let Some(ref mut run) = self.run else { return; };
+        run.move_to(col as usize);
+        self.map_cursor = 0;
+
+        // TODO: in room-resolution phase, branch on room type here.
+        let msg = run.map_pos.and_then(|pos| {
+            run.map.as_ref().and_then(|m| {
+                m.room_type(pos.floor, pos.col).map(|rt| {
+                    format!("Floor {} — {} room", pos.floor + 1, rt.label())
+                })
+            })
+        }).unwrap_or_default();
+        self.status_message = msg;
     }
 
     pub fn load_combat(&mut self, state: CombatState) {
