@@ -27,6 +27,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::EventRoom    => render_event_room(frame, app, area),
         AppMode::TreasureRoom => render_treasure_room(frame, app, area),
         AppMode::Shop         => render_shop(frame, app, area),
+        AppMode::AncientBoon  => render_ancient_boon(frame, app, area),
         AppMode::Exiting      => {}
     }
 }
@@ -1561,6 +1562,59 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+fn render_ancient_boon(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header with ancient name
+            Constraint::Min(0),    // boon choices
+            Constraint::Length(1), // hint
+        ])
+        .split(area);
+
+    let header = format!(
+        "  {} — {}",
+        app.ancient_name,
+        if app.ancient_is_act_transition { "Act Transition Boon" } else { "Starting Boon" }
+    );
+    frame.render_widget(
+        Paragraph::new(header)
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw("")));
+    for (i, relic) in app.ancient_boons.iter().enumerate() {
+        let cursor = if i == app.ancient_cursor { "▶ " } else { "  " };
+        let rarity = relic.rarity.as_deref().unwrap_or("Relic");
+        let name_style = if i == app.ancient_cursor {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}  [{}]", cursor, relic.name, rarity),
+            name_style,
+        )));
+        let desc = relic.description.as_deref().unwrap_or("");
+        lines.push(Line::from(Span::styled(
+            format!("     {}", desc),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default()),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] take boon  [q] quit");
+    frame.render_widget(hint, rows[2]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1573,7 +1627,7 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![], vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -1596,7 +1650,7 @@ mod tests {
             dialogues: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![ch], vec![], vec![], vec![], vec![]);
+        let app = App::new(vec![ch], vec![], vec![], vec![], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
@@ -1718,7 +1772,7 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![], vec![enc], vec![], vec![], vec![]);
+        let app = App::new(vec![], vec![enc], vec![], vec![], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
@@ -1739,7 +1793,7 @@ mod tests {
             image_url: None,
             notes: None,
         };
-        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic.clone()]);
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic.clone()], vec![]);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         app.select_character(&mut rng);
         app.mode = crate::tui::app::AppMode::TreasureRoom;
@@ -1765,7 +1819,7 @@ mod tests {
             image_url: None,
             notes: None,
         };
-        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic]);
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic], vec![]);
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         app.select_character(&mut rng);
         app.mode = crate::tui::app::AppMode::Shop;
@@ -1773,6 +1827,33 @@ mod tests {
         app.shop_cards = crate::domain::catalog::ironclad::starter_deck().into_iter().take(3).collect();
         app.shop_relics = Vec::new();
         app.shop_cursor = 0;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_ancient_boon_does_not_panic() {
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        // Set up a fake boon relic
+        let fake_relic = SpireApiRelic {
+            id: "FAKE_RELIC".to_string(),
+            name: "Fake Relic".to_string(),
+            description: Some("A test relic.".to_string()),
+            flavor: None,
+            rarity: Some("Rare".to_string()),
+            rarity_key: None,
+            pool: None,
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        app.ancient_id = "NEOW".to_string();
+        app.ancient_name = "Neow".to_string();
+        app.ancient_boons = vec![fake_relic];
+        app.ancient_cursor = 0;
+        app.ancient_is_act_transition = false;
+        app.mode = crate::tui::app::AppMode::AncientBoon;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

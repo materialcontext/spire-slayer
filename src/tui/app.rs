@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster, SpireApiRelic};
+use crate::data::api::{SpireApiAncient, SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster, SpireApiRelic};
 use crate::domain::card::Card;
 use crate::domain::catalog;
 use crate::domain::combat::CombatState;
@@ -36,9 +36,16 @@ pub enum AppMode {
     CardPick,
     DeckDash,
     MapEv,
+    AncientBoon,
     ManualInput,
     Simulating,
     Exiting,
+}
+
+/// An action to take after the current card pick is confirmed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PostPickAction {
+    BossActTransition,
 }
 
 pub struct App {
@@ -97,6 +104,23 @@ pub struct App {
     pub shop_has_removal: bool,
     pub shop_removal_price: u32,
     pub shop_cursor: usize,
+    // Ancient boon state
+    /// Ancient data loaded at startup.
+    pub ancients: Vec<SpireApiAncient>,
+    /// ID of the current ancient (e.g. "NEOW").
+    pub ancient_id: String,
+    /// Display name of the current ancient.
+    pub ancient_name: String,
+    /// Boon relics offered by the current ancient.
+    pub ancient_boons: Vec<SpireApiRelic>,
+    /// Cursor index into ancient_boons.
+    pub ancient_cursor: usize,
+    /// True when the ancient boon is triggered by an act transition (boss beaten).
+    pub ancient_is_act_transition: bool,
+    /// Whether Darv appeared in Act 2 of this run (affects Act 3 pool).
+    pub ancient_had_darv_act2: bool,
+    /// Action to take after the current card pick is confirmed.
+    pub post_pick_action: Option<PostPickAction>,
 }
 
 impl App {
@@ -106,6 +130,7 @@ impl App {
         monsters: Vec<SpireApiMonster>,
         events: Vec<SpireApiEvent>,
         relics: Vec<SpireApiRelic>,
+        ancients: Vec<SpireApiAncient>,
     ) -> Self {
         // Show character picker if we have data; otherwise skip straight to encounter pick.
         let initial_mode = if characters.is_empty() {
@@ -154,6 +179,14 @@ impl App {
             shop_has_removal: false,
             shop_removal_price: 75,
             shop_cursor: 0,
+            ancients,
+            ancient_id: String::new(),
+            ancient_name: String::new(),
+            ancient_boons: Vec::new(),
+            ancient_cursor: 0,
+            ancient_is_act_transition: false,
+            ancient_had_darv_act2: false,
+            post_pick_action: None,
         };
         app.refresh_filter();
         app
@@ -207,9 +240,10 @@ impl App {
             AppMode::Shop           => self.handle_key_shop(key),
             AppMode::ManualInput    => self.handle_key_input(key),
             AppMode::CombatAdvice   => self.handle_key_combat(key, rng),
-            AppMode::CardPick       => self.handle_key_pick(key),
+            AppMode::CardPick       => self.handle_key_pick(key, rng),
             AppMode::DeckDash       => self.handle_key_deck_dash(key),
             AppMode::MapEv          => self.handle_key_map_ev(key),
+            AppMode::AncientBoon    => self.handle_key_ancient_boon(key, rng),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -470,9 +504,10 @@ impl App {
         }
     }
 
-    fn handle_key_pick(&mut self, key: KeyEvent) {
+    fn handle_key_pick(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
+                self.post_pick_action = None;
                 let dest = self.card_pick_return.clone();
                 self.mode = dest;
             }
@@ -493,6 +528,11 @@ impl App {
                 }
                 let dest = self.card_pick_return.clone();
                 self.mode = dest;
+                if let Some(action) = self.post_pick_action.take() {
+                    match action {
+                        PostPickAction::BossActTransition => self.begin_act_transition(rng),
+                    }
+                }
             }
             _ => {}
         }
@@ -627,10 +667,10 @@ impl App {
             char_name, hp, run.deck.len(),
         );
         self.run = Some(run);
-        self.act_filter = sub_act;
+        self.act_filter = sub_act.clone();
         self.refresh_filter();
         self.selected_row = 0;
-        self.open_map_view(rng);
+        self.open_ancient_boon(&sub_act, false, rng);
     }
 
     /// Generate the map (if not already present) and switch to MapView.
@@ -710,6 +750,7 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_post_combat_relics();
                 self.load_pick(offered, rng, AppMode::MapView);
             }
             Some(RoomType::Boss) => {
@@ -720,6 +761,8 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_post_combat_relics();
+                self.post_pick_action = Some(PostPickAction::BossActTransition);
                 self.load_pick(offered, rng, AppMode::MapView);
             }
             Some(RoomType::Rest) => self.open_rest_site(),
@@ -1151,6 +1194,132 @@ impl App {
             }
         }
     }
+
+    /// Apply relics that trigger at the end of combat (e.g. Burning Blood).
+    fn apply_post_combat_relics(&mut self) {
+        let Some(ref mut run) = self.run else { return; };
+        for relic in run.relics.clone() {
+            match relic.name.as_str() {
+                "Burning Blood" => {
+                    let healed = run.hp.saturating_add(6).min(run.max_hp);
+                    if healed > run.hp {
+                        run.hp = healed;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Open the ancient boon selection screen for the given sub-act.
+    pub fn open_ancient_boon(&mut self, sub_act: &str, is_act_transition: bool, rng: &mut impl rand::Rng) {
+        use crate::domain::ancient::select_act_ancient;
+
+        let had_darv = self.ancient_had_darv_act2;
+        let ancient_id = select_act_ancient(sub_act, had_darv, rng);
+        let boons = crate::domain::ancient::sample_boons(
+            ancient_id,
+            &self.ancients.clone(),
+            &self.relics.clone(),
+            rng,
+        );
+
+        if ancient_id == "DARV" && sub_act == "hive" {
+            self.ancient_had_darv_act2 = true;
+        }
+
+        self.ancient_id = ancient_id.to_string();
+        self.ancient_name = self
+            .ancients
+            .iter()
+            .find(|a| a.id.eq_ignore_ascii_case(ancient_id))
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| ancient_id.to_string());
+        self.ancient_boons = boons;
+        self.ancient_cursor = 0;
+        self.ancient_is_act_transition = is_act_transition;
+
+        // Ancient heals player to full HP
+        if let Some(ref mut run) = self.run {
+            run.hp = run.max_hp;
+        }
+
+        self.status_message = format!("You meet {}. Choose a boon.", self.ancient_name);
+        self.mode = AppMode::AncientBoon;
+    }
+
+    fn handle_key_ancient_boon(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
+        let n = self.ancient_boons.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 {
+                    self.ancient_cursor = (self.ancient_cursor + 1).min(n - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.ancient_cursor > 0 {
+                    self.ancient_cursor -= 1;
+                }
+            }
+            KeyCode::Enter => self.confirm_ancient_boon(rng),
+            KeyCode::Char('q') => self.mode = AppMode::Exiting,
+            _ => {}
+        }
+    }
+
+    fn confirm_ancient_boon(&mut self, rng: &mut impl rand::Rng) {
+        // Add the chosen relic to run
+        if let Some(relic) = self.ancient_boons.get(self.ancient_cursor).cloned() {
+            if let Some(ref mut run) = self.run {
+                let desc = relic.description.clone().unwrap_or_default();
+                run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+            }
+            self.status_message = format!("Took boon: {}", relic.name);
+        }
+        self.ancient_boons.clear();
+
+        if self.ancient_is_act_transition {
+            // Generate map for the new act and go to map view
+            self.open_map_view(rng);
+        } else {
+            // Starting boon — go to map view
+            self.open_map_view(rng);
+        }
+    }
+
+    /// Handle act transition after a boss fight.
+    fn begin_act_transition(&mut self, rng: &mut impl rand::Rng) {
+        let current_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+        let future = crate::metrics::run_ev::acts_after(&current_sub_act);
+        let Some(&(next_sub_act, _)) = future.first() else {
+            // No more acts — victory
+            self.status_message = "Victory! The Spire has been conquered.".to_string();
+            self.open_map_view(rng);
+            return;
+        };
+
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+
+        if let Some(ref mut run) = self.run {
+            // Boss gold reward
+            let boss_gold = if ascension >= 3 { 75 } else { 100 };
+            run.gold += boss_gold;
+            // Update act
+            run.sub_act = next_sub_act.to_string();
+            run.act = crate::metrics::run_ev::act_number(next_sub_act);
+            // Reset map
+            run.map = None;
+            run.map_pos = None;
+            run.floor = 0;
+        }
+
+        self.act_filter = next_sub_act.to_string();
+        self.refresh_filter();
+        self.map_ev = None;
+        self.run_ev = None;
+        self.path_choices.clear();
+        self.open_ancient_boon(next_sub_act, true, rng);
+    }
 }
 
 /// Return 3 random cards from the current character's pool as a simulated reward.
@@ -1251,6 +1420,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let events = crate::data::api::load_events();
     let characters = crate::data::api::load_characters();
     let relics = crate::data::api::load_relics();
+    let ancients = crate::data::api::load_ancients();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1259,7 +1429,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(characters, encounters, monsters, events, relics);
+    let mut app = App::new(characters, encounters, monsters, events, relics, ancients);
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
@@ -1315,7 +1485,7 @@ mod tests {
     }
 
     fn empty_app() -> App {
-        App::new(vec![], vec![], vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![], vec![], vec![])
     }
 
     fn app_with_combat() -> App {
@@ -1381,7 +1551,7 @@ mod tests {
             }],
             loss_text: None,
         };
-        let mut app = App::new(vec![], vec![enc], vec![], vec![], vec![]);
+        let mut app = App::new(vec![], vec![enc], vec![], vec![], vec![], vec![]);
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -1435,7 +1605,7 @@ mod tests {
             monsters: vec![],
             loss_text: None,
         };
-        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![], vec![]);
+        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![], vec![], vec![]);
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);

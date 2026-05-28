@@ -35,7 +35,7 @@ pub fn act_number(sub_act: &str) -> u8 {
 /// Returns the (sub_act, act_number) pairs for all acts that follow the current one.
 ///
 /// Act 1 (either overgrowth or underdocks) always leads to Act 2 (hive) then Act 3 (glory).
-fn acts_after(current_sub_act: &str) -> Vec<(&'static str, u8)> {
+pub fn acts_after(current_sub_act: &str) -> Vec<(&'static str, u8)> {
     match current_sub_act {
         "overgrowth" | "underdocks" => vec![("hive", 2), ("glory", 3)],
         "hive"                      => vec![("glory", 3)],

@@ -75,6 +75,8 @@ pub struct RunState {
     pub card_removals_bought: u32,
     /// Current ascension level (0 = normal mode).
     pub ascension: u8,
+    /// Whether Darv appeared as this run's Act 2 ancient (affects Act 3 pool).
+    pub had_darv_act2: bool,
 }
 
 impl RunState {
@@ -101,6 +103,7 @@ impl RunState {
             rare_offset: -5,
             card_removals_bought: 0,
             ascension: 0,
+            had_darv_act2: false,
         }
     }
 
