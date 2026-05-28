@@ -7,12 +7,32 @@ const CARDS_API_URL: &str = "https://spire-codex.com/api/cards";
 const MONSTERS_API_URL: &str = "https://spire-codex.com/api/monsters";
 const ENCOUNTERS_API_URL: &str = "https://spire-codex.com/api/encounters";
 const EVENTS_API_URL: &str = "https://spire-codex.com/api/events";
+const CHARACTERS_API_URL: &str = "https://spire-codex.com/api/characters";
+const POWERS_API_URL: &str = "https://spire-codex.com/api/powers";
+const RELICS_API_URL: &str = "https://spire-codex.com/api/relics";
+const KEYWORDS_API_URL: &str = "https://spire-codex.com/api/keywords";
+const INTENTS_API_URL: &str = "https://spire-codex.com/api/intents";
+const AFFLICTIONS_API_URL: &str = "https://spire-codex.com/api/afflictions";
+const ENCHANTMENTS_API_URL: &str = "https://spire-codex.com/api/enchantments";
+const ACTS_API_URL: &str = "https://spire-codex.com/api/acts";
+const POTIONS_API_URL: &str = "https://spire-codex.com/api/potions";
+const ASCENSIONS_API_URL: &str = "https://spire-codex.com/api/ascensions";
 const CACHE_TTL_SECS: u64 = 86_400;
 
 const SEED_JSON: &str = include_str!("../../data/cards_seed.json");
 const MONSTERS_SEED_JSON: &str = include_str!("../../data/monsters_seed.json");
 const ENCOUNTERS_SEED_JSON: &str = include_str!("../../data/encounters_seed.json");
 const EVENTS_SEED_JSON: &str = include_str!("../../data/events_seed.json");
+const CHARACTERS_SEED_JSON: &str = include_str!("../../data/characters_seed.json");
+const POWERS_SEED_JSON: &str = include_str!("../../data/powers_seed.json");
+const RELICS_SEED_JSON: &str = include_str!("../../data/relics_seed.json");
+const KEYWORDS_SEED_JSON: &str = include_str!("../../data/keywords_seed.json");
+const INTENTS_SEED_JSON: &str = include_str!("../../data/intents_seed.json");
+const AFFLICTIONS_SEED_JSON: &str = include_str!("../../data/afflictions_seed.json");
+const ENCHANTMENTS_SEED_JSON: &str = include_str!("../../data/enchantments_seed.json");
+const ACTS_SEED_JSON: &str = include_str!("../../data/acts_seed.json");
+const POTIONS_SEED_JSON: &str = include_str!("../../data/potions_seed.json");
+const ASCENSIONS_SEED_JSON: &str = include_str!("../../data/ascensions_seed.json");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPower {
@@ -288,4 +308,194 @@ pub fn load_events() -> Vec<SpireApiEvent> {
 // Refactor load_cards to use the same helper (keep original signature for compatibility)
 pub fn load_cards() -> Result<Vec<SpireApiCard>> {
     Ok(load_cached(CARDS_API_URL, "cards", SEED_JSON))
+}
+
+// ── Character API ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiCharacter {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub starting_hp: Option<i32>,
+    pub starting_gold: Option<i32>,
+    pub max_energy: Option<i32>,
+    pub orb_slots: Option<i32>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub starting_deck: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub starting_relics: Vec<String>,
+    pub unlocks_after: Option<String>,
+    pub color: Option<String>,
+    pub image_url: Option<String>,
+    // quotes and dialogues are lore-only; stored raw to avoid schema churn
+    pub quotes: Option<serde_json::Value>,
+    pub dialogues: Option<serde_json::Value>,
+}
+
+pub fn load_characters() -> Vec<SpireApiCharacter> {
+    load_cached(CHARACTERS_API_URL, "characters", CHARACTERS_SEED_JSON)
+}
+
+// ── Power API ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiPower {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub power_type: Option<String>,    // "Buff" | "Debuff"
+    pub stack_type: Option<String>,    // "Counter" | "Single" | "None"
+    pub allow_negative: Option<bool>,
+    pub image_url: Option<String>,
+}
+
+pub fn load_powers() -> Vec<SpireApiPower> {
+    load_cached(POWERS_API_URL, "powers", POWERS_SEED_JSON)
+}
+
+// ── Relic API ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RelicMerchantPrice {
+    pub base: Option<i32>,
+    pub min: Option<i32>,
+    pub max: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiRelic {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub flavor: Option<String>,
+    pub rarity: Option<String>,
+    pub rarity_key: Option<String>,
+    /// Character pool: "shared", "ironclad", "silent", "regent", "necrobinder", "defect".
+    pub pool: Option<String>,
+    pub merchant_price: Option<RelicMerchantPrice>,
+    pub image_url: Option<String>,
+    pub notes: Option<String>,
+}
+
+pub fn load_relics() -> Vec<SpireApiRelic> {
+    load_cached(RELICS_API_URL, "relics", RELICS_SEED_JSON)
+}
+
+// ── Keyword API ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiKeyword {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+pub fn load_keywords() -> Vec<SpireApiKeyword> {
+    load_cached(KEYWORDS_API_URL, "keywords", KEYWORDS_SEED_JSON)
+}
+
+// ── Intent API ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiIntent {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+}
+
+pub fn load_intents() -> Vec<SpireApiIntent> {
+    load_cached(INTENTS_API_URL, "intents", INTENTS_SEED_JSON)
+}
+
+// ── Affliction API ────────────────────────────────────────────────────────────
+
+/// A debuff applied to cards (Bound, Devoured, Entangled, etc.).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAffliction {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub extra_card_text: Option<String>,
+    pub is_stackable: Option<bool>,
+}
+
+pub fn load_afflictions() -> Vec<SpireApiAffliction> {
+    load_cached(AFFLICTIONS_API_URL, "afflictions", AFFLICTIONS_SEED_JSON)
+}
+
+// ── Enchantment API ───────────────────────────────────────────────────────────
+
+/// A card enhancement applied at rest sites (replaces STS1 Smith/Upgrade).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiEnchantment {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub extra_card_text: Option<String>,
+    /// Restricts which card type can receive this enchantment (null = any).
+    pub card_type: Option<String>,
+    pub applicable_to: Option<String>,
+    pub is_stackable: Option<bool>,
+    pub image_url: Option<String>,
+}
+
+pub fn load_enchantments() -> Vec<SpireApiEnchantment> {
+    load_cached(ENCHANTMENTS_API_URL, "enchantments", ENCHANTMENTS_SEED_JSON)
+}
+
+// ── Act API ───────────────────────────────────────────────────────────────────
+
+/// Authoritative mapping of a sub-act to its bosses, ancients, events, and encounter IDs.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAct {
+    pub id: String,
+    pub name: String,
+    pub num_rooms: Option<i32>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub bosses: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub ancients: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub events: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub encounters: Vec<String>,
+}
+
+pub fn load_acts() -> Vec<SpireApiAct> {
+    load_cached(ACTS_API_URL, "acts", ACTS_SEED_JSON)
+}
+
+// ── Potion API ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiPotion {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub rarity: Option<String>,
+    pub rarity_key: Option<String>,
+    /// Character pool: "shared", "ironclad", "silent", etc.
+    pub pool: Option<String>,
+    pub image_url: Option<String>,
+}
+
+pub fn load_potions() -> Vec<SpireApiPotion> {
+    load_cached(POTIONS_API_URL, "potions", POTIONS_SEED_JSON)
+}
+
+// ── Ascension API ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpireApiAscension {
+    pub id: String,
+    pub level: i32,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+pub fn load_ascensions() -> Vec<SpireApiAscension> {
+    load_cached(ASCENSIONS_API_URL, "ascensions", ASCENSIONS_SEED_JSON)
 }
