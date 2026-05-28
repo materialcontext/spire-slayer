@@ -610,6 +610,7 @@ impl App {
         let mut run  = RunState::new(class, hp, hp, deck, relic);
         run.gold     = gold;
         run.sub_act  = sub_act.clone();
+        run.act      = crate::metrics::run_ev::act_number(&sub_act);
 
         self.status_message = format!(
             "Playing as {} — HP {}, {} starting cards — choose your path",
@@ -642,10 +643,11 @@ impl App {
         let Some(ref map) = run.map else { self.path_choices.clear(); return; };
 
         let max_hp = run.max_hp;
+        let ascension = run.ascension;
         let (simulated, costs) = if let Some(ref me) = self.map_ev {
-            (true, NodeCosts::from_map_ev(me, max_hp))
+            (true, NodeCosts::from_map_ev(me, max_hp, ascension))
         } else {
-            (false, NodeCosts::defaults(max_hp))
+            (false, NodeCosts::defaults(max_hp, ascension))
         };
 
         let (choices, next_floor) = match run.map_pos {

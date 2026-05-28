@@ -1167,7 +1167,7 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             let path_info = app.path_choices.iter().find(|pc| pc.col == col);
             let path_str = path_info.map(|pc| {
                 let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
-                format!("{sign}{:.0}hp", pc.total_hp_delta)
+                format!("{sign}{:.0}hp +{:.0}g", pc.total_hp_delta, pc.expected_gold)
             }).unwrap_or_default();
             let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
             let label = if path_str.is_empty() {

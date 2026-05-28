@@ -88,6 +88,7 @@ fn act_node_costs(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
+    ascension: u8,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     rng: &mut impl Rng,
@@ -111,16 +112,12 @@ fn act_node_costs(
     let es = compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc,  all_monsters, rng);
     let bs = compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc,   all_monsters, rng);
 
-    let costs = if has_data {
-        NodeCosts {
-            monster_loss: ns.mean_hp_loss,
-            elite_loss:   es.mean_hp_loss,
-            boss_loss:    bs.mean_hp_loss,
-            rest_heal:    (max_hp as f32 * 0.30).floor(),
-        }
-    } else {
-        NodeCosts::defaults(max_hp)
-    };
+    let mut costs = NodeCosts::defaults(max_hp, ascension);
+    if has_data {
+        costs.monster_loss = ns.mean_hp_loss;
+        costs.elite_loss   = es.mean_hp_loss;
+        costs.boss_loss    = bs.mean_hp_loss;
+    }
 
     (costs, has_data)
 }
@@ -205,7 +202,7 @@ pub fn compute_run_ev(
         let is_last = i == future.len() - 1;
 
         let (costs, has_data) = act_node_costs(
-            sub_act, deck, entry_hp as u32, max_hp, all_encounters, all_monsters, rng,
+            sub_act, deck, entry_hp as u32, max_hp, ascension, all_encounters, all_monsters, rng,
         );
         if !has_data {
             all_simulated = false;
@@ -381,7 +378,7 @@ mod tests {
 
     #[test]
     fn estimate_act_delta_is_finite() {
-        let costs = NodeCosts::defaults(80);
+        let costs = NodeCosts::defaults(80, 0);
         let delta = estimate_act_delta(&costs, 0, &mut rng());
         assert!(delta.is_finite());
     }
