@@ -4,7 +4,7 @@ use rand::seq::SliceRandom;
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
 use crate::domain::card::Card;
 use crate::domain::encounter::{encounter_to_combat_with_deck, normalize_act};
-use crate::sim::playout::playout;
+use crate::sim::playout::run_combat;
 use crate::sim::policy::GreedyDamagePolicy;
 use super::deck::{attack_ratio, deck_score, has_block_density, mean_cost, synergy_score};
 
@@ -43,7 +43,7 @@ pub struct DeckStats {
 
 /// Compute deck statistics by running simulations against a sampled act panel.
 ///
-/// Samples up to 5 normal/elite encounters from `act`, runs 20 playouts each,
+/// Samples up to 5 normal/elite encounters from `act`, runs 8 full combats each,
 /// and aggregates damage-per-turn, block-per-turn, and survival distributions.
 pub fn compute_deck_stats(
     deck: &[Card],
@@ -55,7 +55,7 @@ pub fn compute_deck_stats(
     rng: &mut impl Rng,
 ) -> DeckStats {
     const MAX_ENCOUNTERS: usize = 5;
-    const PLAYOUTS_PER_ENC: u32 = 20;
+    const FULL_COMBATS_PER_ENC: u32 = 8;
 
     let deck_size = deck.len();
     let cycle_turns = if deck_size == 0 { 0.0 } else { deck_size as f32 / 5.0 };
@@ -103,7 +103,7 @@ pub fn compute_deck_stats(
     let sampled: Vec<&SpireApiEncounter> =
         pool.choose_multiple(rng, MAX_ENCOUNTERS.min(pool.len())).copied().collect();
 
-    let total_playouts = sampled.len() as u32 * PLAYOUTS_PER_ENC;
+    let total_playouts = sampled.len() as u32 * FULL_COMBATS_PER_ENC;
     let mut damages: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut blocks: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut hp_losses: Vec<f32> = Vec::with_capacity(total_playouts as usize);
@@ -111,18 +111,14 @@ pub fn compute_deck_stats(
     let mut survivals = 0u32;
 
     for enc in &sampled {
-        for _ in 0..PLAYOUTS_PER_ENC {
+        for _ in 0..FULL_COMBATS_PER_ENC {
             let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, rng);
-            let r = playout(state, &GreedyDamagePolicy, rng);
-            damages.push(r.damage_dealt as f32);
-            blocks.push(r.block_gained as f32);
+            let r = run_combat(state, &GreedyDamagePolicy, rng);
+            damages.push(r.damage_dealt as f32 / r.turns.max(1) as f32);
+            blocks.push(r.block_absorbed as f32 / r.turns.max(1) as f32);
             hp_losses.push((-r.player_hp_delta).max(0) as f32);
-            if r.player_alive {
-                survivals += 1;
-                if r.combat_over {
-                    kills += 1;
-                }
-            }
+            if r.combat_won { kills += 1; }
+            if r.player_alive { survivals += 1; }
         }
     }
 

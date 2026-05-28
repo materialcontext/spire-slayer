@@ -598,6 +598,7 @@ impl App {
         let sub_act = self.run.as_ref().map(|r| r.sub_act.clone())
             .unwrap_or_else(|| self.act_filter.clone());
 
+        let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
         let data = compute_map_ev(
             &deck,
             hp,
@@ -607,6 +608,7 @@ impl App {
             &self.encounters,
             &self.monsters,
             &self.events,
+            gold,
             rng,
         );
         self.status_message = format!(
@@ -636,6 +638,8 @@ impl App {
             &self.monsters,
             ascension,
             current_simulated,
+            &self.events,
+            gold,
             rng,
         ));
 

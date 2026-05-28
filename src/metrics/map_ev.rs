@@ -1,7 +1,9 @@
 use rand::Rng;
+use rand::seq::SliceRandom;
 
 use crate::data::api::{SpireApiEncounter, SpireApiEvent, SpireApiMonster};
-use crate::domain::card::Card;
+use crate::domain::card::{Card, Rarity};
+use crate::domain::effect::CardEffect;
 use super::deck_dash::{compute_deck_stats, DeckStats};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -40,6 +42,12 @@ pub struct MapEvData {
     /// HP the player will have at the start of the next act (post-act heal).
     /// Full heal at ascension < 6; 80 % of max HP at ascension ≥ 6.
     pub post_act_heal_hp: f32,
+    /// Expected HP change from the best event option, averaged over the act event pool.
+    pub event_hp_delta: f32,
+    /// Expected HP equivalent from a treasure relic (rarity-weighted heuristic).
+    pub treasure_hp: f32,
+    /// Expected HP saved by using the shop for card removal (differential simulation).
+    pub shop_hp_value: f32,
 }
 
 // ── Event filtering ───────────────────────────────────────────────────────────
@@ -91,6 +99,105 @@ pub fn strip_tags(s: &str) -> String {
     out
 }
 
+// ── HP delta parsing ──────────────────────────────────────────────────────────
+
+fn parse_hp_delta(plain: &str) -> f32 {
+    let words: Vec<&str> = plain.split_whitespace().collect();
+    let mut delta = 0.0_f32;
+    for i in 0..words.len() {
+        let Ok(n) = words[i].parse::<f32>() else { continue };
+        let prev  = if i > 0             { words[i-1] } else { "" };
+        let next  = if i+1 < words.len() { words[i+1] } else { "" };
+        let next2 = if i+2 < words.len() { words[i+2] } else { "" };
+        let is_hp  = next.eq_ignore_ascii_case("hp") || next.eq_ignore_ascii_case("health");
+        let is_dmg = next.eq_ignore_ascii_case("damage") || next.eq_ignore_ascii_case("dmg");
+        let is_hp2  = !is_hp  && (next2.eq_ignore_ascii_case("hp") || next2.eq_ignore_ascii_case("health"));
+        let is_dmg2 = !is_dmg && (next2.eq_ignore_ascii_case("damage") || next2.eq_ignore_ascii_case("dmg"));
+        match prev.to_lowercase().as_str() {
+            "heal" | "heals" | "restore" | "restores" => delta += n,
+            "gain" if is_hp || is_hp2   => delta += n,
+            "lose" | "loses" if is_hp || is_hp2 => delta -= n,
+            "take" | "takes" if is_dmg || is_dmg2 => delta -= n,
+            "deal" | "deals" if is_dmg || is_dmg2 => delta -= n,
+            _ => {}
+        }
+    }
+    delta
+}
+
+/// Compute the mean best-option HP delta across the act event pool.
+pub fn compute_event_hp_delta(
+    events: &[SpireApiEvent],
+    sub_act: &str,
+    _hp_ratio: f32,
+) -> f32 {
+    let pool = events_for_sub_act(sub_act, events);
+    if pool.is_empty() {
+        return -2.0;
+    }
+    // For each event, find the best available option's HP delta; average over pool.
+    let total: f32 = pool.iter().map(|event| {
+        event.options.iter()
+            .map(|opt| {
+                let raw = opt.description.as_deref().unwrap_or("");
+                let plain = strip_tags(raw).to_lowercase();
+                parse_hp_delta(&plain)
+            })
+            .fold(f32::NEG_INFINITY, f32::max)
+            .max(-50.0) // clamp runaway negatives
+    }).sum::<f32>();
+    total / pool.len() as f32
+}
+
+// ── Card value scoring ────────────────────────────────────────────────────────
+
+fn card_value_score(card: &Card) -> f32 {
+    if card.cost == 255 { return -100.0; }
+    let mut score = 0.0f32;
+    for effect in &card.effects {
+        match effect {
+            CardEffect::Damage(d) => score += *d as f32 / card.cost.max(1) as f32,
+            CardEffect::Block(b)  => score += *b as f32 * 0.8 / card.cost.max(1) as f32,
+            CardEffect::Draw(n)   => score += *n as f32 * 2.0,
+            _                     => score += 1.0,
+        }
+    }
+    if matches!(card.rarity, Rarity::Basic) { score *= 0.7; }
+    score
+}
+
+/// Estimate the HP value of removing the worst card via the shop.
+pub fn compute_shop_hp_value(
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    sub_act: &str,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    gold: u32,
+    rng: &mut impl Rng,
+) -> f32 {
+    const REMOVAL_COST: u32 = 75;
+    const REMAINING_FIGHTS: f32 = 5.0;
+    if gold < REMOVAL_COST || deck.len() <= 1 { return 0.0; }
+    let worst_idx = deck.iter().enumerate()
+        .min_by(|(_, a), (_, b)|
+            card_value_score(a).partial_cmp(&card_value_score(b))
+                .unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let deck_reduced: Vec<Card> = deck.iter().enumerate()
+        .filter(|(i, _)| *i != worst_idx)
+        .map(|(_, c)| c.clone())
+        .collect();
+    let full_stats    = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng);
+    let reduced_stats = compute_deck_stats(&deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, rng);
+    if full_stats.encounter_count == 0 {
+        return if deck.iter().any(|c| c.cost == 255) { 12.0 } else { 3.0 };
+    }
+    (full_stats.mean_hp_loss - reduced_stats.mean_hp_loss).max(0.0) * REMAINING_FIGHTS
+}
+
 // ── Core computation ──────────────────────────────────────────────────────────
 
 fn combat_node_ev(
@@ -139,6 +246,7 @@ pub fn compute_map_ev(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     all_events: &[SpireApiEvent],
+    gold: u32,
     rng: &mut impl Rng,
 ) -> MapEvData {
     // Simulate vs. normal (Monster) encounters for this sub-act.
@@ -236,6 +344,11 @@ pub fn compute_map_ev(
         stars: 2,
     };
 
+    let hp_ratio = hp as f32 / max_hp.max(1) as f32;
+    let event_hp_delta = compute_event_hp_delta(all_events, sub_act, hp_ratio);
+    let treasure_hp = 6.0_f32;
+    let shop_hp_value = compute_shop_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, rng);
+
     MapEvData {
         sub_act: sub_act.to_string(),
         normal,
@@ -248,6 +361,9 @@ pub fn compute_map_ev(
         events,
         shared_event_count,
         post_act_heal_hp: post_act_heal_hp(max_hp, ascension),
+        event_hp_delta,
+        treasure_hp,
+        shop_hp_value,
     }
 }
 
@@ -342,7 +458,7 @@ mod tests {
         use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], &mut rng);
+        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], 0, &mut rng);
         assert_eq!(data.sub_act, "overgrowth");
         assert_eq!(data.treasure.stars, 3);
         assert_eq!(data.events.len(), 0);

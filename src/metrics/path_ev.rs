@@ -24,6 +24,12 @@ pub struct NodeCosts {
     pub boss_gold: f32,
     /// Mean gold gained from a Treasure chest.
     pub chest_gold: f32,
+    /// Expected HP change from the best event option (avg over pool).
+    pub event_hp_delta: f32,
+    /// Expected HP equivalent from a treasure relic.
+    pub treasure_hp: f32,
+    /// Expected HP saved by using the shop (card removal).
+    pub shop_hp_value: f32,
 }
 
 impl NodeCosts {
@@ -38,6 +44,9 @@ impl NodeCosts {
             elite_gold:   gold.elite,
             boss_gold:    gold.boss,
             chest_gold:   gold.chest,
+            event_hp_delta: map_ev.event_hp_delta,
+            treasure_hp:    map_ev.treasure_hp,
+            shop_hp_value:  map_ev.shop_hp_value,
         }
     }
 
@@ -52,6 +61,9 @@ impl NodeCosts {
             elite_gold:   gold.elite,
             boss_gold:    gold.boss,
             chest_gold:   gold.chest,
+            event_hp_delta: -2.0,
+            treasure_hp:    6.0,
+            shop_hp_value:  0.0,
         }
     }
 }
@@ -77,10 +89,12 @@ impl GoldValues {
 
 fn node_cost(rt: Option<RoomType>, costs: &NodeCosts) -> f32 {
     match rt {
-        Some(RoomType::Monster) => -costs.monster_loss,
-        Some(RoomType::Elite)   => -costs.elite_loss,
-        Some(RoomType::Rest)    => costs.rest_heal,
-        // Event/Shop/Treasure/Boss treated as 0 (neutral or reward-only)
+        Some(RoomType::Monster)  => -costs.monster_loss,
+        Some(RoomType::Elite)    => -costs.elite_loss,
+        Some(RoomType::Rest)     => costs.rest_heal,
+        Some(RoomType::Event)    => costs.event_hp_delta,
+        Some(RoomType::Treasure) => costs.treasure_hp,
+        Some(RoomType::Shop)     => costs.shop_hp_value,
         _ => 0.0,
     }
 }
@@ -290,7 +304,7 @@ mod tests {
         let costs = NodeCosts {
             monster_loss: 10.0, elite_loss: 25.0, boss_loss: 35.0,
             rest_heal: 24.0,
-            monster_gold: 15.0, elite_gold: 40.0, boss_gold: 100.0, chest_gold: 47.5,
+            ..NodeCosts::defaults(80, 0)
         };
         let result = compute_path_choices(&map, &entries, 0, &costs, false);
         for pc in &result {
