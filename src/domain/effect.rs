@@ -6,7 +6,7 @@ pub enum BuffType {
     Strength,
     Dexterity,
     Thorns,
-    Metallicize,
+    Plating,
     Ritual,
     // Debuffs
     Vulnerable,

@@ -96,6 +96,7 @@ pub struct CombatState {
     pub exhaust_pile: Vec<Card>,
     pub energy: u8,
     pub energy_max: u8,
+    pub hand_size: u8,
     pub turn: u32,
 }
 
@@ -110,6 +111,7 @@ impl CombatState {
             exhaust_pile: Vec::new(),
             energy: 3,
             energy_max: 3,
+            hand_size: 5,
             turn: 1,
         }
     }

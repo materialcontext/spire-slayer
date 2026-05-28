@@ -84,9 +84,14 @@ impl Card {
     }
 
     pub fn is_playable(&self, energy: u8) -> bool {
-        !matches!(self.card_type, CardType::Status | CardType::Curse)
-            && self.cost != 255
-            && self.cost <= energy
+        if matches!(self.card_type, CardType::Status | CardType::Curse) {
+            return false;
+        }
+        // X-cost (255): playable whenever there is at least 1 energy
+        if self.cost == 255 {
+            return energy > 0;
+        }
+        self.cost <= energy
     }
 
     /// Sum of direct damage effects (ignoring buffs/debuffs).

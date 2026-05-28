@@ -127,7 +127,13 @@ pub fn monster_to_enemy(monster: &SpireApiMonster) -> EnemyState {
         enemy.ai_runtime.current_state_id = initial_state_id;
         if let Some(mid) = initial_move_id {
             enemy.ai_runtime.last_move_id = Some(mid.clone());
-            enemy.ai_runtime.used_moves.insert(mid);
+            enemy.ai_runtime.used_moves.insert(mid.clone());
+            // Override initial intent with the correct first move
+            if let Some(ref script) = enemy.ai_script {
+                if let Some(data) = script.moves.get(&mid) {
+                    enemy.intent = map_intent(&data.intent_str, data.damage, data.hits);
+                }
+            }
         }
     }
 
@@ -143,7 +149,7 @@ fn map_power_id(id: &str) -> Option<BuffType> {
         "frail" => Some(BuffType::Frail),
         "poison" => Some(BuffType::Poison),
         "thorns" | "sharp_hide" => Some(BuffType::Thorns),
-        "metallicize" => Some(BuffType::Metallicize),
+        "plating" | "metallicize" => Some(BuffType::Plating),
         _ => None,
     }
 }
