@@ -37,21 +37,6 @@ fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
     if vulnerable { after_weak * 3 / 2 } else { after_weak }
 }
 
-/// Damage a single AoE hit deals to `enemy_idx`, accounting for Weak and enemy Vulnerable.
-fn compute_hit_aoe(base: u32, state: &CombatState, enemy_idx: usize) -> u32 {
-    let strength = state.player.buff(&BuffType::Strength);
-    let weak = state.player.buff(&BuffType::Weak) > 0;
-    let vulnerable = state.enemies[enemy_idx].buff(&BuffType::Vulnerable) > 0;
-
-    let raw = if strength >= 0 {
-        base + strength as u32
-    } else {
-        base.saturating_sub((-strength) as u32)
-    };
-    let after_weak = if weak { raw * 3 / 4 } else { raw };
-    if vulnerable { after_weak * 3 / 2 } else { after_weak }
-}
-
 /// Apply `dmg` to `enemy`, reducing block first then HP.
 /// Returns Thorns stacks on that enemy (caller applies to player separately).
 fn damage_enemy(state: &mut CombatState, enemy_idx: usize, dmg: u32) -> u32 {
@@ -71,10 +56,13 @@ fn damage_enemy(state: &mut CombatState, enemy_idx: usize, dmg: u32) -> u32 {
 }
 
 /// Apply `dmg` to the player (Thorns return value from `damage_enemy`).
+/// When the player has Intangible stacks, each hit is capped at 1 damage before block.
 fn damage_player(state: &mut CombatState, dmg: u32) {
-    let absorbed = state.player.block.min(dmg);
+    let intangible = state.player.buff(&BuffType::Intangible) > 0;
+    let effective = if intangible { dmg.min(1) } else { dmg };
+    let absorbed = state.player.block.min(effective);
     state.player.block -= absorbed;
-    state.player.hp = state.player.hp.saturating_sub(dmg - absorbed);
+    state.player.hp = state.player.hp.saturating_sub(effective - absorbed);
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -120,7 +108,7 @@ pub(crate) fn apply_effect(
             let hits: Vec<(usize, u32, u32)> = (0..state.enemies.len())
                 .filter(|&i| state.enemies[i].is_alive())
                 .map(|i| {
-                    let dmg = compute_hit_aoe(*d, state, i);
+                    let dmg = compute_hit(*d, state, i);
                     let thorns = state.enemies[i]
                         .buffs
                         .get(&BuffType::Thorns)
@@ -158,6 +146,17 @@ pub(crate) fn apply_effect(
                     if thorns > 0 {
                         damage_player(state, thorns);
                     }
+                }
+            }
+        }
+
+        CardEffect::DamageEqBlock => {
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                let base = state.player.block;
+                let dmg = compute_hit(base, state, target_idx);
+                let thorns = damage_enemy(state, target_idx, dmg);
+                if thorns > 0 {
+                    damage_player(state, thorns);
                 }
             }
         }
@@ -444,6 +443,23 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
+    // Decrement timed debuffs on living enemies (Vulnerable, Weak, Frail expire after N turns)
+    for enemy in &mut state.enemies {
+        if enemy.is_alive() {
+            for buff in &[BuffType::Vulnerable, BuffType::Weak, BuffType::Frail] {
+                if let Some(s) = enemy.buffs.get_mut(buff) {
+                    if *s > 0 { *s -= 1; }
+                }
+            }
+        }
+    }
+    // Decrement timed debuffs on the player
+    for buff in &[BuffType::Weak, BuffType::Frail, BuffType::Intangible] {
+        if let Some(s) = state.player.buffs.get_mut(buff) {
+            if *s > 0 { *s -= 1; }
+        }
+    }
+
     if state.is_over() {
         return true;
     }
@@ -465,13 +481,25 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // Reset player block and energy, advance turn
-    state.player.block = 0;
+    // Reset player block (Barricade prevents the reset) and energy, advance turn
+    if state.player.buff(&BuffType::Barricade) == 0 {
+        state.player.block = 0;
+    }
     state.energy = state.energy_max;
     state.turn += 1;
 
     // Draw new hand
     draw_cards(state, state.hand_size as usize, rng);
+
+    // Start-of-turn: NoxiousFumes applies Poison to all living enemies
+    let noxious = state.player.buff(&BuffType::NoxiousFumes);
+    if noxious > 0 {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                *enemy.buffs.entry(BuffType::Poison).or_insert(0) += noxious;
+            }
+        }
+    }
 
     state.is_over()
 }
@@ -511,6 +539,9 @@ fn map_power_id_to_buff(id: &str) -> Option<BuffType> {
         "thorns" | "sharp_hide" => Some(BuffType::Thorns),
         "plating" | "metallicize" => Some(BuffType::Plating),
         "ritual" => Some(BuffType::Ritual),
+        "intangible" => Some(BuffType::Intangible),
+        "barricade" => Some(BuffType::Barricade),
+        "noxious_fumes" | "noxiousfumes" => Some(BuffType::NoxiousFumes),
         _ => None,
     }
 }
@@ -792,5 +823,108 @@ mod tests {
         state.hand.push(strike());
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
         assert!(state.is_won());
+    }
+
+    // ── New mechanics ──────────────────────────────────────────────────────
+
+    #[test]
+    fn intangible_caps_incoming_damage_to_1() {
+        let mut state = basic_state(); // enemy attacks for 9
+        *state.player.buffs.entry(BuffType::Intangible).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 79); // 80 - 1 (capped by Intangible)
+    }
+
+    #[test]
+    fn intangible_decrements_each_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::Intangible).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Intangible).unwrap(), 1);
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Intangible).unwrap(), 0);
+    }
+
+    #[test]
+    fn barricade_preserves_player_block_between_turns() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        state.player.block = 10;
+        *state.player.buffs.entry(BuffType::Barricade).or_insert(0) = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.block, 10); // block was not cleared
+    }
+
+    #[test]
+    fn without_barricade_block_is_reset() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        state.player.block = 10;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.block, 0);
+    }
+
+    #[test]
+    fn noxious_fumes_applies_poison_at_start_of_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::NoxiousFumes).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        // After end_turn, new turn starts with 2 Poison on the enemy
+        let poison = *state.enemies[0].buffs.get(&BuffType::Poison).unwrap_or(&0);
+        assert_eq!(poison, 2);
+    }
+
+    #[test]
+    fn vulnerable_decrements_each_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.enemies[0].buffs.entry(BuffType::Vulnerable).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 1);
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 0);
+        // Third turn: doesn't go negative
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 0);
+    }
+
+    #[test]
+    fn weak_decrements_on_player() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::Weak).or_insert(0) = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Weak).unwrap(), 0);
+    }
+
+    fn body_slam() -> Card {
+        Card::new(
+            10,
+            "Body Slam",
+            1,
+            CardType::Attack,
+            Rarity::Common,
+            vec![CardEffect::DamageEqBlock],
+        )
+    }
+
+    #[test]
+    fn damage_eq_block_deals_current_block_as_damage() {
+        let mut state = basic_state();
+        state.player.block = 15;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 35); // 50 - 15
+    }
+
+    #[test]
+    fn damage_eq_block_zero_block_deals_no_damage() {
+        let mut state = basic_state();
+        state.player.block = 0;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 50); // no damage
     }
 }

@@ -8,6 +8,13 @@ pub enum BuffType {
     Thorns,
     Plating,
     Ritual,
+    // Player-only persistent power buffs
+    /// Block is not cleared at the start of your turn.
+    Barricade,
+    /// Incoming damage is capped at 1 per hit; decrements by 1 per turn.
+    Intangible,
+    /// Apply (stacks) Poison to all enemies at the start of each player turn.
+    NoxiousFumes,
     // Debuffs
     Vulnerable,
     Weak,
@@ -23,6 +30,8 @@ pub enum CardEffect {
     DamageAll(u32),
     /// Deal damage N times to the target enemy.
     DamageMulti { base: u32, hits: u32 },
+    /// Deal damage equal to the player's current Block (e.g. Body Slam).
+    DamageEqBlock,
     /// Gain block.
     Block(u32),
     /// Draw cards.
