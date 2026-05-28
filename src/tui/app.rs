@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiEncounter, SpireApiMonster};
+use crate::data::api::{SpireApiEncounter, SpireApiEvent, SpireApiMonster};
 use crate::domain::card::Card;
 use crate::domain::combat::CombatState;
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
@@ -11,6 +11,7 @@ use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
+use crate::metrics::map_ev::{compute_map_ev, MapEvData};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -22,6 +23,7 @@ pub enum AppMode {
     CombatAdvice,
     CardPick,
     DeckDash,
+    MapEv,
     ManualInput,
     Simulating,
     Exiting,
@@ -34,18 +36,24 @@ pub struct App {
     pub play_advice: Option<PlayAdvice>,
     pub card_advice: Vec<CardAdvice>,
     pub deck_stats: Option<DeckStats>,
+    pub map_ev: Option<MapEvData>,
     pub input: Option<ManualInputState>,
     pub status_message: String,
     pub selected_row: usize,
     // Encounter picker state
     pub encounters: Vec<SpireApiEncounter>,
     pub monsters: Vec<SpireApiMonster>,
+    pub events: Vec<SpireApiEvent>,
     pub act_filter: String,
     pub filtered_indices: Vec<usize>,
 }
 
 impl App {
-    pub fn new(encounters: Vec<SpireApiEncounter>, monsters: Vec<SpireApiMonster>) -> Self {
+    pub fn new(
+        encounters: Vec<SpireApiEncounter>,
+        monsters: Vec<SpireApiMonster>,
+        events: Vec<SpireApiEvent>,
+    ) -> Self {
         let mut app = Self {
             mode: AppMode::EncounterPick,
             combat: None,
@@ -53,11 +61,13 @@ impl App {
             play_advice: None,
             card_advice: Vec::new(),
             deck_stats: None,
+            map_ev: None,
             input: None,
             status_message: String::new(),
             selected_row: 0,
             encounters,
             monsters,
+            events,
             act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
         };
@@ -104,16 +114,17 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match self.mode {
-            AppMode::EncounterPick => self.handle_key_encounter(key),
+            AppMode::EncounterPick => self.handle_key_encounter(key, rng),
             AppMode::ManualInput => self.handle_key_input(key),
             AppMode::CombatAdvice => self.handle_key_combat(key, rng),
             AppMode::CardPick => self.handle_key_pick(key),
             AppMode::DeckDash => self.handle_key_deck_dash(key),
+            AppMode::MapEv => self.handle_key_map_ev(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
 
-    fn handle_key_encounter(&mut self, key: KeyEvent) {
+    fn handle_key_encounter(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
@@ -166,6 +177,9 @@ impl App {
                     self.status_message =
                         "No encounter data loaded (API unavailable). Using default.".to_string();
                 }
+            }
+            KeyCode::Char('v') => {
+                self.open_map_ev(rng);
             }
             KeyCode::Char('m') => {
                 // Manual input fallback
@@ -253,6 +267,9 @@ impl App {
                 let offered = sample_card_offer(rng);
                 self.load_pick(offered, rng);
             }
+            KeyCode::Char('v') => {
+                self.open_map_ev(rng);
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref combat) = self.combat {
                     if self.selected_row + 1 < combat.hand.len() {
@@ -273,6 +290,31 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('d') => {
                 self.mode = AppMode::CombatAdvice;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_map_ev(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Char('v') | KeyCode::Esc => {
+                self.mode = if self.combat.is_some() {
+                    AppMode::CombatAdvice
+                } else {
+                    AppMode::EncounterPick
+                };
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(ref data) = self.map_ev {
+                    if self.selected_row + 1 < data.events.len() {
+                        self.selected_row += 1;
+                    }
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                }
             }
             _ => {}
         }
@@ -343,6 +385,31 @@ impl App {
         self.mode = AppMode::DeckDash;
     }
 
+    pub fn open_map_ev(&mut self, rng: &mut impl rand::Rng) {
+        let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
+            crate::domain::catalog::ironclad::starter_deck()
+        });
+        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
+        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        let data = compute_map_ev(
+            &deck,
+            hp,
+            max_hp,
+            &self.act_filter,
+            &self.encounters,
+            &self.monsters,
+            &self.events,
+            rng,
+        );
+        self.status_message = format!(
+            "Map EV: {} — {} events ({} shared)",
+            data.sub_act, data.events.len(), data.shared_event_count,
+        );
+        self.map_ev = Some(data);
+        self.selected_row = 0;
+        self.mode = AppMode::MapEv;
+    }
+
     pub fn load_combat(&mut self, state: CombatState) {
         self.play_advice = None;
         self.selected_row = 0;
@@ -390,6 +457,7 @@ pub fn run_app() -> anyhow::Result<()> {
 
     let monsters = crate::data::api::load_monsters();
     let encounters = crate::data::api::load_encounters();
+    let events = crate::data::api::load_events();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -398,7 +466,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(encounters, monsters);
+    let mut app = App::new(encounters, monsters, events);
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
@@ -454,7 +522,7 @@ mod tests {
     }
 
     fn empty_app() -> App {
-        App::new(vec![], vec![])
+        App::new(vec![], vec![], vec![])
     }
 
     fn app_with_combat() -> App {
@@ -520,7 +588,7 @@ mod tests {
             }],
             loss_text: None,
         };
-        let mut app = App::new(vec![enc], vec![]);
+        let mut app = App::new(vec![enc], vec![], vec![]);
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -574,7 +642,7 @@ mod tests {
             monsters: vec![],
             loss_text: None,
         };
-        let mut app = App::new(vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![]);
+        let mut app = App::new(vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);
