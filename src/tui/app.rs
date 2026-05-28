@@ -76,6 +76,10 @@ pub struct App {
     pub offered_cards: Vec<Card>,
     /// Where to return when CardPick is dismissed, and whether to commit the pick to the run.
     pub card_pick_return: AppMode,
+    /// Where to return when DeckDash is dismissed.
+    pub deck_dash_return: AppMode,
+    /// Where to return when MapEv is dismissed.
+    pub map_ev_return: AppMode,
     /// All relic data loaded at startup.
     pub relics: Vec<SpireApiRelic>,
     /// The single relic on offer in treasure room.
@@ -136,6 +140,8 @@ impl App {
             event_cursor: 0,
             offered_cards: Vec::new(),
             card_pick_return: AppMode::EncounterPick,
+            deck_dash_return: AppMode::CombatAdvice,
+            map_ev_return:    AppMode::EncounterPick,
             relics,
             offered_relic: None,
             relic_cursor: 0,
@@ -237,6 +243,12 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Char('t') => {
                 self.mode = AppMode::EncounterPick;
+            }
+            KeyCode::Char('v') => {
+                self.open_map_ev(rng);
+            }
+            KeyCode::Char('d') => {
+                self.compute_deck_dash(rng);
             }
             KeyCode::Char('j') | KeyCode::Right => {
                 let n = self.map_choices().len();
@@ -431,7 +443,7 @@ impl App {
     fn handle_key_deck_dash(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('d') => {
-                self.mode = AppMode::CombatAdvice;
+                self.mode = self.deck_dash_return.clone();
             }
             _ => {}
         }
@@ -440,11 +452,7 @@ impl App {
     fn handle_key_map_ev(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('v') | KeyCode::Esc => {
-                self.mode = if self.combat.is_some() {
-                    AppMode::CombatAdvice
-                } else {
-                    AppMode::EncounterPick
-                };
+                self.mode = self.map_ev_return.clone();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref data) = self.map_ev {
@@ -530,6 +538,7 @@ impl App {
             )
         };
         self.deck_stats = Some(stats);
+        self.deck_dash_return = self.mode.clone();
         self.mode = AppMode::DeckDash;
     }
 
@@ -589,6 +598,7 @@ impl App {
         ));
 
         self.selected_row = 0;
+        self.map_ev_return = self.mode.clone();
         self.mode = AppMode::MapEv;
     }
 

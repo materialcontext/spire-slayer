@@ -233,8 +233,12 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         format!("  {}", app.status_message)
     };
 
+    let hint = match app.mode {
+        AppMode::MapView => "  [v]ev  [d]eck  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
+        _                => "  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit",
+    };
     let line = Line::from(vec![
-        Span::raw("  [s]im  [d]eck  [p]ick  [v]map  [e]dit  [n]ew  [q]uit"),
+        Span::raw(hint),
         Span::raw(status),
         Span::raw("          Threat: "),
         Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),

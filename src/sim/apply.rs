@@ -333,11 +333,15 @@ fn resolve_to_move(
             let eligible: Vec<_> = branches.iter().filter(|b| is_eligible(b, runtime)).collect();
             let pool: Vec<_> = if eligible.is_empty() { branches.iter().collect() } else { eligible };
 
+            let Some(first) = pool.first() else {
+                return (None, state_id.to_string());
+            };
+
             // Weighted selection
             let total: f32 = pool.iter().map(|b| b.weight).sum();
             let total = if total <= 0.0 { pool.len() as f32 } else { total };
             let mut r = rng.r#gen::<f32>() * total;
-            let chosen = pool.iter().find(|b| { r -= b.weight; r <= 0.0 }).unwrap_or(&pool[0]);
+            let chosen = pool.iter().find(|b| { r -= b.weight; r <= 0.0 }).unwrap_or(first);
 
             let landing = script
                 .find_state_by_move_id(&chosen.move_id)
