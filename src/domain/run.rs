@@ -5,6 +5,8 @@ use crate::domain::card::Card;
 pub enum PlayerClass {
     Ironclad,
     Silent,
+    Regent,
+    Necrobinder,
     Defect,
     Watcher,
 }
@@ -12,10 +14,12 @@ pub enum PlayerClass {
 impl std::fmt::Display for PlayerClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
-            Self::Ironclad => "Ironclad",
-            Self::Silent => "Silent",
-            Self::Defect => "Defect",
-            Self::Watcher => "Watcher",
+            Self::Ironclad   => "Ironclad",
+            Self::Silent     => "Silent",
+            Self::Regent     => "Regent",
+            Self::Necrobinder => "Necrobinder",
+            Self::Defect     => "Defect",
+            Self::Watcher    => "Watcher",
         };
         write!(f, "{name}")
     }
@@ -89,7 +93,7 @@ impl RunState {
 }
 
 pub mod starting_relics {
-    use super::Relic;
+    use super::{PlayerClass, Relic};
 
     pub fn ironclad() -> Relic {
         Relic::new("Burning Blood", "At the end of combat, heal 6 HP.")
@@ -99,12 +103,31 @@ pub mod starting_relics {
         Relic::new("Ring of the Snake", "At the start of each combat, draw 2 additional cards.")
     }
 
+    pub fn regent() -> Relic {
+        Relic::new("Divine Right", "At the start of each combat, gain 3 Stars.")
+    }
+
+    pub fn necrobinder() -> Relic {
+        Relic::new("Bound Phylactery", "At the start of each combat, Summon 1.")
+    }
+
     pub fn defect() -> Relic {
         Relic::new("Cracked Core", "At the start of each combat, Channel 1 Lightning.")
     }
 
     pub fn watcher() -> Relic {
         Relic::new("Pure Water", "At the start of each combat, add 1 Miracle to your hand.")
+    }
+
+    pub fn for_class(class: &PlayerClass) -> Relic {
+        match class {
+            PlayerClass::Ironclad   => ironclad(),
+            PlayerClass::Silent     => silent(),
+            PlayerClass::Regent     => regent(),
+            PlayerClass::Necrobinder => necrobinder(),
+            PlayerClass::Defect     => defect(),
+            PlayerClass::Watcher    => watcher(),
+        }
     }
 }
 

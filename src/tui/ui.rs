@@ -15,6 +15,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     match app.mode {
+        AppMode::CharacterPick => render_character_pick(frame, app, area),
         AppMode::EncounterPick => render_encounter_pick(frame, app, area),
         AppMode::ManualInput => render_input(frame, app, area),
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
@@ -685,6 +686,154 @@ fn node_color(node: &crate::metrics::map_ev::NodeEv) -> Color {
     }
 }
 
+fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // title
+            Constraint::Min(6),     // character list + detail
+            Constraint::Length(1),  // hint
+        ])
+        .split(area);
+
+    let title = Paragraph::new(" CHARACTER SELECT")
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Character list ─────────────────────────────────────────────────────
+    for (i, ch) in app.characters.iter().enumerate() {
+        let selected = i == app.selected_row;
+        let indicator = if selected { "▶" } else { " " };
+        let hp = ch.starting_hp.unwrap_or(0);
+        let energy = ch.max_energy.unwrap_or(3);
+        let deck_count = ch.starting_deck.len();
+        let orb_str = ch.orb_slots
+            .filter(|&n| n > 0)
+            .map(|n| format!("  orbs {}", n))
+            .unwrap_or_default();
+
+        let relic_id = ch.starting_relics.first().map(|s| s.as_str()).unwrap_or("—");
+        let relic_display = camel_relic_name(relic_id);
+
+        let row = format!(
+            "  {}  {:<20}  HP {:>2}  Energy {}  {:>2} cards{}  [{}]",
+            indicator,
+            ch.name,
+            hp,
+            energy,
+            deck_count,
+            orb_str,
+            relic_display,
+        );
+        let style = if selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+
+    // ── Detail panel for selected character ───────────────────────────────
+    if let Some(ch) = app.characters.get(app.selected_row) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(72)),
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        // Description (first sentence / first 120 chars)
+        if let Some(ref desc) = ch.description {
+            let short: String = desc.lines().next().unwrap_or("").chars().take(110).collect();
+            lines.push(Line::from(Span::styled(
+                format!("  {}", short),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(Span::raw("")));
+
+        // Starting deck summary
+        let deck_summary = summarize_deck(&ch.starting_deck);
+        lines.push(Line::from(Span::styled(
+            format!("  Deck:  {}", deck_summary),
+            Style::default().fg(Color::Cyan),
+        )));
+
+        // Starting relic
+        let relic_id = ch.starting_relics.first().map(|s| s.as_str()).unwrap_or("—");
+        let (relic_name, relic_desc) = relic_display_info(relic_id);
+        lines.push(Line::from(Span::styled(
+            format!("  Relic: {} — {}", relic_name, relic_desc),
+            Style::default().fg(Color::Green),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [q] quit")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+}
+
+/// Summarize a starting deck as "Strike ×5  Defend ×4  Bash ×1".
+fn summarize_deck(ids: &[String]) -> String {
+    // Strip character suffix ("StrikeIronclad" → "Strike")
+    let suffixes = ["Ironclad", "Silent", "Regent", "Necrobinder", "Defect"];
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for id in ids {
+        let short = suffixes
+            .iter()
+            .find_map(|&s| id.strip_suffix(s))
+            .unwrap_or(id.as_str())
+            .to_string();
+        if let Some(entry) = counts.iter_mut().find(|(n, _)| *n == short) {
+            entry.1 += 1;
+        } else {
+            counts.push((short, 1));
+        }
+    }
+    counts
+        .iter()
+        .map(|(name, n)| {
+            if *n > 1 {
+                format!("{} ×{}", name, n)
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Convert a camelCase relic ID to a short display name by inserting spaces.
+fn camel_relic_name(id: &str) -> String {
+    let mut out = String::with_capacity(id.len() + 4);
+    for (i, c) in id.char_indices() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Return (name, description) for a starting relic ID.
+fn relic_display_info(id: &str) -> (&'static str, &'static str) {
+    match id {
+        "BurningBlood"    => ("Burning Blood",      "At the end of combat, heal 6 HP."),
+        "RingOfTheSnake"  => ("Ring of the Snake",  "At the start of each combat, draw 2 additional cards."),
+        "DivineRight"     => ("Divine Right",       "At the start of each combat, gain 3 Stars."),
+        "BoundPhylactery" => ("Bound Phylactery",   "At the start of each combat, Summon 1."),
+        "CrackedCore"     => ("Cracked Core",       "At the start of each combat, Channel 1 Lightning."),
+        _                 => ("Unknown Relic",      ""),
+    }
+}
+
 fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -798,7 +947,31 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![])
+    }
+
+    #[test]
+    fn render_character_pick_does_not_panic() {
+        use crate::data::api::SpireApiCharacter;
+        let ch = SpireApiCharacter {
+            id: "IRONCLAD".into(),
+            name: "The Ironclad".into(),
+            description: Some("Test character".into()),
+            starting_hp: Some(80),
+            starting_gold: Some(99),
+            max_energy: Some(3),
+            orb_slots: None,
+            starting_deck: vec!["StrikeIronclad".into(), "Bash".into()],
+            starting_relics: vec!["BurningBlood".into()],
+            unlocks_after: None,
+            color: Some("red".into()),
+            image_url: None,
+            quotes: None,
+            dialogues: None,
+        };
+        let mut terminal = make_terminal();
+        let app = App::new(vec![ch], vec![], vec![], vec![]);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
     #[test]
@@ -872,7 +1045,7 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![enc], vec![], vec![]);
+        let app = App::new(vec![], vec![enc], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

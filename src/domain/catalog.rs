@@ -144,6 +144,48 @@ fn load_api_cards() -> Vec<SpireApiCard> {
     })
 }
 
+/// Convert a camelCase card ID ("StrikeIronclad") to the API's
+/// SCREAMING_SNAKE format ("STRIKE_IRONCLAD").
+fn camel_to_screaming_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.char_indices() {
+        if i > 0 && c.is_uppercase() {
+            out.push('_');
+        }
+        out.extend(c.to_uppercase());
+    }
+    out
+}
+
+/// Build a deck from character starting-deck card IDs (camelCase format as
+/// returned by the `/api/characters` endpoint).  Any IDs not found in the
+/// API card pool are silently skipped.
+pub fn deck_from_ids(ids: &[String]) -> Vec<Card> {
+    let api_cards = load_api_cards();
+    let by_id: std::collections::HashMap<&str, &SpireApiCard> =
+        api_cards.iter().map(|c| (c.id.as_str(), c)).collect();
+
+    ids.iter()
+        .filter_map(|id| {
+            let snake = camel_to_screaming_snake(id);
+            by_id.get(snake.as_str()).map(|c| api_to_domain(c))
+        })
+        .collect()
+}
+
+/// All cards for a character identified by their color string
+/// (e.g. "ironclad", "silent", "regent", "necrobinder", "defect").
+pub fn cards_for_character(color: &str) -> Vec<Card> {
+    match color {
+        "ironclad"   => ironclad::all_cards(),
+        "silent"     => silent::all_cards(),
+        "regent"     => regent::all_cards(),
+        "necrobinder" => necrobinder::all_cards(),
+        "defect"     => defect::all_cards(),
+        _            => colorless::all_cards(),
+    }
+}
+
 // ── Public modules ─────────────────────────────────────────────────────────
 
 /// Cards for the Ironclad character.

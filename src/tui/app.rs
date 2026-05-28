@@ -2,11 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiEncounter, SpireApiEvent, SpireApiMonster};
+use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster};
 use crate::domain::card::Card;
+use crate::domain::catalog;
 use crate::domain::combat::CombatState;
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
-use crate::domain::run::RunState;
+use crate::domain::run::{PlayerClass, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
@@ -19,6 +20,7 @@ use crate::tui::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
+    CharacterPick,
     EncounterPick,
     CombatAdvice,
     CardPick,
@@ -40,6 +42,8 @@ pub struct App {
     pub input: Option<ManualInputState>,
     pub status_message: String,
     pub selected_row: usize,
+    // Character picker state
+    pub characters: Vec<SpireApiCharacter>,
     // Encounter picker state
     pub encounters: Vec<SpireApiEncounter>,
     pub monsters: Vec<SpireApiMonster>,
@@ -50,12 +54,19 @@ pub struct App {
 
 impl App {
     pub fn new(
+        characters: Vec<SpireApiCharacter>,
         encounters: Vec<SpireApiEncounter>,
         monsters: Vec<SpireApiMonster>,
         events: Vec<SpireApiEvent>,
     ) -> Self {
+        // Show character picker if we have data; otherwise skip straight to encounter pick.
+        let initial_mode = if characters.is_empty() {
+            AppMode::EncounterPick
+        } else {
+            AppMode::CharacterPick
+        };
         let mut app = Self {
-            mode: AppMode::EncounterPick,
+            mode: initial_mode,
             combat: None,
             run: None,
             play_advice: None,
@@ -65,6 +76,7 @@ impl App {
             input: None,
             status_message: String::new(),
             selected_row: 0,
+            characters: sort_characters(characters),
             encounters,
             monsters,
             events,
@@ -114,6 +126,7 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match self.mode {
+            AppMode::CharacterPick => self.handle_key_character(key),
             AppMode::EncounterPick => self.handle_key_encounter(key, rng),
             AppMode::ManualInput => self.handle_key_input(key),
             AppMode::CombatAdvice => self.handle_key_combat(key, rng),
@@ -124,10 +137,38 @@ impl App {
         }
     }
 
+    fn handle_key_character(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.selected_row + 1 < self.characters.len() {
+                    self.selected_row += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                }
+            }
+            KeyCode::Enter => {
+                self.select_character();
+            }
+            _ => {}
+        }
+    }
+
     fn handle_key_encounter(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
+            }
+            KeyCode::Esc => {
+                if !self.characters.is_empty() {
+                    self.selected_row = 0;
+                    self.mode = AppMode::CharacterPick;
+                }
             }
             // Sub-act filters: o=Overgrowth, u=Underdocks, h=Hive, g=Glory
             KeyCode::Char('o') | KeyCode::Char('O') => {
@@ -263,8 +304,8 @@ impl App {
                 self.compute_deck_dash(rng);
             }
             KeyCode::Char('p') => {
-                // Simulate a card reward pick with 3 sample cards
-                let offered = sample_card_offer(rng);
+                let color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+                let offered = sample_card_offer(color, rng);
                 self.load_pick(offered, rng);
             }
             KeyCode::Char('v') => {
@@ -410,6 +451,36 @@ impl App {
         self.mode = AppMode::MapEv;
     }
 
+    pub fn select_character(&mut self) {
+        let Some(char_data) = self.characters.get(self.selected_row) else {
+            return;
+        };
+        // Clone the fields we need before any mutable borrows.
+        let hp = char_data.starting_hp.unwrap_or(75).max(1) as u32;
+        let gold = char_data.starting_gold.unwrap_or(99) as u32;
+        let deck_ids = char_data.starting_deck.clone();
+        let color = char_data.color.clone().unwrap_or_default();
+        let char_name = char_data.name.clone();
+
+        let deck = catalog::deck_from_ids(&deck_ids);
+        let class = class_from_color(&color);
+        let relic = starting_relics::for_class(&class);
+
+        let mut run = RunState::new(class, hp, hp, deck, relic);
+        run.gold = gold;
+
+        self.act_filter = "overgrowth".to_string();
+        self.refresh_filter();
+
+        self.status_message = format!(
+            "Playing as {} — HP {}, {} starting cards",
+            char_name, hp, run.deck.len(),
+        );
+        self.run = Some(run);
+        self.selected_row = 0;
+        self.mode = AppMode::EncounterPick;
+    }
+
     pub fn load_combat(&mut self, state: CombatState) {
         self.play_advice = None;
         self.selected_row = 0;
@@ -438,13 +509,48 @@ impl App {
     }
 }
 
-/// Return 3 random Ironclad cards as a simulated post-combat reward.
-fn sample_card_offer(rng: &mut impl rand::Rng) -> Vec<Card> {
+/// Return 3 random cards from the current character's pool as a simulated reward.
+fn sample_card_offer(color: &str, rng: &mut impl rand::Rng) -> Vec<Card> {
     use rand::seq::SliceRandom;
-    let mut pool = crate::domain::catalog::ironclad::all_cards();
+    let mut pool = catalog::cards_for_character(color);
     pool.shuffle(rng);
     pool.truncate(3);
     pool
+}
+
+/// Derive the character color string (used by the card catalog) from a PlayerClass.
+fn char_color(class: &PlayerClass) -> &'static str {
+    match class {
+        PlayerClass::Ironclad    => "ironclad",
+        PlayerClass::Silent      => "silent",
+        PlayerClass::Regent      => "regent",
+        PlayerClass::Necrobinder => "necrobinder",
+        PlayerClass::Defect      => "defect",
+        PlayerClass::Watcher     => "colorless",
+    }
+}
+
+/// Derive PlayerClass from the color field in the API character data.
+fn class_from_color(color: &str) -> PlayerClass {
+    match color {
+        "red"    => PlayerClass::Ironclad,
+        "green"  => PlayerClass::Silent,
+        "orange" => PlayerClass::Regent,
+        "purple" => PlayerClass::Necrobinder,
+        "blue"   => PlayerClass::Defect,
+        _        => PlayerClass::Ironclad,
+    }
+}
+
+/// Sort characters into the canonical unlock order:
+/// Ironclad → Silent → Regent → Necrobinder → Defect.
+fn sort_characters(mut chars: Vec<SpireApiCharacter>) -> Vec<SpireApiCharacter> {
+    let order = ["red", "green", "orange", "purple", "blue"];
+    chars.sort_by_key(|c| {
+        let color = c.color.as_deref().unwrap_or("");
+        order.iter().position(|&o| o == color).unwrap_or(99)
+    });
+    chars
 }
 
 pub fn run_app() -> anyhow::Result<()> {
@@ -458,6 +564,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let monsters = crate::data::api::load_monsters();
     let encounters = crate::data::api::load_encounters();
     let events = crate::data::api::load_events();
+    let characters = crate::data::api::load_characters();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -466,7 +573,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(encounters, monsters, events);
+    let mut app = App::new(characters, encounters, monsters, events);
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
@@ -522,7 +629,7 @@ mod tests {
     }
 
     fn empty_app() -> App {
-        App::new(vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![])
     }
 
     fn app_with_combat() -> App {
@@ -588,7 +695,7 @@ mod tests {
             }],
             loss_text: None,
         };
-        let mut app = App::new(vec![enc], vec![], vec![]);
+        let mut app = App::new(vec![], vec![enc], vec![], vec![]);
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -642,7 +749,7 @@ mod tests {
             monsters: vec![],
             loss_text: None,
         };
-        let mut app = App::new(vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
+        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);
