@@ -2,16 +2,20 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiEncounter, SpireApiEvent, SpireApiMonster};
+use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster};
 use crate::domain::card::Card;
+use crate::domain::catalog;
 use crate::domain::combat::CombatState;
+use crate::domain::reward::{sample_offer, RewardKind};
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
-use crate::domain::run::RunState;
+use crate::domain::run::{PlayerClass, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
-use crate::metrics::map_ev::{compute_map_ev, MapEvData};
+use crate::metrics::event::{advise_event, EventOptionAdvice};
+use crate::metrics::map_ev::{compute_map_ev, events_for_sub_act, MapEvData};
+use crate::metrics::rest::{advise_rest, RestAction, RestAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -19,7 +23,11 @@ use crate::tui::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
+    CharacterPick,
     EncounterPick,
+    MapView,
+    RestSite,
+    EventRoom,
     CombatAdvice,
     CardPick,
     DeckDash,
@@ -40,22 +48,44 @@ pub struct App {
     pub input: Option<ManualInputState>,
     pub status_message: String,
     pub selected_row: usize,
+    // Character picker state
+    pub characters: Vec<SpireApiCharacter>,
     // Encounter picker state
     pub encounters: Vec<SpireApiEncounter>,
     pub monsters: Vec<SpireApiMonster>,
     pub events: Vec<SpireApiEvent>,
     pub act_filter: String,
     pub filtered_indices: Vec<usize>,
+    /// Cursor index into the available map choices at the current position.
+    pub map_cursor: usize,
+    /// Rest site recommendation and current selection (0=Heal, 1=Smith).
+    pub rest_advice: Option<RestAdvice>,
+    pub rest_cursor: usize,
+    /// Active event and scored options for EventRoom mode.
+    pub active_event: Option<SpireApiEvent>,
+    pub event_advice: Vec<EventOptionAdvice>,
+    pub event_cursor: usize,
+    /// Cards in the current card-pick offer; indices match card_advice[*].card_index.
+    pub offered_cards: Vec<Card>,
+    /// Where to return when CardPick is dismissed, and whether to commit the pick to the run.
+    pub card_pick_return: AppMode,
 }
 
 impl App {
     pub fn new(
+        characters: Vec<SpireApiCharacter>,
         encounters: Vec<SpireApiEncounter>,
         monsters: Vec<SpireApiMonster>,
         events: Vec<SpireApiEvent>,
     ) -> Self {
+        // Show character picker if we have data; otherwise skip straight to encounter pick.
+        let initial_mode = if characters.is_empty() {
+            AppMode::EncounterPick
+        } else {
+            AppMode::CharacterPick
+        };
         let mut app = Self {
-            mode: AppMode::EncounterPick,
+            mode: initial_mode,
             combat: None,
             run: None,
             play_advice: None,
@@ -65,11 +95,20 @@ impl App {
             input: None,
             status_message: String::new(),
             selected_row: 0,
+            characters: sort_characters(characters),
             encounters,
             monsters,
             events,
             act_filter: "overgrowth".to_string(),
             filtered_indices: Vec::new(),
+            map_cursor: 0,
+            rest_advice: None,
+            rest_cursor: 0,
+            active_event: None,
+            event_advice: Vec::new(),
+            event_cursor: 0,
+            offered_cards: Vec::new(),
+            card_pick_return: AppMode::EncounterPick,
         };
         app.refresh_filter();
         app
@@ -114,13 +153,61 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match self.mode {
+            AppMode::CharacterPick => self.handle_key_character(key, rng),
             AppMode::EncounterPick => self.handle_key_encounter(key, rng),
-            AppMode::ManualInput => self.handle_key_input(key),
-            AppMode::CombatAdvice => self.handle_key_combat(key, rng),
-            AppMode::CardPick => self.handle_key_pick(key),
-            AppMode::DeckDash => self.handle_key_deck_dash(key),
-            AppMode::MapEv => self.handle_key_map_ev(key),
+            AppMode::MapView       => self.handle_key_map_view(key, rng),
+            AppMode::RestSite      => self.handle_key_rest_site(key),
+            AppMode::EventRoom     => self.handle_key_event_room(key),
+            AppMode::ManualInput   => self.handle_key_input(key),
+            AppMode::CombatAdvice  => self.handle_key_combat(key, rng),
+            AppMode::CardPick      => self.handle_key_pick(key),
+            AppMode::DeckDash      => self.handle_key_deck_dash(key),
+            AppMode::MapEv         => self.handle_key_map_ev(key),
             AppMode::Simulating | AppMode::Exiting => {}
+        }
+    }
+
+    fn handle_key_character(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.selected_row + 1 < self.characters.len() {
+                    self.selected_row += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                }
+            }
+            KeyCode::Enter => {
+                self.select_character(rng);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_map_view(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
+        match key.code {
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            KeyCode::Esc | KeyCode::Char('t') => {
+                self.mode = AppMode::EncounterPick;
+            }
+            KeyCode::Char('j') | KeyCode::Right => {
+                let n = self.map_choices().len();
+                if n > 0 { self.map_cursor = (self.map_cursor + 1).min(n - 1); }
+            }
+            KeyCode::Char('k') | KeyCode::Left => {
+                if self.map_cursor > 0 { self.map_cursor -= 1; }
+            }
+            KeyCode::Enter => {
+                self.select_map_node(rng);
+            }
+            _ => {}
         }
     }
 
@@ -128,6 +215,12 @@ impl App {
         match key.code {
             KeyCode::Char('q') => {
                 self.mode = AppMode::Exiting;
+            }
+            KeyCode::Esc => {
+                if !self.characters.is_empty() {
+                    self.selected_row = 0;
+                    self.mode = AppMode::CharacterPick;
+                }
             }
             // Sub-act filters: o=Overgrowth, u=Underdocks, h=Hive, g=Glory
             KeyCode::Char('o') | KeyCode::Char('O') => {
@@ -180,6 +273,9 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.open_map_ev(rng);
+            }
+            KeyCode::Char('t') => {
+                if self.run.is_some() { self.open_map_view(rng); }
             }
             KeyCode::Char('m') => {
                 // Manual input fallback
@@ -263,12 +359,17 @@ impl App {
                 self.compute_deck_dash(rng);
             }
             KeyCode::Char('p') => {
-                // Simulate a card reward pick with 3 sample cards
-                let offered = sample_card_offer(rng);
-                self.load_pick(offered, rng);
+                let pool = card_pool_for_run(self);
+                // Preview: use a throwaway offset so the real run's offset is unchanged.
+                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+                let offered = sample_offer(&pool, RewardKind::Monster, &mut preview_offset, rng);
+                self.load_pick(offered, rng, AppMode::CombatAdvice);
             }
             KeyCode::Char('v') => {
                 self.open_map_ev(rng);
+            }
+            KeyCode::Char('t') => {
+                self.open_map_view(rng);
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref combat) = self.combat {
@@ -322,8 +423,9 @@ impl App {
 
     fn handle_key_pick(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => {
-                self.mode = AppMode::CombatAdvice;
+            KeyCode::Char('q') | KeyCode::Esc => {
+                let dest = self.card_pick_return.clone();
+                self.mode = dest;
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.selected_row + 1 < self.card_advice.len() {
@@ -336,7 +438,12 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                self.mode = AppMode::CombatAdvice;
+                // Only commit the pick to the run when triggered from the map.
+                if self.card_pick_return == AppMode::MapView {
+                    self.apply_card_pick();
+                }
+                let dest = self.card_pick_return.clone();
+                self.mode = dest;
             }
             _ => {}
         }
@@ -410,6 +517,198 @@ impl App {
         self.mode = AppMode::MapEv;
     }
 
+    pub fn select_character(&mut self, rng: &mut impl rand::Rng) {
+        let Some(char_data) = self.characters.get(self.selected_row) else { return; };
+        let hp       = char_data.starting_hp.unwrap_or(75).max(1) as u32;
+        let gold     = char_data.starting_gold.unwrap_or(99) as u32;
+        let deck_ids = char_data.starting_deck.clone();
+        let color    = char_data.color.clone().unwrap_or_default();
+        let char_name = char_data.name.clone();
+
+        let deck  = catalog::deck_from_ids(&deck_ids);
+        let class = class_from_color(&color);
+        let relic = starting_relics::for_class(&class);
+
+        let mut run  = RunState::new(class, hp, hp, deck, relic);
+        run.gold     = gold;
+        run.sub_act  = "overgrowth".to_string();
+
+        self.status_message = format!(
+            "Playing as {} — HP {}, {} starting cards — choose your path",
+            char_name, hp, run.deck.len(),
+        );
+        self.run = Some(run);
+        self.act_filter = "overgrowth".to_string();
+        self.refresh_filter();
+        self.selected_row = 0;
+        self.open_map_view(rng);
+    }
+
+    /// Generate the map (if not already present) and switch to MapView.
+    pub fn open_map_view(&mut self, rng: &mut impl rand::Rng) {
+        if let Some(ref mut run) = self.run {
+            if run.map.is_none() {
+                let seed: u64 = rng.r#gen();
+                run.generate_map(seed, 0);
+            }
+        }
+        self.map_cursor = 0;
+        self.mode = AppMode::MapView;
+    }
+
+    /// Columns available to move to from the current map position.
+    pub fn map_choices(&self) -> Vec<u8> {
+        let Some(ref run) = self.run else { return vec![]; };
+        let Some(ref map) = run.map else { return vec![]; };
+        match run.map_pos {
+            None      => map.entry_nodes(),
+            Some(pos) => map.choices_from(pos).to_vec(),
+        }
+    }
+
+    /// Move to the currently cursor-selected map node and resolve the room.
+    fn select_map_node(&mut self, rng: &mut impl rand::Rng) {
+        use crate::domain::map::RoomType;
+        let choices = self.map_choices();
+        let Some(&col) = choices.get(self.map_cursor) else { return; };
+        let Some(ref mut run) = self.run else { return; };
+        run.move_to(col as usize);
+        self.map_cursor = 0;
+
+        let room = run.map_pos.and_then(|pos| {
+            run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
+        });
+
+        match room {
+            Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {
+                let kind = if rt == RoomType::Elite { RewardKind::Elite } else { RewardKind::Monster };
+                let pool = card_pool_for_run(self);
+                let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
+                let offered = if let Some(off) = offset {
+                    sample_offer(&pool, kind, off, rng)
+                } else {
+                    pool.into_iter().take(3).collect()
+                };
+                self.load_pick(offered, rng, AppMode::MapView);
+            }
+            Some(RoomType::Rest) => self.open_rest_site(),
+            Some(RoomType::Event) => self.open_event_room(rng),
+            Some(RoomType::Treasure) => {
+                self.status_message = "Treasure chest — relic reward (not yet simulated)".to_string();
+            }
+            Some(rt) => {
+                self.status_message = format!("Floor {} — {}", self.run.as_ref().map(|r| r.floor).unwrap_or(0), rt.label());
+            }
+            None => {}
+        }
+    }
+
+    fn open_rest_site(&mut self) {
+        if let Some(ref run) = self.run {
+            let advice = advise_rest(run);
+            self.rest_cursor = match advice.action {
+                RestAction::Heal    => 0,
+                RestAction::Smith(_) => 1,
+            };
+            self.rest_advice = Some(advice);
+        }
+        self.mode = AppMode::RestSite;
+    }
+
+    fn handle_key_rest_site(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.rest_cursor = (self.rest_cursor + 1) % 2;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.rest_cursor = self.rest_cursor.saturating_sub(1).max(0);
+                if self.rest_cursor == 0 { self.rest_cursor = 0; }
+            }
+            KeyCode::Enter => self.confirm_rest(),
+            KeyCode::Esc => self.mode = AppMode::MapView,
+            KeyCode::Char('q') => self.mode = AppMode::Exiting,
+            _ => {}
+        }
+    }
+
+    fn confirm_rest(&mut self) {
+        let Some(ref run) = self.run else { return; };
+        let smith_idx = match self.rest_advice.as_ref().and_then(|a| {
+            if let RestAction::Smith(i) = a.action { Some(i) } else { None }
+        }) {
+            Some(i) => i,
+            None => {
+                // No smith candidate — treat as heal regardless of cursor.
+                let run = self.run.as_mut().unwrap();
+                run.heal();
+                self.status_message = format!("Healed to {} HP", run.hp);
+                self.mode = AppMode::MapView;
+                return;
+            }
+        };
+        let _ = run; // drop shared borrow before mut
+        let run = self.run.as_mut().unwrap();
+        if self.rest_cursor == 0 {
+            run.heal();
+            self.status_message = format!("Healed to {} HP", run.hp);
+        } else {
+            if run.smith(smith_idx) {
+                let name = run.deck[smith_idx].name.clone();
+                self.status_message = format!("Upgraded {}", name);
+            }
+        }
+        self.rest_advice = None;
+        self.mode = AppMode::MapView;
+    }
+
+    fn open_event_room(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_else(|| "overgrowth".to_string());
+        let hp_ratio = self.run.as_ref().map(|r| r.hp as f32 / r.max_hp as f32).unwrap_or(1.0);
+
+        let pool = events_for_sub_act(&sub_act, &self.events);
+        let event = pool.choose(rng).map(|e| (*e).clone());
+
+        self.event_advice = event.as_ref()
+            .map(|e| advise_event(&e.options, hp_ratio))
+            .unwrap_or_default();
+
+        // Set cursor to recommended option (first in sorted advice).
+        self.event_cursor = self.event_advice.first().map(|a| a.option_idx).unwrap_or(0);
+        self.active_event = event;
+        self.mode = AppMode::EventRoom;
+    }
+
+    fn handle_key_event_room(&mut self, key: KeyEvent) {
+        let n = self.active_event.as_ref().map(|e| e.options.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 { self.event_cursor = (self.event_cursor + 1).min(n - 1); }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.event_cursor > 0 { self.event_cursor -= 1; }
+            }
+            KeyCode::Enter => {
+                let title = self.active_event.as_ref()
+                    .and_then(|e| e.options.get(self.event_cursor))
+                    .and_then(|o| o.title.as_deref())
+                    .unwrap_or("?")
+                    .to_string();
+                self.status_message = format!("Chose: {title}");
+                self.active_event = None;
+                self.event_advice.clear();
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Esc => {
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Char('q') => {
+                self.mode = AppMode::Exiting;
+            }
+            _ => {}
+        }
+    }
+
     pub fn load_combat(&mut self, state: CombatState) {
         self.play_advice = None;
         self.selected_row = 0;
@@ -417,12 +716,16 @@ impl App {
         self.mode = AppMode::CombatAdvice;
     }
 
-    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng) {
+    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng, return_to: AppMode) {
         let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
             crate::domain::catalog::ironclad::starter_deck()
         });
-        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
-        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        let hp = self.run.as_ref().map(|r| r.hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.hp))
+            .unwrap_or(80);
+        let max_hp = self.run.as_ref().map(|r| r.max_hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
+            .unwrap_or(80);
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -433,18 +736,68 @@ impl App {
             &self.monsters,
             rng,
         );
+        self.offered_cards = offered;
+        self.card_pick_return = return_to;
         self.selected_row = 0;
         self.mode = AppMode::CardPick;
     }
+
+    fn apply_card_pick(&mut self) {
+        let Some(advice) = self.card_advice.get(self.selected_row) else { return; };
+        if advice.card_index == usize::MAX {
+            self.status_message = "Skipped card reward".to_string();
+            return;
+        }
+        let card = self.offered_cards.get(advice.card_index).cloned();
+        if let Some(card) = card {
+            let name = card.name.clone();
+            if let Some(ref mut run) = self.run {
+                run.deck.push(card);
+                self.status_message = format!("Added {} to deck ({} cards)", name, run.deck.len());
+            }
+        }
+    }
 }
 
-/// Return 3 random Ironclad cards as a simulated post-combat reward.
-fn sample_card_offer(rng: &mut impl rand::Rng) -> Vec<Card> {
-    use rand::seq::SliceRandom;
-    let mut pool = crate::domain::catalog::ironclad::all_cards();
-    pool.shuffle(rng);
-    pool.truncate(3);
-    pool
+/// Return 3 random cards from the current character's pool as a simulated reward.
+fn card_pool_for_run(app: &App) -> Vec<Card> {
+    let color = app.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+    catalog::cards_for_character(color)
+}
+
+/// Derive the character color string (used by the card catalog) from a PlayerClass.
+fn char_color(class: &PlayerClass) -> &'static str {
+    match class {
+        PlayerClass::Ironclad    => "ironclad",
+        PlayerClass::Silent      => "silent",
+        PlayerClass::Regent      => "regent",
+        PlayerClass::Necrobinder => "necrobinder",
+        PlayerClass::Defect      => "defect",
+        PlayerClass::Watcher     => "colorless",
+    }
+}
+
+/// Derive PlayerClass from the color field in the API character data.
+fn class_from_color(color: &str) -> PlayerClass {
+    match color {
+        "red"    => PlayerClass::Ironclad,
+        "green"  => PlayerClass::Silent,
+        "orange" => PlayerClass::Regent,
+        "purple" => PlayerClass::Necrobinder,
+        "blue"   => PlayerClass::Defect,
+        _        => PlayerClass::Ironclad,
+    }
+}
+
+/// Sort characters into the canonical unlock order:
+/// Ironclad → Silent → Regent → Necrobinder → Defect.
+fn sort_characters(mut chars: Vec<SpireApiCharacter>) -> Vec<SpireApiCharacter> {
+    let order = ["red", "green", "orange", "purple", "blue"];
+    chars.sort_by_key(|c| {
+        let color = c.color.as_deref().unwrap_or("");
+        order.iter().position(|&o| o == color).unwrap_or(99)
+    });
+    chars
 }
 
 pub fn run_app() -> anyhow::Result<()> {
@@ -458,6 +811,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let monsters = crate::data::api::load_monsters();
     let encounters = crate::data::api::load_encounters();
     let events = crate::data::api::load_events();
+    let characters = crate::data::api::load_characters();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -466,7 +820,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(encounters, monsters, events);
+    let mut app = App::new(characters, encounters, monsters, events);
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
@@ -522,7 +876,7 @@ mod tests {
     }
 
     fn empty_app() -> App {
-        App::new(vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![])
     }
 
     fn app_with_combat() -> App {
@@ -588,7 +942,7 @@ mod tests {
             }],
             loss_text: None,
         };
-        let mut app = App::new(vec![enc], vec![], vec![]);
+        let mut app = App::new(vec![], vec![enc], vec![], vec![]);
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -642,7 +996,7 @@ mod tests {
             monsters: vec![],
             loss_text: None,
         };
-        let mut app = App::new(vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
+        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);
@@ -658,5 +1012,78 @@ mod tests {
         let mode_before = app.mode.clone();
         app.handle_event(AppEvent::Tick, &mut rng);
         assert_eq!(app.mode, mode_before);
+    }
+
+    fn app_with_run() -> App {
+        use crate::domain::catalog::ironclad;
+        use crate::domain::run::{PlayerClass, RunState, starting_relics};
+        let mut app = empty_app();
+        app.run = Some(RunState::new(
+            PlayerClass::Ironclad,
+            80, 80,
+            ironclad::starter_deck(),
+            starting_relics::ironclad(),
+        ));
+        app.act_filter = "overgrowth".to_string();
+        app
+    }
+
+    fn make_offer(app: &App, rng: &mut StdRng) -> Vec<Card> {
+        let pool = card_pool_for_run(app);
+        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+        sample_offer(&pool, RewardKind::Monster, &mut offset, rng)
+    }
+
+    #[test]
+    fn card_pick_from_map_adds_to_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = make_offer(&app, &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::MapView);
+        assert_eq!(app.mode, AppMode::CardPick);
+        assert!(!app.offered_cards.is_empty());
+
+        let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);
+        app.selected_row = first_card_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::MapView);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before + 1);
+    }
+
+    #[test]
+    fn card_pick_skip_does_not_add_to_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = make_offer(&app, &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::MapView);
+
+        let skip_rank = app.card_advice.iter().position(|a| a.card_index == usize::MAX).unwrap();
+        app.selected_row = skip_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::MapView);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before);
+    }
+
+    #[test]
+    fn card_pick_from_combat_does_not_modify_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = make_offer(&app, &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::CombatAdvice);
+
+        let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);
+        app.selected_row = first_card_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::CombatAdvice);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before, "preview mode must not modify deck");
     }
 }

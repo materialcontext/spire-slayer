@@ -213,11 +213,11 @@ fn heuristic_advice(offered: &[Card], deck: &[Card]) -> Vec<CardAdvice> {
 /// Score a single card against an existing deck (heuristic).
 pub fn score_single(card: &Card, deck: &[Card], _act: u8) -> f32 {
     let rarity_weight: f32 = match card.rarity {
-        Rarity::Ancient | Rarity::Rare => 0.30,
+        Rarity::Rare => 0.30,
         Rarity::Uncommon => 0.20,
         Rarity::Common => 0.10,
         Rarity::Basic => 0.05,
-        Rarity::Special => 0.0,
+        Rarity::Ancient | Rarity::Special => 0.0,
     };
 
     let base_synergy = synergy_score(deck) as i32;

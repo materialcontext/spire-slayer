@@ -15,13 +15,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     match app.mode {
+        AppMode::CharacterPick => render_character_pick(frame, app, area),
         AppMode::EncounterPick => render_encounter_pick(frame, app, area),
         AppMode::ManualInput => render_input(frame, app, area),
         AppMode::CombatAdvice | AppMode::Simulating => render_combat(frame, app, area),
         AppMode::CardPick => render_card_pick(frame, app, area),
         AppMode::DeckDash => render_deck_dash(frame, app, area),
-        AppMode::MapEv => render_map_ev(frame, app, area),
-        AppMode::Exiting => {}
+        AppMode::MapEv   => render_map_ev(frame, app, area),
+        AppMode::MapView  => render_map_view(frame, app, area),
+        AppMode::RestSite  => render_rest_site(frame, app, area),
+        AppMode::EventRoom => render_event_room(frame, app, area),
+        AppMode::Exiting   => {}
     }
 }
 
@@ -312,12 +316,16 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::domain::card::{CardType, Rarity};
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(6), Constraint::Length(2)])
         .split(area);
 
-    let title = Paragraph::new(" CARD PICK — Simulator-backed reward evaluation")
+    let from_map = app.card_pick_return == AppMode::MapView;
+    let title_suffix = if from_map { "— pick to add to deck" } else { "— preview only" };
+    let title = Paragraph::new(format!(" CARD REWARD {title_suffix}"))
         .block(Block::default().borders(Borders::BOTTOM))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     frame.render_widget(title, rows[0]);
@@ -325,12 +333,45 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (rank, advice) in app.card_advice.iter().enumerate() {
         let selected = rank == app.selected_row;
-        let prefix = if selected { "> " } else { "  " };
+        let prefix = if selected { "▶ " } else { "  " };
 
-        let name = if advice.card_index == usize::MAX {
-            "— skip reward —".to_string()
+        let (name_line, detail_line) = if advice.card_index == usize::MAX {
+            (
+                format!("{prefix}— skip reward —"),
+                format!("     (keep current deck as-is)"),
+            )
         } else {
-            format!("#{}", advice.card_index + 1)
+            let card = app.offered_cards.get(advice.card_index);
+            let name = card.map(|c| c.name.as_str()).unwrap_or("?");
+            let cost = card.map(|c| if c.cost == 255 { "X".to_string() } else { c.cost.to_string() })
+                .unwrap_or_else(|| "?".to_string());
+            let ctype = card.map(|c| match c.card_type {
+                CardType::Attack => "Atk",
+                CardType::Skill  => "Skl",
+                CardType::Power  => "Pwr",
+                CardType::Status => "Sts",
+                CardType::Curse  => "Crs",
+            }).unwrap_or("?");
+            let rarity = card.map(|c| match c.rarity {
+                Rarity::Ancient  => "Ancient",
+                Rarity::Rare     => "Rare",
+                Rarity::Uncommon => "Uncommon",
+                Rarity::Common   => "Common",
+                Rarity::Basic    => "Basic",
+                Rarity::Special  => "Special",
+            }).unwrap_or("?");
+            let dmg = card.map(|c| c.base_damage()).unwrap_or(0);
+            let blk = card.map(|c| c.base_block()).unwrap_or(0);
+            let stats = match (dmg, blk) {
+                (d, b) if d > 0 && b > 0 => format!("  {d}dmg {b}blk"),
+                (d, 0) if d > 0           => format!("  {d}dmg"),
+                (0, b) if b > 0           => format!("  {b}blk"),
+                _                         => String::new(),
+            };
+            (
+                format!("{prefix}{name}   [{ctype} · {rarity} · {cost}E]{stats}"),
+                format!("     {}", advice.reason),
+            )
         };
 
         let delta_color = if advice.delta_win_rate > 0.02 {
@@ -340,32 +381,22 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Color::Yellow
         };
-
         let base_style = if selected {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-
-        // Card name / label line
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, name),
-            base_style,
-        )));
-
-        // Stats line with delta coloring
-        if advice.win_rate > 0.0 || advice.card_index == usize::MAX {
-            lines.push(Line::from(Span::styled(
-                format!("     {}", advice.reason),
-                if selected { base_style } else { Style::default().fg(delta_color) },
-            )));
+        let detail_style = if selected {
+            base_style
+        } else if advice.win_rate > 0.0 || advice.card_index == usize::MAX {
+            Style::default().fg(delta_color)
         } else {
-            // Heuristic fallback
-            lines.push(Line::from(Span::styled(
-                format!("     score={:.2}  {}", advice.score, advice.reason),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+            Style::default().fg(Color::DarkGray)
+        };
+
+        lines.push(Line::from(Span::styled(name_line, base_style)));
+        lines.push(Line::from(Span::styled(detail_line, detail_style)));
+        lines.push(Line::from(Span::raw("")));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::raw("  No cards offered")));
@@ -377,7 +408,8 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
         rows[1],
     );
 
-    let hint = Paragraph::new("  [j/k] navigate  [Enter] pick  [q] back")
+    let action = if from_map { "Enter=add to deck" } else { "Enter=close" };
+    let hint = Paragraph::new(format!("  [j/k] navigate  [{action}]  [q/Esc] back"))
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, rows[2]);
 }
@@ -685,6 +717,154 @@ fn node_color(node: &crate::metrics::map_ev::NodeEv) -> Color {
     }
 }
 
+fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // title
+            Constraint::Min(6),     // character list + detail
+            Constraint::Length(1),  // hint
+        ])
+        .split(area);
+
+    let title = Paragraph::new(" CHARACTER SELECT")
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Character list ─────────────────────────────────────────────────────
+    for (i, ch) in app.characters.iter().enumerate() {
+        let selected = i == app.selected_row;
+        let indicator = if selected { "▶" } else { " " };
+        let hp = ch.starting_hp.unwrap_or(0);
+        let energy = ch.max_energy.unwrap_or(3);
+        let deck_count = ch.starting_deck.len();
+        let orb_str = ch.orb_slots
+            .filter(|&n| n > 0)
+            .map(|n| format!("  orbs {}", n))
+            .unwrap_or_default();
+
+        let relic_id = ch.starting_relics.first().map(|s| s.as_str()).unwrap_or("—");
+        let relic_display = camel_relic_name(relic_id);
+
+        let row = format!(
+            "  {}  {:<20}  HP {:>2}  Energy {}  {:>2} cards{}  [{}]",
+            indicator,
+            ch.name,
+            hp,
+            energy,
+            deck_count,
+            orb_str,
+            relic_display,
+        );
+        let style = if selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+
+    // ── Detail panel for selected character ───────────────────────────────
+    if let Some(ch) = app.characters.get(app.selected_row) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(72)),
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        // Description (first sentence / first 120 chars)
+        if let Some(ref desc) = ch.description {
+            let short: String = desc.lines().next().unwrap_or("").chars().take(110).collect();
+            lines.push(Line::from(Span::styled(
+                format!("  {}", short),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(Span::raw("")));
+
+        // Starting deck summary
+        let deck_summary = summarize_deck(&ch.starting_deck);
+        lines.push(Line::from(Span::styled(
+            format!("  Deck:  {}", deck_summary),
+            Style::default().fg(Color::Cyan),
+        )));
+
+        // Starting relic
+        let relic_id = ch.starting_relics.first().map(|s| s.as_str()).unwrap_or("—");
+        let (relic_name, relic_desc) = relic_display_info(relic_id);
+        lines.push(Line::from(Span::styled(
+            format!("  Relic: {} — {}", relic_name, relic_desc),
+            Style::default().fg(Color::Green),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [q] quit")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+}
+
+/// Summarize a starting deck as "Strike ×5  Defend ×4  Bash ×1".
+fn summarize_deck(ids: &[String]) -> String {
+    // Strip character suffix ("StrikeIronclad" → "Strike")
+    let suffixes = ["Ironclad", "Silent", "Regent", "Necrobinder", "Defect"];
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for id in ids {
+        let short = suffixes
+            .iter()
+            .find_map(|&s| id.strip_suffix(s))
+            .unwrap_or(id.as_str())
+            .to_string();
+        if let Some(entry) = counts.iter_mut().find(|(n, _)| *n == short) {
+            entry.1 += 1;
+        } else {
+            counts.push((short, 1));
+        }
+    }
+    counts
+        .iter()
+        .map(|(name, n)| {
+            if *n > 1 {
+                format!("{} ×{}", name, n)
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Convert a camelCase relic ID to a short display name by inserting spaces.
+fn camel_relic_name(id: &str) -> String {
+    let mut out = String::with_capacity(id.len() + 4);
+    for (i, c) in id.char_indices() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Return (name, description) for a starting relic ID.
+fn relic_display_info(id: &str) -> (&'static str, &'static str) {
+    match id {
+        "BurningBlood"    => ("Burning Blood",      "At the end of combat, heal 6 HP."),
+        "RingOfTheSnake"  => ("Ring of the Snake",  "At the start of each combat, draw 2 additional cards."),
+        "DivineRight"     => ("Divine Right",       "At the start of each combat, gain 3 Stars."),
+        "BoundPhylactery" => ("Bound Phylactery",   "At the start of each combat, Summon 1."),
+        "CrackedCore"     => ("Cracked Core",       "At the start of each combat, Channel 1 Lightning."),
+        _                 => ("Unknown Relic",      ""),
+    }
+}
+
 fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -786,6 +966,350 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[3]);
 }
 
+fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::domain::map::{ActMap, MapPos, RoomType, COLS, ROWS};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(0),    // map grid
+            Constraint::Length(2), // choices bar
+            Constraint::Length(1), // status
+        ])
+        .split(area);
+
+    // ── Header ─────────────────────────────────────────────────────────────────
+    let sub_act = app.run.as_ref().map(|r| r.sub_act.as_str()).unwrap_or("—");
+    let floor_label = app.run.as_ref()
+        .and_then(|r| r.map_pos)
+        .map(|p| format!("Floor {}/15", p.floor + 1))
+        .unwrap_or_else(|| "Floor —/15".to_string());
+    let header = format!(
+        " MAP — {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
+        capitalize(sub_act), floor_label,
+    );
+    frame.render_widget(
+        Paragraph::new(header)
+            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        chunks[0],
+    );
+
+    // ── Map grid ───────────────────────────────────────────────────────────────
+    let (run, map) = match app.run.as_ref().and_then(|r| r.map.as_ref().map(|m| (r, m))) {
+        Some(pair) => pair,
+        None => {
+            frame.render_widget(
+                Paragraph::new("  No map — press [t] to generate.")
+                    .block(Block::default().borders(Borders::ALL)),
+                chunks[1],
+            );
+            render_statusbar(frame, app, chunks[3]);
+            return;
+        }
+    };
+
+    let cur_pos    = run.map_pos;
+    let choices    = app.map_choices();
+    let choices_floor: Option<usize> = match cur_pos {
+        None      => Some(0),
+        Some(pos) => if pos.floor + 1 < ROWS { Some(pos.floor + 1) } else { None },
+    };
+    let selected_col = choices.get(app.map_cursor).copied();
+
+    const LABEL_W: usize = 4;
+    const COL_W:   usize = 5; // " [X] "
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(ROWS * 2);
+
+    for floor in (0..ROWS).rev() {
+        let game_floor  = floor + 1;
+        let is_cur      = cur_pos.map(|p| p.floor) == Some(floor);
+        let cur_floor_n = cur_pos.map(|p| p.floor);
+
+        // ── Node row ──────────────────────────────────────────────────────────
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        let label = if is_cur {
+            format!("{:2}▶ ", game_floor)
+        } else {
+            format!("{:2}  ", game_floor)
+        };
+        spans.push(Span::styled(
+            label,
+            if is_cur {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+
+        for col in 0..COLS {
+            let rt        = map.room_type(floor, col);
+            let is_me     = cur_pos == Some(MapPos { floor, col });
+            let is_choice = choices_floor == Some(floor) && choices.contains(&(col as u8));
+            let is_sel    = choices_floor == Some(floor) && selected_col == Some(col as u8);
+            let is_past   = cur_floor_n.map(|cf| floor < cf).unwrap_or(false);
+
+            let symbol = rt.map(|r| format!("[{}]", r.label())).unwrap_or_else(|| "   ".into());
+            let cell   = format!(" {} ", symbol);
+
+            let style = if is_me {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if is_sel {
+                Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+            } else if is_choice {
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+            } else if rt.is_none() {
+                Style::default()
+            } else if is_past {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                map_rt_style(rt)
+            };
+
+            spans.push(Span::styled(cell, style));
+        }
+
+        lines.push(Line::from(spans));
+
+        // ── Connection row (edges from floor-1 → floor) ───────────────────────
+        if floor > 0 {
+            lines.push(map_connection_row(floor - 1, map, LABEL_W, COL_W));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" MAP ")),
+        chunks[1],
+    );
+
+    // ── Choices bar ────────────────────────────────────────────────────────────
+    let mut choice_spans: Vec<Span<'static>> = vec![Span::raw("  Choices: ")];
+    if choices.is_empty() {
+        choice_spans.push(Span::styled(
+            "none (you are at the top)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        let cf = choices_floor.unwrap_or(0);
+        for (i, &col) in choices.iter().enumerate() {
+            let rt_label = map.room_type(cf, col as usize)
+                .map(|r| r.label())
+                .unwrap_or("?");
+            let label = format!(" col{}[{}] ", col, rt_label);
+            choice_spans.push(Span::styled(
+                label,
+                if i == app.map_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::LightGreen)
+                },
+            ));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(choice_spans)).block(Block::default().borders(Borders::TOP)),
+        chunks[2],
+    );
+
+    render_statusbar(frame, app, chunks[3]);
+}
+
+/// Build the connection row between array floor `floor_idx` and `floor_idx + 1`.
+/// Uses `|` for straight edges, `/` for up-left, `\` for up-right.
+fn map_connection_row(floor_idx: usize, map: &crate::domain::map::ActMap,
+                      label_w: usize, col_w: usize) -> Line<'static> {
+    let total = label_w + crate::domain::map::COLS * col_w;
+    let mut buf: Vec<char> = vec![' '; total];
+
+    for col in 0..crate::domain::map::COLS {
+        for &dst in map.next_nodes(floor_idx, col) {
+            let dst = dst as usize;
+            let src_cx = label_w + col * col_w + col_w / 2;
+            let dst_cx = label_w + dst * col_w + col_w / 2;
+            let mid    = (src_cx + dst_cx) / 2;
+            let ch = if col == dst { '|' } else if dst < col { '/' } else { '\\' };
+            if mid < buf.len() { buf[mid] = ch; }
+        }
+    }
+
+    Line::from(Span::styled(
+        buf.into_iter().collect::<String>(),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+fn map_rt_style(rt: Option<crate::domain::map::RoomType>) -> Style {
+    use crate::domain::map::RoomType;
+    match rt {
+        Some(RoomType::Monster)  => Style::default().fg(Color::White),
+        Some(RoomType::Elite)    => Style::default().fg(Color::LightRed),
+        Some(RoomType::Event)    => Style::default().fg(Color::Yellow),
+        Some(RoomType::Shop)     => Style::default().fg(Color::Cyan),
+        Some(RoomType::Rest)     => Style::default().fg(Color::LightGreen),
+        Some(RoomType::Treasure) => Style::default().fg(Color::LightYellow),
+        Some(RoomType::Boss)     => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        None                     => Style::default(),
+    }
+}
+
+fn render_event_room(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Length(8),  // event description
+            Constraint::Min(4),     // options
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let event_name = app.active_event.as_ref().map(|e| e.name.as_str()).unwrap_or("Unknown Event");
+
+    let header = Paragraph::new(format!(
+        " EVENT   Floor {floor}   {event_name}   j/k select  Enter confirm  Esc back"
+    ))
+    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Description — first paragraph, tags stripped
+    let raw_desc = app.active_event.as_ref()
+        .and_then(|e| e.description.as_deref())
+        .unwrap_or("No description available.");
+    let stripped = strip_tags(raw_desc);
+    let first_para: String = stripped.lines().take(4).collect::<Vec<_>>().join(" ");
+    let desc = Paragraph::new(first_para)
+        .block(Block::default().borders(Borders::ALL).title(format!(" {event_name} ")))
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(desc, rows[1]);
+
+    // Options
+    let options = app.active_event.as_ref().map(|e| e.options.as_slice()).unwrap_or(&[]);
+    let recommended_idx = app.event_advice.first().map(|a| a.option_idx);
+
+    let option_lines: Vec<Line> = options.iter().enumerate().map(|(i, opt)| {
+        let is_cursor = i == app.event_cursor;
+        let is_rec    = recommended_idx == Some(i);
+        let title     = opt.title.as_deref().unwrap_or("?");
+        let opt_desc  = strip_tags(opt.description.as_deref().unwrap_or(""));
+        let reason    = app.event_advice.iter()
+            .find(|a| a.option_idx == i)
+            .map(|a| a.reason.as_str())
+            .unwrap_or("");
+        let rec_marker = if is_rec { " ★" } else { "  " };
+        let prefix     = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if is_rec {
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line_text = format!("{prefix}{title}{rec_marker}  {opt_desc:.60}  [{reason}]");
+        Line::from(vec![Span::styled(line_text, style)])
+    }).collect();
+
+    let options_widget = Paragraph::new(Text::from(option_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Options "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(options_widget, rows[2]);
+
+    // Status
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[3]);
+}
+
+fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::rest::RestAction;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(6),     // options
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    // Header
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let header = Paragraph::new(format!(" REST SITE   Floor {floor}   j/k select  Enter confirm  Esc back"))
+        .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Build option lines
+    let (hp, max_hp) = app.run.as_ref()
+        .map(|r| (r.hp, r.max_hp))
+        .unwrap_or((80, 80));
+    let heal_amount = ((max_hp as f32) * 0.30).floor() as u32;
+    let healed_hp = (hp + heal_amount).min(max_hp);
+
+    let smith_label = app.rest_advice.as_ref().and_then(|a| {
+        if let RestAction::Smith(idx) = a.action {
+            app.run.as_ref().and_then(|r| r.deck.get(idx)).map(|c| c.name.clone())
+        } else {
+            None
+        }
+    }).unwrap_or_else(|| "—".to_string());
+
+    let recommended = app.rest_advice.as_ref().map(|a| {
+        matches!(a.action, RestAction::Heal)
+    }).unwrap_or(true);
+    let reason = app.rest_advice.as_ref().map(|a| a.reason.as_str()).unwrap_or("");
+
+    let options = [
+        format!("Heal    restore {} HP ({} → {})", heal_amount, hp, healed_hp),
+        format!("Smith   upgrade {}", smith_label),
+    ];
+    let rec_idx: usize = if recommended { 0 } else { 1 };
+
+    let mut lines: Vec<Line> = options.iter().enumerate().map(|(i, label)| {
+        let is_cursor   = i == app.rest_cursor;
+        let is_rec      = i == rec_idx;
+        let rec_marker  = if is_rec { " ★" } else { "  " };
+        let prefix      = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Green)
+        } else if is_rec {
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![
+            Span::styled(format!("{prefix}{label}{rec_marker}"), style),
+        ])
+    }).collect();
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("  Advice: {reason}"), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let options_widget = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL).title(" Rest Site "));
+    frame.render_widget(options_widget, rows[1]);
+
+    // Status
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[2]);
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None    => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,7 +1322,31 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![])
+    }
+
+    #[test]
+    fn render_character_pick_does_not_panic() {
+        use crate::data::api::SpireApiCharacter;
+        let ch = SpireApiCharacter {
+            id: "IRONCLAD".into(),
+            name: "The Ironclad".into(),
+            description: Some("Test character".into()),
+            starting_hp: Some(80),
+            starting_gold: Some(99),
+            max_energy: Some(3),
+            orb_slots: None,
+            starting_deck: vec!["StrikeIronclad".into(), "Bash".into()],
+            starting_relics: vec!["BurningBlood".into()],
+            unlocks_after: None,
+            color: Some("red".into()),
+            image_url: None,
+            quotes: None,
+            dialogues: None,
+        };
+        let mut terminal = make_terminal();
+        let app = App::new(vec![ch], vec![], vec![], vec![]);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
     #[test]
@@ -862,6 +1410,53 @@ mod tests {
     }
 
     #[test]
+    fn render_map_view_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        // Select a character so a run exists, then open the map view.
+        app.select_character(&mut rng);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_event_room_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        app.select_character(&mut rng);
+        // Load real events seed so the pool is non-empty.
+        app.events = crate::data::api::load_events();
+        app.mode = crate::tui::app::AppMode::EventRoom;
+        // Populate event directly (bypassing network).
+        if let Some(ev) = app.events.first().cloned() {
+            let hp_ratio = app.run.as_ref().map(|r| r.hp as f32 / r.max_hp as f32).unwrap_or(1.0);
+            app.event_advice = crate::metrics::event::advise_event(&ev.options, hp_ratio);
+            app.event_cursor = app.event_advice.first().map(|a| a.option_idx).unwrap_or(0);
+            app.active_event = Some(ev);
+        }
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_rest_site_does_not_panic() {
+        use rand::SeedableRng;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::RestSite;
+        if let Some(ref run) = app.run {
+            let advice = crate::metrics::rest::advise_rest(run);
+            app.rest_cursor = if matches!(advice.action, crate::metrics::rest::RestAction::Heal) { 0 } else { 1 };
+            app.rest_advice = Some(advice);
+        }
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
     fn render_encounter_with_data_does_not_panic() {
         use crate::data::api::{ApiEncounterMonster, SpireApiEncounter};
         let enc = SpireApiEncounter {
@@ -872,7 +1467,7 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![enc], vec![], vec![]);
+        let app = App::new(vec![], vec![enc], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

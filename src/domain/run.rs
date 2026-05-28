@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
 use crate::domain::card::Card;
+use crate::domain::map::{ActMap, MapPos};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlayerClass {
     Ironclad,
     Silent,
+    Regent,
+    Necrobinder,
     Defect,
     Watcher,
 }
@@ -12,10 +15,12 @@ pub enum PlayerClass {
 impl std::fmt::Display for PlayerClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
-            Self::Ironclad => "Ironclad",
-            Self::Silent => "Silent",
-            Self::Defect => "Defect",
-            Self::Watcher => "Watcher",
+            Self::Ironclad   => "Ironclad",
+            Self::Silent     => "Silent",
+            Self::Regent     => "Regent",
+            Self::Necrobinder => "Necrobinder",
+            Self::Defect     => "Defect",
+            Self::Watcher    => "Watcher",
         };
         write!(f, "{name}")
     }
@@ -47,6 +52,7 @@ impl Potion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunState {
     pub class: PlayerClass,
+    /// Game floor number (0-indexed): 0 = ancient event, 1–15 = map grid, 16 = boss.
     pub floor: u8,
     pub act: u8,
     pub hp: u32,
@@ -56,6 +62,15 @@ pub struct RunState {
     pub relics: Vec<Relic>,
     /// Potion slots; None = empty slot.
     pub potions: Vec<Option<Potion>>,
+    /// Generated map for the current sub-act, if available.
+    pub map: Option<ActMap>,
+    /// Current node on the map (floor, col).
+    pub map_pos: Option<MapPos>,
+    /// Current sub-act name, e.g. "overgrowth".
+    pub sub_act: String,
+    /// Rare-card offset for card rewards (percentage points).
+    /// Starts at -5, increments +1 per non-rare card rolled (cap +40), resets to -5 on rare.
+    pub rare_offset: i32,
 }
 
 impl RunState {
@@ -76,6 +91,10 @@ impl RunState {
             deck,
             relics: vec![starting_relic],
             potions: vec![None, None, None],
+            map: None,
+            map_pos: None,
+            sub_act: "overgrowth".to_string(),
+            rare_offset: -5,
         }
     }
 
@@ -86,10 +105,55 @@ impl RunState {
     pub fn has_relic(&self, name: &str) -> bool {
         self.relics.iter().any(|r| r.name == name)
     }
+
+    /// Generate (or regenerate) the map for the current sub-act.
+    pub fn generate_map(&mut self, seed: u64, ascension: u8) {
+        self.map = Some(ActMap::generate(seed, ascension));
+        self.map_pos = None;
+    }
+
+    /// Heal at a rest site: restore 30% max HP (floored), capped at max.
+    pub fn heal(&mut self) {
+        let amount = ((self.max_hp as f32) * 0.30).floor() as u32;
+        self.hp = (self.hp + amount).min(self.max_hp);
+    }
+
+    /// Smith at a rest site: upgrade the card at `deck_idx`.
+    /// Returns `false` if the index is out of range or the card is already upgraded.
+    pub fn smith(&mut self, deck_idx: usize) -> bool {
+        let Some(card) = self.deck.get_mut(deck_idx) else { return false; };
+        if card.upgraded { return false; }
+        card.upgraded = true;
+        true
+    }
+
+    /// Move to a new node, returning `false` if the move is illegal.
+    pub fn move_to(&mut self, col: usize) -> bool {
+        let Some(ref map) = self.map else { return false; };
+        match self.map_pos {
+            None => {
+                if map.entry_nodes().contains(&(col as u8)) {
+                    self.map_pos = Some(MapPos { floor: 0, col });
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(pos) => {
+                if map.next_nodes(pos.floor, pos.col).contains(&(col as u8)) {
+                    self.map_pos = Some(MapPos { floor: pos.floor + 1, col });
+                    self.floor = (pos.floor + 1) as u8;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 pub mod starting_relics {
-    use super::Relic;
+    use super::{PlayerClass, Relic};
 
     pub fn ironclad() -> Relic {
         Relic::new("Burning Blood", "At the end of combat, heal 6 HP.")
@@ -99,12 +163,31 @@ pub mod starting_relics {
         Relic::new("Ring of the Snake", "At the start of each combat, draw 2 additional cards.")
     }
 
+    pub fn regent() -> Relic {
+        Relic::new("Divine Right", "At the start of each combat, gain 3 Stars.")
+    }
+
+    pub fn necrobinder() -> Relic {
+        Relic::new("Bound Phylactery", "At the start of each combat, Summon 1.")
+    }
+
     pub fn defect() -> Relic {
         Relic::new("Cracked Core", "At the start of each combat, Channel 1 Lightning.")
     }
 
     pub fn watcher() -> Relic {
         Relic::new("Pure Water", "At the start of each combat, add 1 Miracle to your hand.")
+    }
+
+    pub fn for_class(class: &PlayerClass) -> Relic {
+        match class {
+            PlayerClass::Ironclad   => ironclad(),
+            PlayerClass::Silent     => silent(),
+            PlayerClass::Regent     => regent(),
+            PlayerClass::Necrobinder => necrobinder(),
+            PlayerClass::Defect     => defect(),
+            PlayerClass::Watcher    => watcher(),
+        }
     }
 }
 

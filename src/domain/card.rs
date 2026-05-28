@@ -18,7 +18,8 @@ pub enum Rarity {
     Common,
     Uncommon,
     Rare,
-    /// STS2 rarity tier above Rare.
+    /// Relic-only rarity; obtainable only from the ancient event at the start of each act.
+    /// Never appears on cards or in card reward screens.
     Ancient,
     /// Catch-all for Status, Curse, Token, Event, Quest rarities.
     Special,
