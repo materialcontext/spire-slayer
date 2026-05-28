@@ -383,4 +383,80 @@ mod tests {
         let result = run_combat(state, &GreedyDamagePolicy, &mut rng());
         assert!(result.combat_won);
     }
+
+    // TODO: REMOVE — diagnostic trace of a real Act 1 fight (Axe Raider)
+    #[test]
+    #[ignore]
+    fn trace_axe_raider_fight() {
+        use crate::data::api::load_monsters;
+        use crate::domain::catalog::ironclad;
+        use crate::domain::encounter::monster_to_enemy;
+        use crate::domain::effect::BuffType;
+        use crate::sim::apply;
+        use crate::sim::policy::GreedyDamagePolicy;
+
+        let monsters = load_monsters();
+        let axe_raider = monsters.iter().find(|m| m.id == "AXE_RUBY_RAIDER")
+            .expect("AXE_RUBY_RAIDER not found in data");
+
+        let deck = ironclad::starter_deck();
+        let player = crate::domain::combat::PlayerState::new(80, 80);
+        let enemy = monster_to_enemy(axe_raider);
+        let mut state = CombatState::new(player, vec![enemy], deck);
+        let initial_hp = state.player.hp;
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Deal opening hand
+        let n = state.hand_size as usize;
+        apply::draw_cards(&mut state, n, &mut rng);
+
+        println!("\n=== Axe Raider fight (seed 42, Ironclad starter deck) ===");
+        println!("Enemy: {} | HP: {} | Initial intent: {:?}",
+            state.enemies[0].name, state.enemies[0].hp, state.enemies[0].intent);
+        println!("Player HP: {}", state.player.hp);
+
+        loop {
+            let turn = state.turn;
+            let enemy = &state.enemies[0];
+            println!("\n--- Turn {} ---", turn);
+            println!("  Enemy intent: {:?}  block: {}  HP: {}", enemy.intent, enemy.block, enemy.hp);
+            let strength = enemy.buffs.get(&BuffType::Strength).copied().unwrap_or(0);
+            if strength != 0 { println!("  Enemy Strength: {}", strength); }
+            println!("  Player HP: {}  block: {}  energy: {}", state.player.hp, state.player.block, state.energy);
+            println!("  Hand: [{}]", state.hand.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
+
+            // Player phase
+            let mut played: Vec<String> = Vec::new();
+            loop {
+                if state.is_over() { break; }
+                match GreedyDamagePolicy.select_action(&state) {
+                    None => break,
+                    Some(action) => {
+                        let name = state.hand[action.card_hand_idx].name.clone();
+                        if apply::play_card(&mut state, action.card_hand_idx, action.target_idx, &mut rng).is_ok() {
+                            played.push(name);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            println!("  Played: [{}]  → enemy HP now: {}", played.join(", "), state.enemies[0].hp);
+
+            if state.is_over() || state.turn >= MAX_TURNS { break; }
+
+            // Enemy phase
+            apply::end_turn(&mut state, &mut rng);
+
+            println!("  After enemy phase → player HP: {}  (next intent: {:?})",
+                state.player.hp, state.enemies[0].intent);
+
+            if state.is_over() { break; }
+        }
+
+        println!("\n=== Result ===");
+        println!("  Won: {}  Player alive: {}  Turns: {}",
+            state.is_won(), state.player.is_alive(), state.turn);
+        println!("  Player HP delta: {}", state.player.hp as i32 - initial_hp as i32);
+    }
 }
