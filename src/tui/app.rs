@@ -2,13 +2,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster};
+use crate::data::api::{SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster, SpireApiRelic};
 use crate::domain::card::Card;
 use crate::domain::catalog;
 use crate::domain::combat::CombatState;
 use crate::domain::reward::{sample_offer, RewardKind};
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
-use crate::domain::run::{PlayerClass, RunState, starting_relics};
+use crate::domain::run::{PlayerClass, Relic, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
@@ -28,6 +28,8 @@ pub enum AppMode {
     MapView,
     RestSite,
     EventRoom,
+    TreasureRoom,
+    Shop,
     CombatAdvice,
     CardPick,
     DeckDash,
@@ -69,6 +71,17 @@ pub struct App {
     pub offered_cards: Vec<Card>,
     /// Where to return when CardPick is dismissed, and whether to commit the pick to the run.
     pub card_pick_return: AppMode,
+    /// All relic data loaded at startup.
+    pub relics: Vec<SpireApiRelic>,
+    /// The single relic on offer in treasure room.
+    pub offered_relic: Option<SpireApiRelic>,
+    /// Cursor in treasure room: 0 = Take, 1 = Skip.
+    pub relic_cursor: usize,
+    /// Shop inventory.
+    pub shop_cards: Vec<Card>,
+    pub shop_card_advice: Vec<CardAdvice>,
+    pub shop_relics: Vec<SpireApiRelic>,
+    pub shop_cursor: usize,
 }
 
 impl App {
@@ -77,6 +90,7 @@ impl App {
         encounters: Vec<SpireApiEncounter>,
         monsters: Vec<SpireApiMonster>,
         events: Vec<SpireApiEvent>,
+        relics: Vec<SpireApiRelic>,
     ) -> Self {
         // Show character picker if we have data; otherwise skip straight to encounter pick.
         let initial_mode = if characters.is_empty() {
@@ -109,6 +123,13 @@ impl App {
             event_cursor: 0,
             offered_cards: Vec::new(),
             card_pick_return: AppMode::EncounterPick,
+            relics,
+            offered_relic: None,
+            relic_cursor: 0,
+            shop_cards: Vec::new(),
+            shop_card_advice: Vec::new(),
+            shop_relics: Vec::new(),
+            shop_cursor: 0,
         };
         app.refresh_filter();
         app
@@ -153,16 +174,18 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match self.mode {
-            AppMode::CharacterPick => self.handle_key_character(key, rng),
-            AppMode::EncounterPick => self.handle_key_encounter(key, rng),
-            AppMode::MapView       => self.handle_key_map_view(key, rng),
-            AppMode::RestSite      => self.handle_key_rest_site(key),
-            AppMode::EventRoom     => self.handle_key_event_room(key),
-            AppMode::ManualInput   => self.handle_key_input(key),
-            AppMode::CombatAdvice  => self.handle_key_combat(key, rng),
-            AppMode::CardPick      => self.handle_key_pick(key),
-            AppMode::DeckDash      => self.handle_key_deck_dash(key),
-            AppMode::MapEv         => self.handle_key_map_ev(key),
+            AppMode::CharacterPick  => self.handle_key_character(key, rng),
+            AppMode::EncounterPick  => self.handle_key_encounter(key, rng),
+            AppMode::MapView        => self.handle_key_map_view(key, rng),
+            AppMode::RestSite       => self.handle_key_rest_site(key),
+            AppMode::EventRoom      => self.handle_key_event_room(key),
+            AppMode::TreasureRoom   => self.handle_key_treasure_room(key),
+            AppMode::Shop           => self.handle_key_shop(key),
+            AppMode::ManualInput    => self.handle_key_input(key),
+            AppMode::CombatAdvice   => self.handle_key_combat(key, rng),
+            AppMode::CardPick       => self.handle_key_pick(key),
+            AppMode::DeckDash       => self.handle_key_deck_dash(key),
+            AppMode::MapEv          => self.handle_key_map_ev(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -591,11 +614,20 @@ impl App {
                 };
                 self.load_pick(offered, rng, AppMode::MapView);
             }
+            Some(RoomType::Boss) => {
+                let pool = card_pool_for_run(self);
+                let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
+                let offered = if let Some(off) = offset {
+                    sample_offer(&pool, RewardKind::Boss, off, rng)
+                } else {
+                    pool.into_iter().take(3).collect()
+                };
+                self.load_pick(offered, rng, AppMode::MapView);
+            }
             Some(RoomType::Rest) => self.open_rest_site(),
             Some(RoomType::Event) => self.open_event_room(rng),
-            Some(RoomType::Treasure) => {
-                self.status_message = "Treasure chest — relic reward (not yet simulated)".to_string();
-            }
+            Some(RoomType::Treasure) => self.open_treasure_room(rng),
+            Some(RoomType::Shop) => self.open_shop(rng),
             Some(rt) => {
                 self.status_message = format!("Floor {} — {}", self.run.as_ref().map(|r| r.floor).unwrap_or(0), rt.label());
             }
@@ -709,6 +741,139 @@ impl App {
         }
     }
 
+    fn open_treasure_room(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool = self.run.as_ref()
+            .map(|r| char_color(&r.class))
+            .unwrap_or("ironclad");
+        let pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            matches!(rarity, "Common Relic" | "Uncommon Relic" | "Rare Relic")
+                && (p == "shared" || p == class_pool)
+        }).collect();
+        self.offered_relic = pool.choose(rng).map(|r| (*r).clone());
+        self.relic_cursor = 0;
+        self.mode = AppMode::TreasureRoom;
+    }
+
+    fn handle_key_treasure_room(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => { self.relic_cursor = 1; }
+            KeyCode::Char('k') | KeyCode::Up   => { self.relic_cursor = 0; }
+            KeyCode::Enter => {
+                if self.relic_cursor == 0 {
+                    if let (Some(relic), Some(run)) = (self.offered_relic.take(), self.run.as_mut()) {
+                        let desc = relic.description.clone().unwrap_or_default();
+                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        self.status_message = format!("Took {}", relic.name);
+                    }
+                } else {
+                    self.status_message = "Skipped relic".to_string();
+                    self.offered_relic = None;
+                }
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Esc => {
+                self.offered_relic = None;
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
+            _ => {}
+        }
+    }
+
+    fn open_shop(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        use crate::metrics::card_pick::pick_score;
+
+        // 5 cards at shop rarity weights
+        let pool = card_pool_for_run(self);
+        let mut offset_copy = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+        let mut cards = sample_offer(&pool, RewardKind::Shop, &mut offset_copy, rng);
+        let extra = sample_offer(&pool, RewardKind::Shop, &mut offset_copy, rng);
+        cards.extend(extra);
+        cards.truncate(5);
+
+        // 2 shop relics
+        let class_pool = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+        let relic_pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            rarity == "Shop Relic" && (p == "shared" || p == class_pool)
+        }).collect();
+        let shop_relics: Vec<SpireApiRelic> = relic_pool
+            .choose_multiple(rng, 2)
+            .map(|r| (*r).clone())
+            .collect();
+
+        // Score the cards
+        let advice = if let Some(run) = &self.run {
+            pick_score(&cards, run)
+        } else {
+            cards.iter().enumerate().map(|(i, _)| crate::metrics::card_pick::CardAdvice {
+                card_index: i, score: 0.0, reason: String::new(),
+                win_rate: 0.0, mean_hp_delta: 0.0, hp_loss_p50: 0.0,
+                delta_win_rate: 0.0, delta_hp: 0.0,
+            }).collect()
+        };
+
+        self.shop_cards = cards;
+        self.shop_card_advice = advice;
+        self.shop_relics = shop_relics;
+        self.shop_cursor = 0;
+        self.mode = AppMode::Shop;
+    }
+
+    fn handle_key_shop(&mut self, key: KeyEvent) {
+        let n_cards = self.shop_cards.len();
+        let n_relics = self.shop_relics.len();
+        let total = n_cards + n_relics;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if total > 0 { self.shop_cursor = (self.shop_cursor + 1).min(total - 1); }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.shop_cursor > 0 { self.shop_cursor -= 1; }
+            }
+            KeyCode::Enter => {
+                if self.shop_cursor < n_cards {
+                    let card = self.shop_cards.get(self.shop_cursor).cloned();
+                    if let (Some(card), Some(run)) = (card, self.run.as_mut()) {
+                        let name = card.name.clone();
+                        run.deck.push(card);
+                        self.status_message = format!("Bought {} ({} cards)", name, run.deck.len());
+                        self.shop_cards.remove(self.shop_cursor);
+                        self.shop_card_advice.retain(|a| a.card_index != self.shop_cursor);
+                        if self.shop_cursor >= self.shop_cards.len() {
+                            self.shop_cursor = self.shop_cursor.saturating_sub(1);
+                        }
+                    }
+                } else {
+                    let relic_idx = self.shop_cursor - n_cards;
+                    let relic = self.shop_relics.get(relic_idx).cloned();
+                    if let (Some(relic), Some(run)) = (relic, self.run.as_mut()) {
+                        let desc = relic.description.clone().unwrap_or_default();
+                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        self.status_message = format!("Bought {}", relic.name);
+                        self.shop_relics.remove(relic_idx);
+                        if self.shop_cursor >= self.shop_cards.len() + self.shop_relics.len() {
+                            self.shop_cursor = self.shop_cursor.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.shop_cards.clear();
+                self.shop_card_advice.clear();
+                self.shop_relics.clear();
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
+            _ => {}
+        }
+    }
+
     pub fn load_combat(&mut self, state: CombatState) {
         self.play_advice = None;
         self.selected_row = 0;
@@ -812,6 +977,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let encounters = crate::data::api::load_encounters();
     let events = crate::data::api::load_events();
     let characters = crate::data::api::load_characters();
+    let relics = crate::data::api::load_relics();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -820,7 +986,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(characters, encounters, monsters, events);
+    let mut app = App::new(characters, encounters, monsters, events, relics);
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
@@ -876,7 +1042,7 @@ mod tests {
     }
 
     fn empty_app() -> App {
-        App::new(vec![], vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![], vec![])
     }
 
     fn app_with_combat() -> App {
@@ -942,7 +1108,7 @@ mod tests {
             }],
             loss_text: None,
         };
-        let mut app = App::new(vec![], vec![enc], vec![], vec![]);
+        let mut app = App::new(vec![], vec![enc], vec![], vec![], vec![]);
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -996,7 +1162,7 @@ mod tests {
             monsters: vec![],
             loss_text: None,
         };
-        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![]);
+        let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![], vec![]);
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);

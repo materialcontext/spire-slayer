@@ -23,9 +23,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::DeckDash => render_deck_dash(frame, app, area),
         AppMode::MapEv   => render_map_ev(frame, app, area),
         AppMode::MapView  => render_map_view(frame, app, area),
-        AppMode::RestSite  => render_rest_site(frame, app, area),
-        AppMode::EventRoom => render_event_room(frame, app, area),
-        AppMode::Exiting   => {}
+        AppMode::RestSite     => render_rest_site(frame, app, area),
+        AppMode::EventRoom    => render_event_room(frame, app, area),
+        AppMode::TreasureRoom => render_treasure_room(frame, app, area),
+        AppMode::Shop         => render_shop(frame, app, area),
+        AppMode::Exiting      => {}
     }
 }
 
@@ -1302,6 +1304,141 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, rows[2]);
 }
 
+fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(6),     // relic display
+            Constraint::Length(1),  // hint
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let header = Paragraph::new(format!(" TREASURE CHEST   Floor {floor}   ↑↓ select  Enter confirm  Esc back"))
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    let (relic_name, relic_desc) = if let Some(ref relic) = app.offered_relic {
+        let name = relic.name.clone();
+        let desc = strip_tags(relic.description.as_deref().unwrap_or("No description."));
+        (name, desc)
+    } else {
+        ("No relic found".to_string(), String::new())
+    };
+
+    let options = ["[T]ake", "[S]kip"];
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![Span::styled(
+            format!("  {relic_name}"),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            format!("  {relic_desc}"),
+            Style::default().fg(Color::White),
+        )]),
+        Line::from(""),
+    ];
+
+    for (i, label) in options.iter().enumerate() {
+        let is_cursor = i == app.relic_cursor;
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![Span::styled(format!("{prefix}{label}"), style)]));
+    }
+
+    let relic_widget = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL).title(" Relic "))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(relic_widget, rows[1]);
+
+    let hint = Paragraph::new("  ↑↓ select  Enter confirm  Esc back")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[3]);
+}
+
+fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(8),     // cards
+            Constraint::Length(6),  // relics
+            Constraint::Length(1),  // hint
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let header = Paragraph::new(format!(" SHOP   Floor {floor}   ↑↓ navigate  Enter buy  Esc leave"))
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Cards section
+    let n_cards = app.shop_cards.len();
+    let card_lines: Vec<Line> = app.shop_cards.iter().enumerate().map(|(i, card)| {
+        let is_cursor = i == app.shop_cursor;
+        let advice = app.shop_card_advice.iter().find(|a| a.card_index == i);
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let cursor_style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let reason = advice.map(|a| a.reason.as_str()).unwrap_or("");
+        let label = format!("{prefix}{}   {reason}", card.name);
+        Line::from(vec![Span::styled(label, cursor_style)])
+    }).collect();
+
+    let cards_widget = Paragraph::new(Text::from(card_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Cards "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(cards_widget, rows[1]);
+
+    // Relics section
+    let relic_lines: Vec<Line> = app.shop_relics.iter().enumerate().map(|(i, relic)| {
+        let cursor_idx = n_cards + i;
+        let is_cursor = cursor_idx == app.shop_cursor;
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let desc = strip_tags(relic.description.as_deref().unwrap_or(""));
+        let label = format!("{prefix}{} — {:.60}", relic.name, desc);
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::LightYellow)
+        };
+        Line::from(vec![Span::styled(label, style)])
+    }).collect();
+
+    let relics_widget = Paragraph::new(Text::from(relic_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Relics "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(relics_widget, rows[2]);
+
+    let hint = Paragraph::new("  ↑↓ navigate  Enter buy  Esc leave")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[3]);
+
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[4]);
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -1322,7 +1459,7 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -1345,7 +1482,7 @@ mod tests {
             dialogues: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![ch], vec![], vec![], vec![]);
+        let app = App::new(vec![ch], vec![], vec![], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
@@ -1467,7 +1604,61 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![], vec![enc], vec![], vec![]);
+        let app = App::new(vec![], vec![enc], vec![], vec![], vec![]);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_treasure_room_does_not_panic() {
+        use rand::SeedableRng;
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let relic = SpireApiRelic {
+            id: "test_relic".into(),
+            name: "Test Relic".into(),
+            description: Some("A [gold]test[/gold] relic.".into()),
+            flavor: None,
+            rarity: Some("Common Relic".into()),
+            rarity_key: None,
+            pool: Some("shared".into()),
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic.clone()]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::TreasureRoom;
+        app.offered_relic = Some(relic);
+        app.relic_cursor = 0;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_shop_does_not_panic() {
+        use rand::SeedableRng;
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let relic = SpireApiRelic {
+            id: "shop_relic".into(),
+            name: "Shop Relic".into(),
+            description: Some("A [blue]shop[/blue] relic.".into()),
+            flavor: None,
+            rarity: Some("Shop Relic".into()),
+            rarity_key: None,
+            pool: Some("shared".into()),
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::Shop;
+        // Populate shop inventory directly.
+        app.shop_cards = crate::domain::catalog::ironclad::starter_deck().into_iter().take(3).collect();
+        app.shop_relics = Vec::new();
+        app.shop_cursor = 0;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }
