@@ -316,12 +316,16 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::domain::card::{CardType, Rarity};
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(6), Constraint::Length(2)])
         .split(area);
 
-    let title = Paragraph::new(" CARD PICK — Simulator-backed reward evaluation")
+    let from_map = app.card_pick_return == AppMode::MapView;
+    let title_suffix = if from_map { "— pick to add to deck" } else { "— preview only" };
+    let title = Paragraph::new(format!(" CARD REWARD {title_suffix}"))
         .block(Block::default().borders(Borders::BOTTOM))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     frame.render_widget(title, rows[0]);
@@ -329,12 +333,45 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (rank, advice) in app.card_advice.iter().enumerate() {
         let selected = rank == app.selected_row;
-        let prefix = if selected { "> " } else { "  " };
+        let prefix = if selected { "▶ " } else { "  " };
 
-        let name = if advice.card_index == usize::MAX {
-            "— skip reward —".to_string()
+        let (name_line, detail_line) = if advice.card_index == usize::MAX {
+            (
+                format!("{prefix}— skip reward —"),
+                format!("     (keep current deck as-is)"),
+            )
         } else {
-            format!("#{}", advice.card_index + 1)
+            let card = app.offered_cards.get(advice.card_index);
+            let name = card.map(|c| c.name.as_str()).unwrap_or("?");
+            let cost = card.map(|c| if c.cost == 255 { "X".to_string() } else { c.cost.to_string() })
+                .unwrap_or_else(|| "?".to_string());
+            let ctype = card.map(|c| match c.card_type {
+                CardType::Attack => "Atk",
+                CardType::Skill  => "Skl",
+                CardType::Power  => "Pwr",
+                CardType::Status => "Sts",
+                CardType::Curse  => "Crs",
+            }).unwrap_or("?");
+            let rarity = card.map(|c| match c.rarity {
+                Rarity::Ancient  => "Ancient",
+                Rarity::Rare     => "Rare",
+                Rarity::Uncommon => "Uncommon",
+                Rarity::Common   => "Common",
+                Rarity::Basic    => "Basic",
+                Rarity::Special  => "Special",
+            }).unwrap_or("?");
+            let dmg = card.map(|c| c.base_damage()).unwrap_or(0);
+            let blk = card.map(|c| c.base_block()).unwrap_or(0);
+            let stats = match (dmg, blk) {
+                (d, b) if d > 0 && b > 0 => format!("  {d}dmg {b}blk"),
+                (d, 0) if d > 0           => format!("  {d}dmg"),
+                (0, b) if b > 0           => format!("  {b}blk"),
+                _                         => String::new(),
+            };
+            (
+                format!("{prefix}{name}   [{ctype} · {rarity} · {cost}E]{stats}"),
+                format!("     {}", advice.reason),
+            )
         };
 
         let delta_color = if advice.delta_win_rate > 0.02 {
@@ -344,32 +381,22 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Color::Yellow
         };
-
         let base_style = if selected {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-
-        // Card name / label line
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, name),
-            base_style,
-        )));
-
-        // Stats line with delta coloring
-        if advice.win_rate > 0.0 || advice.card_index == usize::MAX {
-            lines.push(Line::from(Span::styled(
-                format!("     {}", advice.reason),
-                if selected { base_style } else { Style::default().fg(delta_color) },
-            )));
+        let detail_style = if selected {
+            base_style
+        } else if advice.win_rate > 0.0 || advice.card_index == usize::MAX {
+            Style::default().fg(delta_color)
         } else {
-            // Heuristic fallback
-            lines.push(Line::from(Span::styled(
-                format!("     score={:.2}  {}", advice.score, advice.reason),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+            Style::default().fg(Color::DarkGray)
+        };
+
+        lines.push(Line::from(Span::styled(name_line, base_style)));
+        lines.push(Line::from(Span::styled(detail_line, detail_style)));
+        lines.push(Line::from(Span::raw("")));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::raw("  No cards offered")));
@@ -381,7 +408,8 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
         rows[1],
     );
 
-    let hint = Paragraph::new("  [j/k] navigate  [Enter] pick  [q] back")
+    let action = if from_map { "Enter=add to deck" } else { "Enter=close" };
+    let hint = Paragraph::new(format!("  [j/k] navigate  [{action}]  [q/Esc] back"))
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, rows[2]);
 }

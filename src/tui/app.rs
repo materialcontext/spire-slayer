@@ -64,6 +64,10 @@ pub struct App {
     pub active_event: Option<SpireApiEvent>,
     pub event_advice: Vec<EventOptionAdvice>,
     pub event_cursor: usize,
+    /// Cards in the current card-pick offer; indices match card_advice[*].card_index.
+    pub offered_cards: Vec<Card>,
+    /// Where to return when CardPick is dismissed, and whether to commit the pick to the run.
+    pub card_pick_return: AppMode,
 }
 
 impl App {
@@ -102,6 +106,8 @@ impl App {
             active_event: None,
             event_advice: Vec::new(),
             event_cursor: 0,
+            offered_cards: Vec::new(),
+            card_pick_return: AppMode::EncounterPick,
         };
         app.refresh_filter();
         app
@@ -354,7 +360,7 @@ impl App {
             KeyCode::Char('p') => {
                 let color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
                 let offered = sample_card_offer(color, rng);
-                self.load_pick(offered, rng);
+                self.load_pick(offered, rng, AppMode::CombatAdvice);
             }
             KeyCode::Char('v') => {
                 self.open_map_ev(rng);
@@ -414,8 +420,9 @@ impl App {
 
     fn handle_key_pick(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => {
-                self.mode = AppMode::CombatAdvice;
+            KeyCode::Char('q') | KeyCode::Esc => {
+                let dest = self.card_pick_return.clone();
+                self.mode = dest;
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.selected_row + 1 < self.card_advice.len() {
@@ -428,7 +435,12 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                self.mode = AppMode::CombatAdvice;
+                // Only commit the pick to the run when triggered from the map.
+                if self.card_pick_return == AppMode::MapView {
+                    self.apply_card_pick();
+                }
+                let dest = self.card_pick_return.clone();
+                self.mode = dest;
             }
             _ => {}
         }
@@ -565,6 +577,11 @@ impl App {
         });
 
         match room {
+            Some(RoomType::Monster) | Some(RoomType::Elite) => {
+                let color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+                let offered = sample_card_offer(color, rng);
+                self.load_pick(offered, rng, AppMode::MapView);
+            }
             Some(RoomType::Rest) => self.open_rest_site(),
             Some(RoomType::Event) => self.open_event_room(rng),
             Some(RoomType::Treasure) => {
@@ -690,12 +707,16 @@ impl App {
         self.mode = AppMode::CombatAdvice;
     }
 
-    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng) {
+    pub fn load_pick(&mut self, offered: Vec<Card>, rng: &mut impl rand::Rng, return_to: AppMode) {
         let deck = self.run.as_ref().map(|r| r.deck.clone()).unwrap_or_else(|| {
             crate::domain::catalog::ironclad::starter_deck()
         });
-        let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
-        let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
+        let hp = self.run.as_ref().map(|r| r.hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.hp))
+            .unwrap_or(80);
+        let max_hp = self.run.as_ref().map(|r| r.max_hp)
+            .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
+            .unwrap_or(80);
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -706,8 +727,26 @@ impl App {
             &self.monsters,
             rng,
         );
+        self.offered_cards = offered;
+        self.card_pick_return = return_to;
         self.selected_row = 0;
         self.mode = AppMode::CardPick;
+    }
+
+    fn apply_card_pick(&mut self) {
+        let Some(advice) = self.card_advice.get(self.selected_row) else { return; };
+        if advice.card_index == usize::MAX {
+            self.status_message = "Skipped card reward".to_string();
+            return;
+        }
+        let card = self.offered_cards.get(advice.card_index).cloned();
+        if let Some(card) = card {
+            let name = card.name.clone();
+            if let Some(ref mut run) = self.run {
+                run.deck.push(card);
+                self.status_message = format!("Added {} to deck ({} cards)", name, run.deck.len());
+            }
+        }
     }
 }
 
@@ -967,5 +1006,73 @@ mod tests {
         let mode_before = app.mode.clone();
         app.handle_event(AppEvent::Tick, &mut rng);
         assert_eq!(app.mode, mode_before);
+    }
+
+    fn app_with_run() -> App {
+        use crate::domain::catalog::ironclad;
+        use crate::domain::run::{PlayerClass, RunState, starting_relics};
+        let mut app = empty_app();
+        app.run = Some(RunState::new(
+            PlayerClass::Ironclad,
+            80, 80,
+            ironclad::starter_deck(),
+            starting_relics::ironclad(),
+        ));
+        app.act_filter = "overgrowth".to_string();
+        app
+    }
+
+    #[test]
+    fn card_pick_from_map_adds_to_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = sample_card_offer("ironclad", &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::MapView);
+        assert_eq!(app.mode, AppMode::CardPick);
+        assert!(!app.offered_cards.is_empty());
+
+        // Navigate to the first non-skip option and confirm.
+        let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);
+        app.selected_row = first_card_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::MapView);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before + 1);
+    }
+
+    #[test]
+    fn card_pick_skip_does_not_add_to_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = sample_card_offer("ironclad", &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::MapView);
+
+        let skip_rank = app.card_advice.iter().position(|a| a.card_index == usize::MAX).unwrap();
+        app.selected_row = skip_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::MapView);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before);
+    }
+
+    #[test]
+    fn card_pick_from_combat_does_not_modify_deck() {
+        let mut rng = seeded_rng();
+        let mut app = app_with_run();
+        let deck_before = app.run.as_ref().unwrap().deck.len();
+
+        let offered = sample_card_offer("ironclad", &mut rng);
+        app.load_pick(offered, &mut rng, AppMode::CombatAdvice);
+
+        let first_card_rank = app.card_advice.iter().position(|a| a.card_index != usize::MAX).unwrap_or(0);
+        app.selected_row = first_card_rank;
+        app.handle_event(make_key(KeyCode::Enter), &mut rng);
+
+        assert_eq!(app.mode, AppMode::CombatAdvice);
+        assert_eq!(app.run.as_ref().unwrap().deck.len(), deck_before, "preview mode must not modify deck");
     }
 }
