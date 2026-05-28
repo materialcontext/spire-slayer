@@ -711,9 +711,10 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
             let after_boss = ev.hp_after_current_boss.max(0.0);
             let sign = if delta >= 0.0 { "+" } else { "" };
             let boss_color = if after_boss <= 0.0 { Color::Red } else if after_boss < 30.0 { Color::Yellow } else { Color::White };
+            let cur_act_label = format!("Act {} ({})", ev.current_act_number, capitalize(&ev.current_sub_act));
             lines.push(Line::from(Span::styled(
                 format!(
-                    "  Act remaining:  {sign}{delta:.0} HP   → {after_boss:.0} HP after boss",
+                    "  {cur_act_label:<16}  {sign}{delta:.0} HP   → {after_boss:.0} HP after boss",
                 ),
                 Style::default().fg(boss_color),
             )));
@@ -726,13 +727,13 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
             }
 
             for act_ev in &ev.future_acts {
-                let name = capitalize(&act_ev.sub_act);
+                let name = format!("Act {} ({})", act_ev.act_number, capitalize(&act_ev.sub_act));
                 let d = act_ev.expected_delta;
                 let sign = if d >= 0.0 { "+" } else { "" };
                 let exit = act_ev.exit_hp.max(0.0);
                 let color = if exit <= 0.0 { Color::Red } else if exit < 30.0 { Color::Yellow } else { Color::White };
                 lines.push(Line::from(Span::styled(
-                    format!("  {name:<12}  {sign}{d:.0} HP   → {exit:.0} HP after boss"),
+                    format!("  {name:<16}  {sign}{d:.0} HP   → {exit:.0} HP after boss"),
                     Style::default().fg(color),
                 )));
                 if act_ev.exit_hp > 0.0 && act_ev.post_heal_hp != act_ev.exit_hp {

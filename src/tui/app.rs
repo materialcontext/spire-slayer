@@ -604,16 +604,19 @@ impl App {
         let class = class_from_color(&color);
         let relic = starting_relics::for_class(&class);
 
+        let act1_variants = ["overgrowth", "underdocks"];
+        let sub_act = act1_variants[rng.gen_range(0..act1_variants.len())].to_string();
+
         let mut run  = RunState::new(class, hp, hp, deck, relic);
         run.gold     = gold;
-        run.sub_act  = "overgrowth".to_string();
+        run.sub_act  = sub_act.clone();
 
         self.status_message = format!(
             "Playing as {} — HP {}, {} starting cards — choose your path",
             char_name, hp, run.deck.len(),
         );
         self.run = Some(run);
-        self.act_filter = "overgrowth".to_string();
+        self.act_filter = sub_act;
         self.refresh_filter();
         self.selected_row = 0;
         self.open_map_view(rng);

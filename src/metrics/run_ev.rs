@@ -8,20 +8,50 @@ use crate::metrics::deck_dash::compute_deck_stats;
 use crate::metrics::map_ev::{post_act_heal_hp, POST_ACT_HEAL_ASCENSION_THRESHOLD};
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts};
 
-/// Ordered sub-acts for a complete run.
-const ACT_ORDER: &[&str] = &["overgrowth", "underdocks", "hive", "glory"];
+// ── Act structure ──────────────────────────────────────────────────────────
+//
+// STS2 has 3 Acts:
+//   Act 1 — randomly either "overgrowth" or "underdocks" (alternate acts)
+//   Act 2 — always "hive"
+//   Act 3 — always "glory"
+//
+// Each act starts with an Ancient (Neow for Act 1) offering 3 boons, and ends
+// with a Boss fight.  After the boss the Ancient heals the player before the
+// next act begins.
 
-/// Number of randomly generated maps used to estimate a future act's path cost.
+/// Number of randomly generated maps sampled when estimating a future act's cost.
 const N_SAMPLE_MAPS: u32 = 5;
+
+/// Returns the act number (1, 2, or 3) for a given sub-act name.
+pub fn act_number(sub_act: &str) -> u8 {
+    match sub_act {
+        "overgrowth" | "underdocks" => 1,
+        "hive"                      => 2,
+        "glory"                     => 3,
+        _                           => 0,
+    }
+}
+
+/// Returns the (sub_act, act_number) pairs for all acts that follow the current one.
+///
+/// Act 1 (either overgrowth or underdocks) always leads to Act 2 (hive) then Act 3 (glory).
+fn acts_after(current_sub_act: &str) -> Vec<(&'static str, u8)> {
+    match current_sub_act {
+        "overgrowth" | "underdocks" => vec![("hive", 2), ("glory", 3)],
+        "hive"                      => vec![("glory", 3)],
+        _                           => vec![],
+    }
+}
 
 // ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct FutureActEv {
     pub sub_act: String,
+    pub act_number: u8,
     /// Expected net HP delta navigating this act optimally, including the boss.
     pub expected_delta: f32,
-    /// HP at the start of this act (after the prior post-act heal, or current HP for act 1).
+    /// HP at the start of this act (after the prior post-act heal).
     pub entry_hp: f32,
     /// HP immediately after the act boss (before any post-act heal).
     pub exit_hp: f32,
@@ -32,26 +62,27 @@ pub struct FutureActEv {
 
 #[derive(Debug, Clone)]
 pub struct RunEv {
+    pub current_sub_act: String,
+    pub current_act_number: u8,
     /// HP delta from the current map position through the current act's boss.
-    /// Already the "best path" value taken from path_choices.
     pub current_act_remaining_delta: f32,
     /// Projected HP immediately after the current act's boss fight.
     pub hp_after_current_boss: f32,
     /// HP at the start of the next act (after the post-act heal).
+    /// Equal to `hp_after_current_boss` when this is the final act.
     pub hp_after_current_heal: f32,
     /// Projections for each remaining future act, in order.
     pub future_acts: Vec<FutureActEv>,
-    /// Projected HP at the very end of the run (after the final boss, before any heal).
+    /// Projected HP at the very end of the run (after the final boss, no heal).
     pub projected_final_hp: f32,
-    /// True when encounter simulation was used; false when falling back to defaults.
+    /// True when encounter simulation backed the costs; false = defaults used.
     pub simulated: bool,
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 /// Build NodeCosts for a given sub-act by simulating against its encounter pool.
-/// Returns `(costs, simulated)` where `simulated` is false if no encounter data
-/// was available and defaults were used instead.
+/// Returns `(costs, simulated)` — simulated is false when no data was available.
 fn act_node_costs(
     sub_act: &str,
     deck: &[Card],
@@ -95,7 +126,7 @@ fn act_node_costs(
 }
 
 /// Estimate the average best-path HP delta for a randomly generated act map.
-/// The boss loss is baked into the DP terminal via `costs.boss_loss`.
+/// Boss cost is already baked into the DP terminal via `costs.boss_loss`.
 fn estimate_act_delta(costs: &NodeCosts, ascension: u8, rng: &mut impl Rng) -> f32 {
     let mut total = 0.0f32;
     let mut count = 0u32;
@@ -117,7 +148,6 @@ fn estimate_act_delta(costs: &NodeCosts, ascension: u8, rng: &mut impl Rng) -> f
     if count > 0 {
         total / count as f32
     } else {
-        // Fallback: very rough estimate (8 monsters + boss)
         -(costs.monster_loss * 8.0 + costs.boss_loss)
     }
 }
@@ -127,11 +157,8 @@ fn estimate_act_delta(costs: &NodeCosts, ascension: u8, rng: &mut impl Rng) -> f
 /// Compute a full run projection from the current position.
 ///
 /// `current_act_remaining_delta` is the best-path HP delta from the current
-/// map position through the end of the current act (including the boss fight).
-/// This value should come from `app.path_choices`.
-///
-/// `current_act_boss_simulated` should be `true` when the value came from a
-/// simulation run (i.e. `app.path_choices[*].simulated`).
+/// map position through the end of the current act (boss included), taken
+/// from `app.path_choices`.
 pub fn compute_run_ev(
     deck: &[Card],
     current_hp: u32,
@@ -144,11 +171,14 @@ pub fn compute_run_ev(
     current_act_simulated: bool,
     rng: &mut impl Rng,
 ) -> RunEv {
+    let current_act_number = act_number(current_sub_act);
     let hp_after_current_boss = current_hp as f32 + current_act_remaining_delta;
 
-    // If the player dies in the current act, projection ends here.
+    // Player dies in current act — no further projection.
     if hp_after_current_boss <= 0.0 {
         return RunEv {
+            current_sub_act: current_sub_act.to_string(),
+            current_act_number,
             current_act_remaining_delta,
             hp_after_current_boss: 0.0,
             hp_after_current_heal: 0.0,
@@ -159,30 +189,23 @@ pub fn compute_run_ev(
     }
 
     let heal_target = post_act_heal_hp(max_hp, ascension);
-    let hp_after_current_heal = heal_target; // post-act heal always sets HP to target
 
-    // Remaining acts after the current one.
-    let future_sub_acts: Vec<&str> = ACT_ORDER.iter()
-        .copied()
-        .skip_while(|&a| a != current_sub_act)
-        .skip(1)
-        .collect();
+    // Acts that follow the current one, in run order.
+    let future = acts_after(current_sub_act);
+    let is_final_act = future.is_empty();
+
+    // If this is the last act, there's no post-act heal after the boss.
+    let hp_after_current_heal = if is_final_act { hp_after_current_boss } else { heal_target };
 
     let mut entry_hp = hp_after_current_heal;
     let mut future_acts: Vec<FutureActEv> = Vec::new();
     let mut all_simulated = current_act_simulated;
 
-    for (i, &sub_act) in future_sub_acts.iter().enumerate() {
-        let is_last = i == future_sub_acts.len() - 1;
+    for (i, &(sub_act, act_num)) in future.iter().enumerate() {
+        let is_last = i == future.len() - 1;
 
         let (costs, has_data) = act_node_costs(
-            sub_act,
-            deck,
-            entry_hp as u32,
-            max_hp,
-            all_encounters,
-            all_monsters,
-            rng,
+            sub_act, deck, entry_hp as u32, max_hp, all_encounters, all_monsters, rng,
         );
         if !has_data {
             all_simulated = false;
@@ -190,11 +213,12 @@ pub fn compute_run_ev(
 
         let expected_delta = estimate_act_delta(&costs, ascension, rng);
         let exit_hp = (entry_hp + expected_delta).max(0.0);
-        // No post-act heal after the final boss — the run ends there.
+        // No post-act heal after the final boss.
         let post_heal = if is_last { exit_hp } else { heal_target };
 
         future_acts.push(FutureActEv {
             sub_act: sub_act.to_string(),
+            act_number: act_num,
             expected_delta,
             entry_hp,
             exit_hp,
@@ -202,8 +226,7 @@ pub fn compute_run_ev(
         });
 
         if exit_hp <= 0.0 {
-            // Projected death — no point simulating further acts.
-            break;
+            break; // projected death — stop here
         }
         entry_hp = post_heal;
     }
@@ -213,6 +236,8 @@ pub fn compute_run_ev(
         .unwrap_or(hp_after_current_boss);
 
     RunEv {
+        current_sub_act: current_sub_act.to_string(),
+        current_act_number,
         current_act_remaining_delta,
         hp_after_current_boss,
         hp_after_current_heal,
@@ -247,15 +272,69 @@ mod tests {
     }
 
     #[test]
-    fn run_ev_from_overgrowth_has_three_future_acts() {
+    fn act_number_correct() {
+        assert_eq!(act_number("overgrowth"), 1);
+        assert_eq!(act_number("underdocks"), 1);
+        assert_eq!(act_number("hive"), 2);
+        assert_eq!(act_number("glory"), 3);
+    }
+
+    #[test]
+    fn acts_after_act1_is_hive_and_glory() {
+        // Both Act 1 variants lead to the same future acts.
+        let og = acts_after("overgrowth");
+        let ud = acts_after("underdocks");
+        assert_eq!(og, ud);
+        assert_eq!(og.len(), 2);
+        assert_eq!(og[0], ("hive", 2));
+        assert_eq!(og[1], ("glory", 3));
+    }
+
+    #[test]
+    fn acts_after_hive_is_glory_only() {
+        let h = acts_after("hive");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0], ("glory", 3));
+    }
+
+    #[test]
+    fn acts_after_glory_is_empty() {
+        assert!(acts_after("glory").is_empty());
+    }
+
+    #[test]
+    fn run_ev_from_overgrowth_has_two_future_acts() {
         let result = compute_run_ev(
             &deck(), 60, 80, "overgrowth", -20.0,
             &[], &[], 0, false, &mut rng(),
         );
-        // overgrowth → underdocks → hive → glory
-        assert_eq!(result.future_acts.len(), 3);
-        assert_eq!(result.future_acts[0].sub_act, "underdocks");
-        assert_eq!(result.future_acts[2].sub_act, "glory");
+        // overgrowth (Act 1) → hive (Act 2) → glory (Act 3)
+        assert_eq!(result.current_act_number, 1);
+        assert_eq!(result.future_acts.len(), 2);
+        assert_eq!(result.future_acts[0].sub_act, "hive");
+        assert_eq!(result.future_acts[0].act_number, 2);
+        assert_eq!(result.future_acts[1].sub_act, "glory");
+        assert_eq!(result.future_acts[1].act_number, 3);
+    }
+
+    #[test]
+    fn run_ev_from_underdocks_same_as_overgrowth_structure() {
+        let og = compute_run_ev(&deck(), 60, 80, "overgrowth", -20.0, &[], &[], 0, false, &mut rng());
+        let ud = compute_run_ev(&deck(), 60, 80, "underdocks", -20.0, &[], &[], 0, false, &mut rng());
+        // Both are Act 1 — same future structure
+        assert_eq!(og.future_acts.len(), ud.future_acts.len());
+        assert_eq!(og.future_acts[0].sub_act, ud.future_acts[0].sub_act);
+    }
+
+    #[test]
+    fn run_ev_from_hive_has_one_future_act() {
+        let result = compute_run_ev(
+            &deck(), 60, 80, "hive", -20.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        assert_eq!(result.current_act_number, 2);
+        assert_eq!(result.future_acts.len(), 1);
+        assert_eq!(result.future_acts[0].sub_act, "glory");
     }
 
     #[test]
@@ -264,8 +343,19 @@ mod tests {
             &deck(), 60, 80, "glory", -20.0,
             &[], &[], 0, false, &mut rng(),
         );
+        assert_eq!(result.current_act_number, 3);
         assert!(result.future_acts.is_empty());
         assert_eq!(result.projected_final_hp, result.hp_after_current_boss);
+    }
+
+    #[test]
+    fn glory_has_no_post_act_heal() {
+        let result = compute_run_ev(
+            &deck(), 80, 80, "glory", 0.0,
+            &[], &[], 0, false, &mut rng(),
+        );
+        // Final act: no post-act heal, hp_after_current_heal == hp_after_current_boss
+        assert_eq!(result.hp_after_current_heal, result.hp_after_current_boss);
     }
 
     #[test]
@@ -275,13 +365,12 @@ mod tests {
             &[], &[], 0, false, &mut rng(),
         );
         let last = result.future_acts.last().unwrap();
-        // No post-act heal after the final boss.
+        // Glory (last act) has no post-act heal.
         assert_eq!(last.post_heal_hp, last.exit_hp);
     }
 
     #[test]
     fn projected_death_short_circuits() {
-        // Remaining delta kills the player.
         let result = compute_run_ev(
             &deck(), 10, 80, "overgrowth", -50.0,
             &[], &[], 0, false, &mut rng(),
