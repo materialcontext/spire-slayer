@@ -179,40 +179,55 @@ pub struct SpireApiEncounter {
 
 // ── Event API ─────────────────────────────────────────────────────────────────
 
-/// A single outcome/choice branch within an event.
+/// One player-facing choice inside an event (top-level or within a page).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ApiEventChoice {
-    pub id: Option<String>,
-    pub text: Option<String>,
+pub struct ApiEventOption {
+    pub id: String,
+    pub title: Option<String>,
+    /// Description text; may include colour/formatting tags like [green]2[/green].
     pub description: Option<String>,
-    /// Outcomes this choice can produce (e.g. "gold", "hp_loss", "card", "relic").
+}
+
+/// A state/page in a multi-step event (branching narrative).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiEventPage {
+    pub id: String,
+    pub description: Option<String>,
     #[serde(default, deserialize_with = "null_as_default")]
-    pub outcomes: Vec<ApiEventOutcome>,
+    pub options: Vec<ApiEventOption>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ApiEventOutcome {
-    #[serde(rename = "type")]
-    pub outcome_type: Option<String>,
-    pub amount: Option<i32>,
-    pub description: Option<String>,
-    /// If true this outcome leads to combat.
-    pub combat: Option<bool>,
-    pub encounter_id: Option<String>,
-}
-
-/// A spire-codex event entry.
+/// A spire-codex `/api/events` entry.
+///
+/// `act` uses several formats:
+///   - `"Act 1 - Overgrowth"` / `"Overgrowth"` — sub-act specific
+///   - `"Act 1 - Overgrowth / Underdocks"` — appears in both Act 1 sub-acts
+///   - `null` with `event_type == "Shared"` — appears in every act
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpireApiEvent {
     pub id: String,
     pub name: String,
+    /// "Event" or "Shared" (cross-act events).
+    #[serde(rename = "type")]
+    pub event_type: Option<String>,
     pub act: Option<String>,
-    pub room_type: Option<String>,
     pub description: Option<String>,
+    /// Human-readable precondition strings (e.g. "Requires 2+ Strikes in deck").
     #[serde(default, deserialize_with = "null_as_default")]
-    pub choices: Vec<ApiEventChoice>,
+    pub preconditions: Vec<String>,
+    /// Top-level choices shown at the start of the event.
     #[serde(default, deserialize_with = "null_as_default")]
-    pub tags: Vec<String>,
+    pub options: Vec<ApiEventOption>,
+    /// Branching pages (multi-step events navigate through these).
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub pages: Vec<ApiEventPage>,
+    /// Relic IDs that can be obtained from this event.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub relics: Vec<String>,
+    pub epithet: Option<String>,
+    /// Character dialogue keyed by speaker/variant. Complex structure; stored raw.
+    pub dialogue: Option<serde_json::Value>,
+    pub image_url: Option<String>,
 }
 
 fn named_cache_path(name: &str) -> PathBuf {
