@@ -872,6 +872,13 @@ fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
+    if app.characters.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No character data loaded — check network connection or cache.",
+            Style::default().fg(Color::Red),
+        )));
+    }
+
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL)),
