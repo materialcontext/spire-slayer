@@ -175,6 +175,7 @@ pub fn compute_shop_hp_value(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     gold: u32,
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> f32 {
     const REMOVAL_COST: u32 = 75;
@@ -190,8 +191,8 @@ pub fn compute_shop_hp_value(
         .filter(|(i, _)| *i != worst_idx)
         .map(|(_, c)| c.clone())
         .collect();
-    let full_stats    = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng);
-    let reduced_stats = compute_deck_stats(&deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, rng);
+    let full_stats    = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    let reduced_stats = compute_deck_stats(&deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
     if full_stats.encounter_count == 0 {
         return if deck.iter().any(|c| c.cost == 255) { 12.0 } else { 3.0 };
     }
@@ -247,6 +248,7 @@ pub fn compute_map_ev(
     all_monsters: &[SpireApiMonster],
     all_events: &[SpireApiEvent],
     gold: u32,
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> MapEvData {
     // Simulate vs. normal (Monster) encounters for this sub-act.
@@ -256,7 +258,7 @@ pub fn compute_map_ev(
         .cloned()
         .collect();
     let normal_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, rng);
 
     // Simulate vs. elite encounters — elites give a guaranteed relic so the
     // star bonus reflects the relic reward even at moderate HP risk.
@@ -266,7 +268,7 @@ pub fn compute_map_ev(
         .cloned()
         .collect();
     let elite_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, relics, rng);
 
     // Simulate vs. boss encounters for this sub-act.
     let boss_enc: Vec<SpireApiEncounter> = all_encounters
@@ -275,7 +277,7 @@ pub fn compute_map_ev(
         .cloned()
         .collect();
     let boss_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, relics, rng);
 
     let normal = combat_node_ev("Normal", "gold + card", &normal_stats, 0);
     let elite_star_bonus: i8 = if elite_stats.survival_rate >= 0.70 { 1 } else { 0 };
@@ -347,7 +349,7 @@ pub fn compute_map_ev(
     let hp_ratio = hp as f32 / max_hp.max(1) as f32;
     let event_hp_delta = compute_event_hp_delta(all_events, sub_act, hp_ratio);
     let treasure_hp = 6.0_f32;
-    let shop_hp_value = compute_shop_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, rng);
+    let shop_hp_value = compute_shop_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng);
 
     MapEvData {
         sub_act: sub_act.to_string(),
@@ -458,7 +460,7 @@ mod tests {
         use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], 0, &mut rng);
+        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], 0, &[], &mut rng);
         assert_eq!(data.sub_act, "overgrowth");
         assert_eq!(data.treasure.stars, 3);
         assert_eq!(data.events.len(), 0);

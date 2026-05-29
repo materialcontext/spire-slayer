@@ -562,6 +562,7 @@ impl App {
         let hp = self.combat.as_ref().map(|c| c.player.hp).unwrap_or(80);
         let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
         let sub_act = self.act_filter.clone();
+        let relics = relic_ids_from_run(self.run.as_ref());
         let stats = compute_deck_stats(
             &deck,
             hp,
@@ -569,6 +570,7 @@ impl App {
             &sub_act,
             &self.encounters,
             &self.monsters,
+            &relics,
             rng,
         );
         self.status_message = if stats.encounter_count == 0 {
@@ -599,6 +601,7 @@ impl App {
             .unwrap_or_else(|| self.act_filter.clone());
 
         let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+        let relics = relic_ids_from_run(self.run.as_ref());
         let data = compute_map_ev(
             &deck,
             hp,
@@ -609,6 +612,7 @@ impl App {
             &self.monsters,
             &self.events,
             gold,
+            &relics,
             rng,
         );
         self.status_message = format!(
@@ -640,6 +644,7 @@ impl App {
             current_simulated,
             &self.events,
             gold,
+            &relics,
             rng,
         ));
 
@@ -1495,6 +1500,16 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+/// Convert human-readable relic names from RunState into SCREAMING_SNAKE_CASE IDs
+/// used by the combat relic system (e.g. "Burning Blood" → "BURNING_BLOOD").
+fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
+    run.map(|r| {
+        r.relics.iter()
+            .map(|rel| rel.name.to_uppercase().replace(' ', "_"))
+            .collect()
+    }).unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -52,6 +52,7 @@ pub fn compute_deck_stats(
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> DeckStats {
     const MAX_ENCOUNTERS: usize = 5;
@@ -112,7 +113,7 @@ pub fn compute_deck_stats(
 
     for enc in &sampled {
         for _ in 0..FULL_COMBATS_PER_ENC {
-            let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, rng);
+            let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, relics, rng);
             let r = run_combat(state, &GreedyDamagePolicy, rng);
             damages.push(r.damage_dealt as f32 / r.turns.max(1) as f32);
             blocks.push(r.block_absorbed as f32 / r.turns.max(1) as f32);
@@ -193,7 +194,7 @@ mod tests {
     fn intrinsics_no_encounters() {
         let mut rng = StdRng::seed_from_u64(7);
         let deck = ironclad::starter_deck();
-        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
         assert_eq!(stats.deck_size, 10);
         assert!((stats.cycle_turns - 2.0).abs() < 0.01);
         assert_eq!(stats.encounter_count, 0);
@@ -216,7 +217,7 @@ mod tests {
     fn block_card_count_correct() {
         let mut rng = StdRng::seed_from_u64(8);
         let deck = ironclad::starter_deck(); // 4× Defend
-        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
         assert_eq!(stats.block_card_count, 4);
     }
 }
