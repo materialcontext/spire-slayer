@@ -6,9 +6,8 @@ use crate::domain::card::{Card, Rarity};
 use crate::metrics::deck_dash::compute_deck_stats;
 use crate::metrics::map_ev::card_value_score;
 
-const REMAINING_FIGHTS: f32 = 5.0;
 /// Number of random shop samples used to estimate expected card value.
-const N_SHOP_SAMPLES: usize = 2;
+const N_SHOP_SAMPLES: usize = 1;
 /// Scale factor: 2-fight gauntlet → 5 remaining run fights.
 const GAUNTLET_TO_RUN_SCALE: f32 = 2.5;
 
@@ -56,7 +55,7 @@ pub fn score_shop_relic(
             deck, hp, max_hp, sub_act, all_encounters, all_monsters, &with_relic, rng,
         );
         let per_fight = baseline_mean_hp_loss - stats.mean_hp_loss;
-        let total = per_fight * REMAINING_FIGHTS;
+        let total = per_fight * crate::metrics::map_ev::remaining_fights(sub_act);
         if total > 0.5 {
             return RelicAdvice {
                 relic_index,
@@ -130,7 +129,7 @@ pub fn compute_removal_hp_value(
     let reduced = compute_deck_stats(
         &deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
     );
-    (base_loss - reduced.mean_hp_loss).max(0.0) * REMAINING_FIGHTS
+    (base_loss - reduced.mean_hp_loss).max(0.0) * crate::metrics::map_ev::remaining_fights(sub_act)
 }
 
 // ── Catalog-based card value simulation ───────────────────────────────────────
@@ -182,6 +181,7 @@ fn simulate_expected_card_value(
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> Option<f32> {
     if class_cards.is_empty() || all_encounters.is_empty() {
@@ -195,7 +195,7 @@ fn simulate_expected_card_value(
             continue;
         }
         let advice = crate::metrics::card_pick::sim_pick_score(
-            &offered, deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng,
+            &offered, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
         );
         let best_delta = advice
             .iter()
@@ -248,7 +248,7 @@ pub fn compute_shop_total_value(
     const REMOVAL_PRICE: u32 = 75;
 
     let expected_card_hp = simulate_expected_card_value(
-        class_cards, deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng,
+        class_cards, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
     ).unwrap_or(EXPECTED_CARD_HP);
 
     let mut candidates: Vec<(f32, u32)> = Vec::new();

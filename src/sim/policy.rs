@@ -57,11 +57,40 @@ pub trait Policy: Send + Sync {
 // ── GreedyDamagePolicy ─────────────────────────────────────────────────────
 
 /// Always plays the highest base-damage playable card.
+///
+/// Exception: when the combined incoming attack damage from all living enemies
+/// would kill the player (HP + current block ≤ incoming), and the player has
+/// a playable block card, prefer the highest-block card instead. This prevents
+/// the policy from ignoring lethal threats while mindlessly attacking.
 pub struct GreedyDamagePolicy;
 
 impl Policy for GreedyDamagePolicy {
     fn select_action(&self, state: &CombatState) -> Option<Action> {
         let target = select_target(state);
+
+        // Sum up all incoming attack damage this turn.
+        let incoming: u32 = state.enemies.iter()
+            .filter(|e| e.is_alive())
+            .map(|e| match e.intent {
+                Intent::Attack(d)               => d,
+                Intent::AttackMulti { damage, hits } => damage * hits,
+                _                               => 0,
+            })
+            .sum();
+
+        let lethal_threat = incoming > 0
+            && incoming >= state.player.hp + state.player.block;
+
+        if lethal_threat {
+            // Try to play the highest-block card to survive.
+            let best_block = state.hand.iter().enumerate()
+                .filter(|(_, c)| c.is_playable(state.energy) && c.base_block() > 0)
+                .max_by_key(|(_, c)| c.base_block());
+            if let Some((i, _)) = best_block {
+                return Some(Action { card_hand_idx: i, target_idx: target });
+            }
+        }
+
         state
             .hand
             .iter()
@@ -138,6 +167,30 @@ mod tests {
         let state = state_with_hand(vec![strike(), heavy_strike()]);
         let action = SequentialPolicy.select_action(&state).unwrap();
         assert_eq!(action.card_hand_idx, 0);
+    }
+
+    #[test]
+    fn greedy_blocks_when_lethal_threat() {
+        // Enemy attacks for 15; player has 10 HP and 0 block → lethal.
+        // Hand has Strike (6 dmg) and Defend (5 block). Should pick Defend.
+        let player = PlayerState::new(10, 80);
+        let enemy = EnemyState::new("Cultist", 50, Intent::Attack(15));
+        let mut state = CombatState::new(player, vec![enemy], vec![]);
+        state.hand = vec![strike(), defend()];
+        let action = GreedyDamagePolicy.select_action(&state).unwrap();
+        assert_eq!(action.card_hand_idx, 1, "should pick Defend (idx 1) to survive lethal");
+    }
+
+    #[test]
+    fn greedy_attacks_when_threat_not_lethal() {
+        // Enemy attacks for 5; player has 10 HP and 0 block → not lethal.
+        // Should still pick highest damage card.
+        let player = PlayerState::new(10, 80);
+        let enemy = EnemyState::new("Cultist", 50, Intent::Attack(5));
+        let mut state = CombatState::new(player, vec![enemy], vec![]);
+        state.hand = vec![defend(), heavy_strike()];
+        let action = GreedyDamagePolicy.select_action(&state).unwrap();
+        assert_eq!(action.card_hand_idx, 1, "should pick Heavy Strike (idx 1) when not lethal");
     }
 
     #[test]

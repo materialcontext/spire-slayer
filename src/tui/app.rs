@@ -710,8 +710,9 @@ impl App {
 
         let max_hp = run.max_hp;
         let ascension = run.ascension;
+        let current_hp = run.hp;
         let (simulated, costs) = if let Some(ref me) = self.map_ev {
-            (true, NodeCosts::from_map_ev(me, max_hp, ascension))
+            (true, NodeCosts::from_map_ev(me, max_hp, current_hp, ascension))
         } else {
             (false, NodeCosts::defaults(max_hp, ascension))
         };
@@ -1064,7 +1065,7 @@ impl App {
         // ── Score cards (sim-backed when encounter data is present) ────────
         let card_advice = crate::metrics::card_pick::sim_pick_score(
             &shop_cards, &deck, hp, max_hp, &sub_act,
-            &self.encounters, &self.monsters, rng,
+            &self.encounters, &self.monsters, &current_relics, rng,
         );
 
         // ── Baseline combat sim (shared across relic scoring + removal) ────
@@ -1265,6 +1266,7 @@ impl App {
         let max_hp = self.run.as_ref().map(|r| r.max_hp)
             .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
             .unwrap_or(80);
+        let relics = relic_ids_from_run(self.run.as_ref());
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -1273,6 +1275,7 @@ impl App {
             &self.act_filter,
             &self.encounters,
             &self.monsters,
+            &relics,
             rng,
         );
         self.offered_cards = offered;

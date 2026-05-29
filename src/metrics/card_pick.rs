@@ -37,6 +37,9 @@ struct GauntletResult {
 }
 
 /// Run `n` chained 2-encounter playouts, returning aggregate stats.
+///
+/// Relics are now passed through so relic effects (Burning Blood heals, Nunchaku
+/// energy, etc.) are correctly reflected in combat outcomes.
 fn eval_gauntlet(
     deck: &[Card],
     hp: u32,
@@ -44,6 +47,7 @@ fn eval_gauntlet(
     enc1: &SpireApiEncounter,
     enc2: &SpireApiEncounter,
     all_monsters: &[SpireApiMonster],
+    relics: &[String],
     n: u32,
     rng: &mut impl Rng,
 ) -> GauntletResult {
@@ -51,14 +55,14 @@ fn eval_gauntlet(
     let mut hp_deltas: Vec<i32> = Vec::with_capacity(n as usize);
 
     for _ in 0..n {
-        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, &[], rng);
+        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, relics, rng);
         let r1 = run_combat(s1, &GreedyDamagePolicy, rng);
         if !r1.player_alive {
             hp_deltas.push(-(hp as i32));
             continue;
         }
         let hp2 = r1.final_state.player.hp;
-        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, &[], rng);
+        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, relics, rng);
         let r2 = run_combat(s2, &GreedyDamagePolicy, rng);
         hp_deltas.push(r1.player_hp_delta + r2.player_hp_delta);
         if r2.player_alive {
@@ -85,17 +89,33 @@ fn sorted_percentile(sorted: &[f32], p: f32) -> f32 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-fn gauntlet_score(g: &GauntletResult) -> f32 {
-    g.win_rate * 2.0 + g.mean_hp_delta / 80.0
+/// Composite score for ranking gauntlet results.
+///
+/// Uses the actual `max_hp` for HP normalization rather than a hardcoded 80,
+/// so Silent (75 HP) and other classes aren't systematically mis-scored.
+fn gauntlet_score(g: &GauntletResult, max_hp: u32) -> f32 {
+    g.win_rate * 2.0 + g.mean_hp_delta / max_hp.max(1) as f32
+}
+
+/// Average two GauntletResults (for multi-pair sampling).
+fn avg_gauntlet(a: GauntletResult, b: GauntletResult) -> GauntletResult {
+    GauntletResult {
+        win_rate:      (a.win_rate      + b.win_rate)      / 2.0,
+        mean_hp_delta: (a.mean_hp_delta + b.mean_hp_delta) / 2.0,
+        hp_loss_p50:   (a.hp_loss_p50   + b.hp_loss_p50)   / 2.0,
+    }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Simulator-backed card pick evaluation.
 ///
-/// Samples 2 upcoming encounters from the current act, chains them, and
-/// compares each offered card (plus skip) by survival rate and HP trajectory.
-/// Falls back to heuristic scoring when encounter data is unavailable.
+/// Samples TWO independent encounter pairs from the current act and averages
+/// the gauntlet results across both. This halves the variance from a single
+/// unlucky encounter draw while keeping total combat count the same (2 pairs
+/// × N_PER_PAIR gauntlets vs 1 pair × N gauntlets).
+///
+/// Relics are passed through so combat outcomes reflect the player's full kit.
 ///
 /// The returned `Vec` is sorted best-first. The skip option has
 /// `card_index == usize::MAX`.
@@ -107,6 +127,7 @@ pub fn sim_pick_score(
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> Vec<CardAdvice> {
     let pool: Vec<&SpireApiEncounter> = all_encounters
@@ -122,13 +143,20 @@ pub fn sim_pick_score(
         return heuristic_advice(offered, deck);
     }
 
-    let enc1 = *pool.choose(rng).unwrap();
-    let enc2 = *pool.choose(rng).unwrap();
-    const N: u32 = 30;
+    // Two independent encounter pairs; N_PER_PAIR each → same total combats as N=30 single-pair.
+    const N_PER_PAIR: u32 = 15;
+    let enc_a1 = *pool.choose(rng).unwrap();
+    let enc_a2 = *pool.choose(rng).unwrap();
+    let enc_b1 = *pool.choose(rng).unwrap();
+    let enc_b2 = *pool.choose(rng).unwrap();
 
-    // Skip baseline
-    let skip = eval_gauntlet(deck, hp, max_hp, enc1, enc2, all_monsters, N, rng);
-    let skip_score = gauntlet_score(&skip);
+    // Skip baseline — averaged over both encounter pairs.
+    let skip = {
+        let ga = eval_gauntlet(deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, N_PER_PAIR, rng);
+        let gb = eval_gauntlet(deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, N_PER_PAIR, rng);
+        avg_gauntlet(ga, gb)
+    };
+    let skip_score = gauntlet_score(&skip, max_hp);
 
     // Evaluate each card option
     let mut advice: Vec<CardAdvice> = offered
@@ -137,8 +165,10 @@ pub fn sim_pick_score(
         .map(|(i, card)| {
             let mut new_deck = deck.to_vec();
             new_deck.push(card.clone());
-            let g = eval_gauntlet(&new_deck, hp, max_hp, enc1, enc2, all_monsters, N, rng);
-            let score = gauntlet_score(&g);
+            let ga = eval_gauntlet(&new_deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, N_PER_PAIR, rng);
+            let gb = eval_gauntlet(&new_deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, N_PER_PAIR, rng);
+            let g = avg_gauntlet(ga, gb);
+            let score = gauntlet_score(&g, max_hp);
             CardAdvice {
                 card_index: i,
                 score,
@@ -341,7 +371,7 @@ mod tests {
     fn sim_pick_fallback_when_no_encounters() {
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
         assert!(!advice.is_empty());
         // All scores non-negative when heuristic fallback
         for a in &advice {
@@ -353,7 +383,7 @@ mod tests {
     fn sim_pick_includes_skip_option() {
         let mut rng = StdRng::seed_from_u64(2);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
         assert!(advice.iter().any(|a| a.card_index == usize::MAX));
     }
 
@@ -361,7 +391,7 @@ mod tests {
     fn sim_pick_sorted_descending() {
         let mut rng = StdRng::seed_from_u64(3);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
         for w in advice.windows(2) {
             assert!(w[0].score >= w[1].score);
         }
