@@ -1488,17 +1488,28 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
 
     // Cards section
     let n_cards = app.shop_cards.len();
+    let n_relics = app.shop_relics.len();
+    let gold = app.run.as_ref().map(|r| r.gold).unwrap_or(0);
+
     let card_lines: Vec<Line> = app.shop_cards.iter().enumerate().map(|(i, card)| {
         let is_cursor = i == app.shop_cursor;
-        let advice = app.shop_card_advice.iter().find(|a| a.card_index == i);
-        let prefix = if is_cursor { "▶ " } else { "  " };
-        let price = app.shop_card_prices.get(i).copied().unwrap_or(0);
+        let is_best  = app.shop_best_buy_cursor == Some(i);
+        let advice   = app.shop_card_advice.iter().find(|a| a.card_index == i);
+        let price    = app.shop_card_prices.get(i).copied().unwrap_or(0);
+        let can_afford = gold >= price;
         let is_discounted = app.shop_discounted_card_idx == Some(i);
+
+        let best_marker    = if is_best { "★ " } else { "  " };
         let discount_marker = if is_discounted { " [SALE]" } else { "" };
-        let reason = advice.map(|a| a.reason.as_str()).unwrap_or("");
-        let label = format!("{prefix}{}{discount_marker}  {price}g   {reason}", card.name);
+        let reason         = advice.map(|a| a.reason.as_str()).unwrap_or("");
+        let label = format!("{best_marker}{}{discount_marker}  {price}g   {reason}", card.name);
+
         let style = if is_cursor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best {
+            Style::default().fg(Color::LightGreen)
         } else if is_discounted {
             Style::default().fg(Color::LightGreen)
         } else {
@@ -1515,13 +1526,28 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
     // Relics section
     let relic_lines: Vec<Line> = app.shop_relics.iter().enumerate().map(|(i, relic)| {
         let cursor_idx = n_cards + i;
-        let is_cursor = cursor_idx == app.shop_cursor;
-        let prefix = if is_cursor { "▶ " } else { "  " };
-        let price = app.shop_relic_prices.get(i).copied().unwrap_or(0);
-        let desc = strip_tags(relic.description.as_deref().unwrap_or(""));
-        let label = format!("{prefix}{}  {price}g — {:.55}", relic.name, desc);
+        let is_cursor  = cursor_idx == app.shop_cursor;
+        let is_best    = app.shop_best_buy_cursor == Some(cursor_idx);
+        let price      = app.shop_relic_prices.get(i).copied().unwrap_or(0);
+        let can_afford = gold >= price;
+
+        let ra = app.shop_relic_advice.get(i);
+        let hp_str   = ra.map(|a| format!("{:.0}HP", a.hp_value)).unwrap_or_default();
+        let reason   = ra.map(|a| a.reason.as_str()).unwrap_or("");
+        let sim_mark = if ra.map(|a| a.simulated).unwrap_or(false) { "" } else { "" };
+
+        let best_marker = if is_best { "★ " } else { "  " };
+        let label = format!(
+            "{best_marker}{}  {price}g  {hp_str}{sim_mark} — {reason}",
+            relic.name
+        );
+
         let style = if is_cursor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best {
+            Style::default().fg(Color::LightGreen)
         } else {
             Style::default().fg(Color::LightYellow)
         };
@@ -1534,17 +1560,28 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(relics_widget, rows[2]);
 
     // Card Removal Service
-    let removal_cursor = n_cards + app.shop_relics.len();
+    let removal_cursor  = n_cards + n_relics;
     let removal_is_cursor = app.shop_cursor == removal_cursor;
+    let is_best_removal = app.shop_best_buy_cursor == Some(removal_cursor);
     let removal_line = if app.shop_has_removal {
-        let price = app.shop_removal_price;
-        let prefix = if removal_is_cursor { "▶ " } else { "  " };
+        let price      = app.shop_removal_price;
+        let can_afford = gold >= price;
+        let hp_val     = app.shop_removal_hp_value;
+        let hp_str     = if hp_val > 0.0 { format!("  {hp_val:.0}HP saved") } else { String::new() };
+        let best_marker = if is_best_removal { "★ " } else { "  " };
         let style = if removal_is_cursor {
             Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best_removal {
+            Style::default().fg(Color::LightGreen)
         } else {
             Style::default().fg(Color::Gray)
         };
-        Line::from(vec![Span::styled(format!("{prefix}Card Removal Service  {price}g"), style)])
+        Line::from(vec![Span::styled(
+            format!("{best_marker}Card Removal Service  {price}g{hp_str}"),
+            style,
+        )])
     } else {
         Line::from(vec![Span::styled("  Card Removal Service  [sold]", Style::default().fg(Color::DarkGray))])
     };

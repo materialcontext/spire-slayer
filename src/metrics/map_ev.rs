@@ -151,7 +151,7 @@ pub fn compute_event_hp_delta(
 
 // ── Card value scoring ────────────────────────────────────────────────────────
 
-fn card_value_score(card: &Card) -> f32 {
+pub(crate) fn card_value_score(card: &Card) -> f32 {
     if card.cost == 255 { return -100.0; }
     let mut score = 0.0f32;
     for effect in &card.effects {
@@ -166,38 +166,6 @@ fn card_value_score(card: &Card) -> f32 {
     score
 }
 
-/// Estimate the HP value of removing the worst card via the shop.
-pub fn compute_shop_hp_value(
-    deck: &[Card],
-    hp: u32,
-    max_hp: u32,
-    sub_act: &str,
-    all_encounters: &[SpireApiEncounter],
-    all_monsters: &[SpireApiMonster],
-    gold: u32,
-    relics: &[String],
-    rng: &mut impl Rng,
-) -> f32 {
-    const REMOVAL_COST: u32 = 75;
-    const REMAINING_FIGHTS: f32 = 5.0;
-    if gold < REMOVAL_COST || deck.len() <= 1 { return 0.0; }
-    let worst_idx = deck.iter().enumerate()
-        .min_by(|(_, a), (_, b)|
-            card_value_score(a).partial_cmp(&card_value_score(b))
-                .unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let deck_reduced: Vec<Card> = deck.iter().enumerate()
-        .filter(|(i, _)| *i != worst_idx)
-        .map(|(_, c)| c.clone())
-        .collect();
-    let full_stats    = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
-    let reduced_stats = compute_deck_stats(&deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
-    if full_stats.encounter_count == 0 {
-        return if deck.iter().any(|c| c.cost == 255) { 12.0 } else { 3.0 };
-    }
-    (full_stats.mean_hp_loss - reduced_stats.mean_hp_loss).max(0.0) * REMAINING_FIGHTS
-}
 
 // ── Core computation ──────────────────────────────────────────────────────────
 
@@ -349,7 +317,9 @@ pub fn compute_map_ev(
     let hp_ratio = hp as f32 / max_hp.max(1) as f32;
     let event_hp_delta = compute_event_hp_delta(all_events, sub_act, hp_ratio);
     let treasure_hp = 6.0_f32;
-    let shop_hp_value = compute_shop_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng);
+    let shop_hp_value = crate::metrics::shop_ev::compute_shop_total_value(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng,
+    );
 
     MapEvData {
         sub_act: sub_act.to_string(),

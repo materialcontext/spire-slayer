@@ -104,6 +104,10 @@ pub struct App {
     pub shop_discounted_card_idx: Option<usize>,
     pub shop_has_removal: bool,
     pub shop_removal_price: u32,
+    pub shop_removal_hp_value: f32,
+    pub shop_relic_advice: Vec<crate::metrics::shop_ev::RelicAdvice>,
+    /// Cursor index of the best-value-per-gold item the player can currently afford.
+    pub shop_best_buy_cursor: Option<usize>,
     pub shop_cursor: usize,
     // Ancient boon state
     /// Ancient data loaded at startup.
@@ -179,6 +183,9 @@ impl App {
             shop_discounted_card_idx: None,
             shop_has_removal: false,
             shop_removal_price: 75,
+            shop_removal_hp_value: 0.0,
+            shop_relic_advice: Vec::new(),
+            shop_best_buy_cursor: None,
             shop_cursor: 0,
             ancients,
             ancient_id: String::new(),
@@ -1045,25 +1052,110 @@ impl App {
         let removals = self.run.as_ref().map(|r| r.card_removals_bought).unwrap_or(0);
         let removal_price = 75 + 25 * removals;
 
-        // ── Score the cards ────────────────────────────────────────────────
-        let advice = if let Some(run) = &self.run {
-            pick_score(&shop_cards, run)
+        // ── Sim context ────────────────────────────────────────────────────
+        let deck = self.run.as_ref().map(|r| r.deck.clone())
+            .unwrap_or_else(|| crate::domain::catalog::ironclad::starter_deck());
+        let hp     = self.run.as_ref().map(|r| r.hp).unwrap_or(80);
+        let max_hp = self.run.as_ref().map(|r| r.max_hp).unwrap_or(80);
+        let sub_act = self.run.as_ref().map(|r| r.sub_act.clone())
+            .unwrap_or_else(|| self.act_filter.clone());
+        let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+        let current_relics = relic_ids_from_run(self.run.as_ref());
+
+        // ── Score cards (sim-backed when encounter data is present) ────────
+        let card_advice = crate::metrics::card_pick::sim_pick_score(
+            &shop_cards, &deck, hp, max_hp, &sub_act,
+            &self.encounters, &self.monsters, rng,
+        );
+
+        // ── Baseline combat sim (shared across relic scoring + removal) ────
+        let baseline = crate::metrics::deck_dash::compute_deck_stats(
+            &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters, &current_relics, rng,
+        );
+        let has_data = baseline.encounter_count > 0;
+        let baseline_hp_loss = baseline.mean_hp_loss;
+
+        // ── Score relics ───────────────────────────────────────────────────
+        let relic_advice: Vec<crate::metrics::shop_ev::RelicAdvice> = shop_relics
+            .iter()
+            .enumerate()
+            .map(|(i, relic)| {
+                crate::metrics::shop_ev::score_shop_relic(
+                    i,
+                    &relic.id,
+                    relic.rarity.as_deref().unwrap_or(""),
+                    &deck, hp, max_hp, &sub_act,
+                    &self.encounters, &self.monsters,
+                    &current_relics,
+                    baseline_hp_loss,
+                    has_data,
+                    rng,
+                )
+            })
+            .collect();
+
+        // ── Score removal ──────────────────────────────────────────────────
+        let removal_hp = if gold >= removal_price {
+            crate::metrics::shop_ev::compute_removal_hp_value(
+                &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters,
+                &current_relics, baseline_hp_loss, has_data, rng,
+            )
         } else {
-            shop_cards.iter().enumerate().map(|(i, _)| crate::metrics::card_pick::CardAdvice {
-                card_index: i, score: 0.0, reason: String::new(),
-                win_rate: 0.0, mean_hp_delta: 0.0, hp_loss_p50: 0.0,
-                delta_win_rate: 0.0, delta_hp: 0.0,
-            }).collect()
+            0.0
         };
 
+        // ── Unified best-buy ranking ───────────────────────────────────────
+        // Build (cursor_position, hp_value, price) for all affordable items,
+        // rank by HP/gold ratio, mark the top pick.
+        let n_cards_usize = shop_cards.len();
+        let n_relics_usize = shop_relics.len();
+
+        let mut ranked: Vec<(usize, f32, u32)> = Vec::new();
+
+        // Cards (use delta_hp from sim if available, else heuristic score)
+        for advice in &card_advice {
+            let idx = advice.card_index;
+            if idx == usize::MAX { continue; } // skip option
+            let price = shop_card_prices.get(idx).copied().unwrap_or(u32::MAX);
+            // Scale 2-fight gauntlet delta to 5 remaining fights
+            let hp_val = if advice.delta_hp > 0.0 {
+                advice.delta_hp * 2.5
+            } else {
+                advice.score * 15.0 // heuristic fallback
+            };
+            ranked.push((idx, hp_val, price));
+        }
+
+        // Relics
+        for ra in &relic_advice {
+            let price = shop_relic_prices.get(ra.relic_index).copied().unwrap_or(u32::MAX);
+            ranked.push((n_cards_usize + ra.relic_index, ra.hp_value, price));
+        }
+
+        // Removal
+        if removal_hp > 0.0 {
+            ranked.push((n_cards_usize + n_relics_usize, removal_hp, removal_price));
+        }
+
+        // Sort by HP/gold ratio; best affordable item wins
+        ranked.sort_by(|a, b| {
+            let ra = if a.2 > 0 { a.1 / a.2 as f32 } else { 0.0 };
+            let rb = if b.2 > 0 { b.1 / b.2 as f32 } else { 0.0 };
+            rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let best_buy_cursor = ranked.iter().find(|(_, _, price)| gold >= *price).map(|(cursor, _, _)| *cursor);
+
         self.shop_cards = shop_cards;
-        self.shop_card_advice = advice;
+        self.shop_card_advice = card_advice;
         self.shop_card_prices = shop_card_prices;
         self.shop_relics = shop_relics;
         self.shop_relic_prices = shop_relic_prices;
         self.shop_discounted_card_idx = discounted_idx;
         self.shop_has_removal = true;
         self.shop_removal_price = removal_price;
+        self.shop_removal_hp_value = removal_hp;
+        self.shop_relic_advice = relic_advice;
+        self.shop_best_buy_cursor = best_buy_cursor;
         self.shop_cursor = 0;
         self.mode = AppMode::Shop;
     }

@@ -125,8 +125,8 @@ fn act_node_costs(
     let event_hp = crate::metrics::map_ev::compute_event_hp_delta(
         all_events, sub_act, hp as f32 / max_hp as f32
     );
-    let shop_hp = crate::metrics::map_ev::compute_shop_hp_value(
-        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng
+    let shop_hp = crate::metrics::shop_ev::compute_shop_total_value(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng,
     );
     costs.event_hp_delta = event_hp;
     costs.treasure_hp    = 6.0;
