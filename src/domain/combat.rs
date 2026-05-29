@@ -39,16 +39,6 @@ pub enum Intent {
     Unknown,
 }
 
-impl Intent {
-    /// Total incoming damage represented by this intent.
-    pub fn damage(&self) -> u32 {
-        match self {
-            Intent::Attack(d) => *d,
-            Intent::AttackMulti { damage, hits } => damage * hits,
-            _ => 0,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnemyState {
@@ -152,13 +142,6 @@ impl CombatState {
         self.is_won() || self.is_lost()
     }
 
-    pub fn living_enemies(&self) -> impl Iterator<Item = &EnemyState> {
-        self.enemies.iter().filter(|e| e.is_alive())
-    }
-
-    pub fn total_cards(&self) -> usize {
-        self.hand.len() + self.draw_pile.len() + self.discard_pile.len()
-    }
 }
 
 #[cfg(test)]
@@ -206,13 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn intent_attack_damage() {
-        assert_eq!(Intent::Attack(12).damage(), 12);
-        assert_eq!(Intent::AttackMulti { damage: 5, hits: 3 }.damage(), 15);
-        assert_eq!(Intent::Block.damage(), 0);
-    }
-
-    #[test]
     fn total_cards_counts_all_zones() {
         let player = PlayerState::new(80, 80);
         let enemy = EnemyState::new("Cultist", 50, Intent::Unknown);
@@ -223,6 +199,6 @@ mod tests {
             let card = state.draw_pile.remove(0);
             state.hand.push(card);
         }
-        assert_eq!(state.total_cards(), 10);
+        assert_eq!(state.hand.len() + state.draw_pile.len() + state.discard_pile.len(), 10);
     }
 }

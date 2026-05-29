@@ -949,7 +949,6 @@ impl App {
     fn open_shop(&mut self, rng: &mut impl rand::Rng) {
         use rand::seq::SliceRandom;
         use crate::domain::card::{CardType, Rarity};
-        use crate::metrics::card_pick::pick_score;
 
         let class_color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
         let class_pool = catalog::cards_for_character(class_color);

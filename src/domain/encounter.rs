@@ -24,16 +24,6 @@ pub fn normalize_act(act: &str) -> &'static str {
     "other"
 }
 
-/// All sub-act canonical names for a given act number (1-indexed).
-pub fn sub_acts_for_act(act: u8) -> &'static [&'static str] {
-    match act {
-        1 => &["overgrowth", "underdocks"],
-        2 => &["hive"],
-        3 => &["glory"],
-        _ => &[],
-    }
-}
-
 pub fn encounters_for_act<'a>(
     encounters: &'a [SpireApiEncounter],
     sub_act: &str,

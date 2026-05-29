@@ -33,7 +33,6 @@ pub struct Card {
     pub cost: u8,
     pub card_type: CardType,
     pub rarity: Rarity,
-    pub upgraded: bool,
     pub effects: Vec<CardEffect>,
     pub exhausts: bool,
     pub ethereal: bool,
@@ -55,7 +54,6 @@ impl Card {
             cost,
             card_type,
             rarity,
-            upgraded: false,
             effects,
             exhausts: false,
             ethereal: false,
@@ -75,11 +73,6 @@ impl Card {
 
     pub fn with_innate(mut self) -> Self {
         self.innate = true;
-        self
-    }
-
-    pub fn upgrade(mut self) -> Self {
-        self.upgraded = true;
         self
     }
 
