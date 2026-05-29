@@ -766,6 +766,7 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
                 self.load_pick(offered, rng, AppMode::MapView);
             }
@@ -777,6 +778,7 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_combat_hp_loss(RoomType::Boss, rng);
                 self.apply_post_combat_relics();
                 self.post_pick_action = Some(PostPickAction::BossActTransition);
                 self.load_pick(offered, rng, AppMode::MapView);
@@ -1292,6 +1294,55 @@ impl App {
                 run.deck.push(card);
                 self.status_message = format!("Added {} to deck ({} cards)", name, run.deck.len());
             }
+        }
+    }
+
+    /// Deduct expected HP loss for a combat room from the current run.
+    ///
+    /// Simulates the act's encounter pool for the given room type to compute
+    /// mean HP loss. Falls back to hard-coded heuristics when no encounter data
+    /// exists. HP is clamped to 1 (the run advisor doesn't model in-combat death).
+    fn apply_combat_hp_loss(&mut self, room_type: crate::domain::map::RoomType, rng: &mut impl rand::Rng) {
+        use crate::domain::encounter::normalize_act;
+        use crate::domain::map::RoomType;
+
+        let Some(ref run) = self.run else { return; };
+        let sub_act   = run.sub_act.clone();
+        let deck      = run.deck.clone();
+        let hp        = run.hp;
+        let max_hp    = run.max_hp;
+        let relics    = relic_ids_from_run(Some(run));
+
+        let room_str = match room_type {
+            RoomType::Monster  => "Monster",
+            RoomType::Elite    => "Elite",
+            RoomType::Boss     => "Boss",
+            _                  => return,
+        };
+
+        let pool: Vec<SpireApiEncounter> = self.encounters.iter()
+            .filter(|e| {
+                let act = e.act.as_deref().map(normalize_act).unwrap_or("other");
+                act == sub_act && e.room_type.as_deref() == Some(room_str)
+            })
+            .cloned()
+            .collect();
+
+        let loss = if pool.is_empty() {
+            match room_type {
+                RoomType::Monster => 7,
+                RoomType::Elite   => 15,
+                RoomType::Boss    => 25,
+                _                 => 0,
+            }
+        } else {
+            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, rng);
+            stats.mean_hp_loss.round() as u32
+        };
+
+        if let Some(ref mut run) = self.run {
+            run.hp = run.hp.saturating_sub(loss).max(1);
+            self.status_message = format!("Combat: -{} HP  ({} HP remaining)", loss, run.hp);
         }
     }
 

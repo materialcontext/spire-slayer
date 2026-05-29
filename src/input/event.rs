@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ pub fn spawn_event_loop(tick_rate_ms: u64) -> mpsc::Receiver<AppEvent> {
         loop {
             match event::poll(tick) {
                 Ok(true) => match event::read() {
-                    Ok(Event::Key(key)) => {
+                    Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                         // Ctrl-C / Ctrl-Q both quit
                         let app_event = if key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
