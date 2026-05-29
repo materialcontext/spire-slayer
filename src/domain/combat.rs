@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use crate::domain::ai::{AiRuntime, EnemyAiScript};
 use crate::domain::card::Card;
@@ -98,6 +98,18 @@ pub struct CombatState {
     pub energy_max: u8,
     pub hand_size: u8,
     pub turn: u32,
+    /// Canonical relic IDs the player holds (SCREAMING_SNAKE_CASE).
+    pub relics: HashSet<String>,
+    /// True for Elite combats (affects relics like Sling of Courage).
+    pub is_elite: bool,
+    // Per-turn counters, reset at start of each turn
+    pub attacks_this_turn: u32,
+    pub skills_this_turn: u32,
+    // Per-combat counters
+    pub attacks_this_combat: u32,
+    pub hp_lost_this_combat: bool,
+    pub hp_lost_this_turn: u32,
+    pub lizard_tail_triggered: bool,
 }
 
 impl CombatState {
@@ -113,7 +125,19 @@ impl CombatState {
             energy_max: 3,
             hand_size: 5,
             turn: 1,
+            relics: HashSet::new(),
+            is_elite: false,
+            attacks_this_turn: 0,
+            skills_this_turn: 0,
+            attacks_this_combat: 0,
+            hp_lost_this_combat: false,
+            hp_lost_this_turn: 0,
+            lizard_tail_triggered: false,
         }
+    }
+
+    pub fn has_relic(&self, id: &str) -> bool {
+        self.relics.contains(id)
     }
 
     pub fn is_won(&self) -> bool {

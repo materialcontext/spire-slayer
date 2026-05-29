@@ -48,6 +48,9 @@ fn map_buff(power: &str) -> Option<BuffType> {
         "Dexterity" => Some(BuffType::Dexterity),
         "Thorns" => Some(BuffType::Thorns),
         "Metallicize" | "Plating" => Some(BuffType::Plating),
+        "Intangible" => Some(BuffType::Intangible),
+        "Barricade" => Some(BuffType::Barricade),
+        "NoxiousFumes" | "Noxious Fumes" => Some(BuffType::NoxiousFumes),
         _ => None,
     }
 }
@@ -114,6 +117,29 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
             CardEffect::Passive(format!("Apply {} {}.", stacks, pw.power))
         };
         effects.push(effect);
+    }
+
+    // Special-case cards whose API structured fields don't capture their primary mechanic.
+    match api.id.as_str() {
+        "BODY_SLAM" => {
+            // Deal damage equal to current Block (api.damage is 0 and gets filtered out)
+            effects.push(CardEffect::DamageEqBlock);
+        }
+        "NOXIOUS_FUMES" => {
+            // At the start of each turn, apply 2 Poison to all enemies
+            effects.push(CardEffect::ApplyToSelf {
+                buff: BuffType::NoxiousFumes,
+                stacks: 2,
+            });
+        }
+        "BARRICADE" => {
+            // Block is not removed at the start of your turn
+            effects.push(CardEffect::ApplyToSelf {
+                buff: BuffType::Barricade,
+                stacks: 1,
+            });
+        }
+        _ => {}
     }
 
     // For cards with no structured effects, use the description as a passive.

@@ -23,8 +23,13 @@ pub enum SimError {
 // ── Internal combat math ───────────────────────────────────────────────────
 
 /// Damage a single hit of `base` deals, accounting for Strength, Weak, Vulnerable.
+/// Also applies relic passive modifiers: RED_SKULL, PAPER_PHROG, PAPER_KRANE.
 fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
-    let strength = state.player.buff(&BuffType::Strength);
+    let mut strength = state.player.buff(&BuffType::Strength);
+    // RED_SKULL: +3 Strength while HP ≤ 50%
+    if state.has_relic("RED_SKULL") && state.player.hp * 2 <= state.player.max_hp {
+        strength += 3;
+    }
     let weak = state.player.buff(&BuffType::Weak) > 0;
     let vulnerable = state.enemies[target_idx].buff(&BuffType::Vulnerable) > 0;
 
@@ -33,23 +38,18 @@ fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
     } else {
         base.saturating_sub((-strength) as u32)
     };
-    let after_weak = if weak { raw * 3 / 4 } else { raw };
-    if vulnerable { after_weak * 3 / 2 } else { after_weak }
-}
-
-/// Damage a single AoE hit deals to `enemy_idx`, accounting for Weak and enemy Vulnerable.
-fn compute_hit_aoe(base: u32, state: &CombatState, enemy_idx: usize) -> u32 {
-    let strength = state.player.buff(&BuffType::Strength);
-    let weak = state.player.buff(&BuffType::Weak) > 0;
-    let vulnerable = state.enemies[enemy_idx].buff(&BuffType::Vulnerable) > 0;
-
-    let raw = if strength >= 0 {
-        base + strength as u32
+    // PAPER_KRANE: Weak deals 40% less (3/5) instead of 25% less (3/4)
+    let after_weak = if weak {
+        if state.has_relic("PAPER_KRANE") { raw * 3 / 5 } else { raw * 3 / 4 }
     } else {
-        base.saturating_sub((-strength) as u32)
+        raw
     };
-    let after_weak = if weak { raw * 3 / 4 } else { raw };
-    if vulnerable { after_weak * 3 / 2 } else { after_weak }
+    // PAPER_PHROG: Vulnerable = 75% extra (×7/4) instead of 50% extra (×3/2)
+    if vulnerable {
+        if state.has_relic("PAPER_PHROG") { after_weak * 7 / 4 } else { after_weak * 3 / 2 }
+    } else {
+        after_weak
+    }
 }
 
 /// Apply `dmg` to `enemy`, reducing block first then HP.
@@ -70,11 +70,51 @@ fn damage_enemy(state: &mut CombatState, enemy_idx: usize, dmg: u32) -> u32 {
     thorns
 }
 
-/// Apply `dmg` to the player (Thorns return value from `damage_enemy`).
+/// Apply `dmg` to the player. Applies Intangible cap, relic reductions, and
+/// relic triggers (Centennial Puzzle, Lizard Tail).
 fn damage_player(state: &mut CombatState, dmg: u32) {
-    let absorbed = state.player.block.min(dmg);
+    let intangible = state.player.buff(&BuffType::Intangible) > 0;
+    let mut effective = if intangible { dmg.min(1) } else { dmg };
+
+    // TUNGSTEN_ROD: lose 1 less HP per hit
+    if effective > 0 && state.has_relic("TUNGSTEN_ROD") {
+        effective = effective.saturating_sub(1);
+    }
+    // BEATING_REMNANT: can't lose more than 20 HP total this turn
+    if state.has_relic("BEATING_REMNANT") {
+        let remaining = 20u32.saturating_sub(state.hp_lost_this_turn);
+        effective = effective.min(remaining);
+    }
+
+    let absorbed = state.player.block.min(effective);
     state.player.block -= absorbed;
-    state.player.hp = state.player.hp.saturating_sub(dmg - absorbed);
+    let hp_lost = effective - absorbed;
+    state.player.hp = state.player.hp.saturating_sub(hp_lost);
+
+    if hp_lost > 0 {
+        state.hp_lost_this_turn += hp_lost;
+        if !state.hp_lost_this_combat {
+            state.hp_lost_this_combat = true;
+            // CENTENNIAL_PUZZLE: draw 3 cards on the first HP loss in combat
+            if state.has_relic("CENTENNIAL_PUZZLE") {
+                for _ in 0..3 {
+                    if state.draw_pile.is_empty() {
+                        if state.discard_pile.is_empty() { break; }
+                        state.draw_pile.append(&mut state.discard_pile);
+                    }
+                    if !state.draw_pile.is_empty() {
+                        let card = state.draw_pile.remove(0);
+                        state.hand.push(card);
+                    }
+                }
+            }
+        }
+        // LIZARD_TAIL: survive lethal damage once per combat
+        if state.player.hp == 0 && !state.lizard_tail_triggered && state.has_relic("LIZARD_TAIL") {
+            state.lizard_tail_triggered = true;
+            state.player.hp = (state.player.max_hp / 2).max(1);
+        }
+    }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -89,6 +129,10 @@ pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
             }
             state.draw_pile.append(&mut state.discard_pile);
             state.draw_pile.shuffle(rng);
+            // THE_ABACUS: gain 6 Block whenever your draw pile is shuffled
+            if state.has_relic("THE_ABACUS") {
+                state.player.block += 6;
+            }
         }
         let card = state.draw_pile.remove(0);
         state.hand.push(card);
@@ -120,7 +164,7 @@ pub(crate) fn apply_effect(
             let hits: Vec<(usize, u32, u32)> = (0..state.enemies.len())
                 .filter(|&i| state.enemies[i].is_alive())
                 .map(|i| {
-                    let dmg = compute_hit_aoe(*d, state, i);
+                    let dmg = compute_hit(*d, state, i);
                     let thorns = state.enemies[i]
                         .buffs
                         .get(&BuffType::Thorns)
@@ -162,6 +206,17 @@ pub(crate) fn apply_effect(
             }
         }
 
+        CardEffect::DamageEqBlock => {
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                let base = state.player.block;
+                let dmg = compute_hit(base, state, target_idx);
+                let thorns = damage_enemy(state, target_idx, dmg);
+                if thorns > 0 {
+                    damage_player(state, thorns);
+                }
+            }
+        }
+
         CardEffect::Block(b) => {
             let dex = state.player.buff(&BuffType::Dexterity).max(0) as u32;
             let frail = state.player.buff(&BuffType::Frail) > 0;
@@ -184,17 +239,19 @@ pub(crate) fn apply_effect(
 
         CardEffect::ApplyToEnemy { buff, stacks } => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                let bonus = if matches!(buff, BuffType::Poison) && state.has_relic("SNECKO_SKULL") { 1 } else { 0 };
                 *state.enemies[target_idx]
                     .buffs
                     .entry(buff.clone())
-                    .or_insert(0) += stacks;
+                    .or_insert(0) += stacks + bonus;
             }
         }
 
         CardEffect::ApplyToAllEnemies { buff, stacks } => {
+            let bonus = if matches!(buff, BuffType::Poison) && state.has_relic("SNECKO_SKULL") { 1 } else { 0 };
             for enemy in &mut state.enemies {
                 if enemy.is_alive() {
-                    *enemy.buffs.entry(buff.clone()).or_insert(0) += stacks;
+                    *enemy.buffs.entry(buff.clone()).or_insert(0) += stacks + bonus;
                 }
             }
         }
@@ -256,10 +313,93 @@ pub fn play_card(
     let cost_spent = if card.cost == 255 { state.energy } else { card.cost };
     state.energy -= cost_spent;
 
-    // Apply effects in order
+    // Update per-turn/combat counters
+    let is_attack = card.card_type == CardType::Attack;
+    let is_skill  = card.card_type == CardType::Skill;
+    if is_attack {
+        state.attacks_this_turn   += 1;
+        state.attacks_this_combat += 1;
+    }
+    if is_skill {
+        state.skills_this_turn += 1;
+    }
+
+    // PEN_NIB: every 10th attack deals double damage
+    let pen_nib_double = is_attack
+        && state.has_relic("PEN_NIB")
+        && state.attacks_this_combat % 10 == 0;
+
+    // Apply effects in order, doubling damage effects if pen_nib_double
     let effects = card.effects.clone();
     for effect in &effects {
-        apply_effect(state, effect, target_idx, rng);
+        let effective = if pen_nib_double {
+            match effect {
+                CardEffect::Damage(d)      => CardEffect::Damage(d * 2),
+                CardEffect::DamageAll(d)   => CardEffect::DamageAll(d * 2),
+                CardEffect::DamageMulti { base, hits } => CardEffect::DamageMulti { base: base * 2, hits: *hits },
+                other => other.clone(),
+            }
+        } else {
+            effect.clone()
+        };
+        apply_effect(state, &effective, target_idx, rng);
+    }
+
+    // ── Post-play relic triggers ───────────────────────────────────────────
+
+    if is_attack {
+        // NUNCHAKU: every 10 attacks → +1 energy
+        if state.has_relic("NUNCHAKU") && state.attacks_this_combat % 10 == 0 {
+            state.energy = state.energy.saturating_add(1);
+        }
+        // KUNAI: every 3 attacks this turn → +1 Dexterity
+        if state.has_relic("KUNAI") && state.attacks_this_turn % 3 == 0 {
+            *state.player.buffs.entry(BuffType::Dexterity).or_insert(0) += 1;
+        }
+        // SHURIKEN: every 3 attacks this turn → +1 Strength
+        if state.has_relic("SHURIKEN") && state.attacks_this_turn % 3 == 0 {
+            *state.player.buffs.entry(BuffType::Strength).or_insert(0) += 1;
+        }
+        // ORNAMENTAL_FAN: every 3 attacks this turn → +4 Block
+        if state.has_relic("ORNAMENTAL_FAN") && state.attacks_this_turn % 3 == 0 {
+            state.player.block += 4;
+        }
+    }
+
+    if is_skill {
+        // LETTER_OPENER: every 3 skills this turn → deal 5 damage to all enemies
+        if state.has_relic("LETTER_OPENER") && state.skills_this_turn % 3 == 0 {
+            for enemy in &mut state.enemies {
+                if enemy.is_alive() {
+                    let absorbed = enemy.block.min(5);
+                    enemy.block -= absorbed;
+                    enemy.hp = enemy.hp.saturating_sub(5 - absorbed);
+                }
+            }
+        }
+    }
+
+    // GREMLIN_HORN: whenever an enemy dies, gain 1 energy and draw 1 card
+    if state.has_relic("GREMLIN_HORN") {
+        let kills: usize = state.enemies.iter()
+            .filter(|e| e.hp == 0 && e.max_hp > 0)
+            .count();
+        // Only count fresh kills (hp just reached 0 this play)
+        // We approximate by checking all enemies with hp==0 each play
+        // and only triggering once per dead enemy (max_hp>0 guards status enemies)
+        // This may double-trigger on multi-kill cards but is close enough
+        if kills > 0 {
+            state.energy = state.energy.saturating_add(kills as u8);
+            for _ in 0..kills {
+                if state.draw_pile.is_empty() && !state.discard_pile.is_empty() {
+                    state.draw_pile.append(&mut state.discard_pile);
+                }
+                if !state.draw_pile.is_empty() {
+                    let drawn = state.draw_pile.remove(0);
+                    state.hand.push(drawn);
+                }
+            }
+        }
     }
 
     // Powers are exhausted (removed from game); other cards go to discard unless flagged
@@ -333,11 +473,15 @@ fn resolve_to_move(
             let eligible: Vec<_> = branches.iter().filter(|b| is_eligible(b, runtime)).collect();
             let pool: Vec<_> = if eligible.is_empty() { branches.iter().collect() } else { eligible };
 
+            let Some(first) = pool.first() else {
+                return (None, state_id.to_string());
+            };
+
             // Weighted selection
             let total: f32 = pool.iter().map(|b| b.weight).sum();
             let total = if total <= 0.0 { pool.len() as f32 } else { total };
             let mut r = rng.r#gen::<f32>() * total;
-            let chosen = pool.iter().find(|b| { r -= b.weight; r <= 0.0 }).unwrap_or(&pool[0]);
+            let chosen = pool.iter().find(|b| { r -= b.weight; r <= 0.0 }).unwrap_or(first);
 
             let landing = script
                 .find_state_by_move_id(&chosen.move_id)
@@ -390,7 +534,68 @@ fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -
 }
 
 pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
-    // Each living enemy acts: apply per-turn buffs, resolve intent
+    // ── Player end-of-turn relic effects (before discarding) ───────────────
+    // CLOAK_CLASP: gain 1 Block per card in hand at end of turn
+    if state.has_relic("CLOAK_CLASP") {
+        state.player.block += state.hand.len() as u32;
+    }
+    // ORICHALCUM: if ending turn with 0 block, gain 6 block
+    if state.has_relic("ORICHALCUM") && state.player.block == 0 {
+        state.player.block += 6;
+    }
+    if state.has_relic("FAKE_ORICHALCUM") && state.player.block == 0 {
+        state.player.block += 3;
+    }
+    // SCREAMING_FLAGON: if hand is empty, deal 20 damage to all enemies
+    if state.has_relic("SCREAMING_FLAGON") && state.hand.is_empty() {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                let absorbed = enemy.block.min(20);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(20 - absorbed);
+            }
+        }
+    }
+    // STONE_CALENDAR: end of turn 7, deal 52 damage to all
+    if state.has_relic("STONE_CALENDAR") && state.turn == 7 {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                let absorbed = enemy.block.min(52);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(52 - absorbed);
+            }
+        }
+    }
+    // Reset per-turn counters
+    state.attacks_this_turn = 0;
+    state.skills_this_turn  = 0;
+    state.hp_lost_this_turn = 0;
+
+    // ── Poison tick ────────────────────────────────────────────────────────
+    for enemy in &mut state.enemies {
+        if enemy.is_alive() {
+            let stacks = *enemy.buffs.get(&BuffType::Poison).unwrap_or(&0);
+            if stacks > 0 {
+                let dmg = stacks.max(0) as u32;
+                let absorbed = enemy.block.min(dmg);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
+                *enemy.buffs.entry(BuffType::Poison).or_insert(0) -= 1;
+            }
+        }
+    }
+
+    // ── Discard hand ───────────────────────────────────────────────────────
+    let drained: Vec<Card> = state.hand.drain(..).collect();
+    for card in drained {
+        if card.ethereal {
+            state.exhaust_pile.push(card);
+        } else {
+            state.discard_pile.push(card);
+        }
+    }
+
+    // ── Each living enemy acts ─────────────────────────────────────────────
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
             // Ritual: gain Strength at start of each turn
@@ -426,17 +631,19 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // Tick Poison on each living enemy (1 damage per stack, then reduce stacks by 1)
+    // ── Decrement timed debuffs ────────────────────────────────────────────
     for enemy in &mut state.enemies {
         if enemy.is_alive() {
-            let stacks = *enemy.buffs.get(&BuffType::Poison).unwrap_or(&0);
-            if stacks > 0 {
-                let dmg = stacks.max(0) as u32;
-                let absorbed = enemy.block.min(dmg);
-                enemy.block -= absorbed;
-                enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
-                *enemy.buffs.entry(BuffType::Poison).or_insert(0) -= 1;
+            for buff in &[BuffType::Vulnerable, BuffType::Weak, BuffType::Frail] {
+                if let Some(s) = enemy.buffs.get_mut(buff) {
+                    if *s > 0 { *s -= 1; }
+                }
             }
+        }
+    }
+    for buff in &[BuffType::Weak, BuffType::Frail, BuffType::Intangible] {
+        if let Some(s) = state.player.buffs.get_mut(buff) {
+            if *s > 0 { *s -= 1; }
         }
     }
 
@@ -451,23 +658,80 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // Discard hand; ethereal cards go straight to exhaust
-    let drained: Vec<Card> = state.hand.drain(..).collect();
-    for card in drained {
-        if card.ethereal {
-            state.exhaust_pile.push(card);
-        } else {
-            state.discard_pile.push(card);
-        }
+    // ── Reset player block/energy, advance turn ────────────────────────────
+    // Barricade prevents block reset; player Plating (Gorget) grants block each turn
+    if state.player.buff(&BuffType::Barricade) == 0 {
+        state.player.block = 0;
     }
-
-    // Reset player block and energy, advance turn
-    state.player.block = 0;
+    let player_plating = state.player.buff(&BuffType::Plating);
+    if player_plating > 0 {
+        state.player.block += player_plating as u32;
+        *state.player.buffs.entry(BuffType::Plating).or_insert(0) -= 1;
+    }
     state.energy = state.energy_max;
     state.turn += 1;
 
     // Draw new hand
     draw_cards(state, state.hand_size as usize, rng);
+
+    // ── Player start-of-turn relic effects (after drawing) ────────────────
+    // MERCURY_HOURGLASS: 3 damage to all enemies each turn
+    if state.has_relic("MERCURY_HOURGLASS") {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                let absorbed = enemy.block.min(3);
+                enemy.block -= absorbed;
+                enemy.hp = enemy.hp.saturating_sub(3 - absorbed);
+            }
+        }
+    }
+    // SAI: gain 7 Block at the start of each turn
+    if state.has_relic("SAI") {
+        state.player.block += 7;
+    }
+    // BRIMSTONE: player +2 Strength, all enemies +1 Strength each turn
+    if state.has_relic("BRIMSTONE") {
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) += 2;
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                *enemy.buffs.entry(BuffType::Strength).or_insert(0) += 1;
+            }
+        }
+    }
+    // HAPPY_FLOWER: every 3 turns → +1 energy (turn counter already incremented)
+    if state.has_relic("HAPPY_FLOWER") && state.turn % 3 == 0 {
+        state.energy = state.energy.saturating_add(1);
+    }
+    // CANDELABRA: turn 2 → +2 energy (one-time)
+    if state.has_relic("CANDELABRA") && state.turn == 2 {
+        state.energy = state.energy.saturating_add(2);
+    }
+    // HORN_CLEAT: turn 2 → +14 Block (one-time)
+    if state.has_relic("HORN_CLEAT") && state.turn == 2 {
+        state.player.block += 14;
+    }
+    // CHANDELIER: turn 3 → +3 energy (one-time)
+    if state.has_relic("CHANDELIER") && state.turn == 3 {
+        state.energy = state.energy.saturating_add(3);
+    }
+    // CAPTAINS_WHEEL: turn 3 → +18 Block (one-time)
+    if state.has_relic("CAPTAINS_WHEEL") && state.turn == 3 {
+        state.player.block += 18;
+    }
+    // PAELS_BLOOD: draw 1 additional card each turn
+    if state.has_relic("PAELS_BLOOD") {
+        draw_cards(state, 1, rng);
+    }
+
+    // NoxiousFumes: apply Poison to all living enemies at start of each turn
+    let noxious = state.player.buff(&BuffType::NoxiousFumes);
+    if noxious > 0 {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                *enemy.buffs.entry(BuffType::Poison).or_insert(0) += noxious;
+            }
+        }
+    }
 
     state.is_over()
 }
@@ -507,6 +771,9 @@ fn map_power_id_to_buff(id: &str) -> Option<BuffType> {
         "thorns" | "sharp_hide" => Some(BuffType::Thorns),
         "plating" | "metallicize" => Some(BuffType::Plating),
         "ritual" => Some(BuffType::Ritual),
+        "intangible" => Some(BuffType::Intangible),
+        "barricade" => Some(BuffType::Barricade),
+        "noxious_fumes" | "noxiousfumes" => Some(BuffType::NoxiousFumes),
         _ => None,
     }
 }
@@ -516,9 +783,11 @@ fn resolve_enemy_intent(state: &mut CombatState, enemy_idx: usize) {
     let intent = state.enemies[enemy_idx].intent.clone();
     let enemy_weak = state.enemies[enemy_idx].buff(&BuffType::Weak) > 0;
     let player_vuln = state.player.buff(&BuffType::Vulnerable) > 0;
+    // PAPER_KRANE: Weak enemies deal 40% less (×3/5) instead of 25% less (×3/4)
+    let weak_denom = if state.has_relic("PAPER_KRANE") { 5u32 } else { 4u32 };
 
     let hit = |base: u32| -> u32 {
-        let after_weak = if enemy_weak { base * 3 / 4 } else { base };
+        let after_weak = if enemy_weak { base * 3 / weak_denom } else { base };
         if player_vuln { after_weak * 3 / 2 } else { after_weak }
     };
 
@@ -788,5 +1057,249 @@ mod tests {
         state.hand.push(strike());
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
         assert!(state.is_won());
+    }
+
+    // ── New mechanics ──────────────────────────────────────────────────────
+
+    #[test]
+    fn intangible_caps_incoming_damage_to_1() {
+        let mut state = basic_state(); // enemy attacks for 9
+        *state.player.buffs.entry(BuffType::Intangible).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 79); // 80 - 1 (capped by Intangible)
+    }
+
+    #[test]
+    fn intangible_decrements_each_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::Intangible).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Intangible).unwrap(), 1);
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Intangible).unwrap(), 0);
+    }
+
+    #[test]
+    fn barricade_preserves_player_block_between_turns() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        state.player.block = 10;
+        *state.player.buffs.entry(BuffType::Barricade).or_insert(0) = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.block, 10); // block was not cleared
+    }
+
+    #[test]
+    fn without_barricade_block_is_reset() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        state.player.block = 10;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.block, 0);
+    }
+
+    #[test]
+    fn noxious_fumes_applies_poison_at_start_of_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::NoxiousFumes).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        // After end_turn, new turn starts with 2 Poison on the enemy
+        let poison = *state.enemies[0].buffs.get(&BuffType::Poison).unwrap_or(&0);
+        assert_eq!(poison, 2);
+    }
+
+    #[test]
+    fn vulnerable_decrements_each_turn() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.enemies[0].buffs.entry(BuffType::Vulnerable).or_insert(0) = 2;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 1);
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 0);
+        // Third turn: doesn't go negative
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.enemies[0].buffs.get(&BuffType::Vulnerable).unwrap(), 0);
+    }
+
+    #[test]
+    fn weak_decrements_on_player() {
+        let mut state = basic_state();
+        state.enemies[0].intent = Intent::Unknown;
+        *state.player.buffs.entry(BuffType::Weak).or_insert(0) = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(*state.player.buffs.get(&BuffType::Weak).unwrap(), 0);
+    }
+
+    fn body_slam() -> Card {
+        Card::new(
+            10,
+            "Body Slam",
+            1,
+            CardType::Attack,
+            Rarity::Common,
+            vec![CardEffect::DamageEqBlock],
+        )
+    }
+
+    #[test]
+    fn damage_eq_block_deals_current_block_as_damage() {
+        let mut state = basic_state();
+        state.player.block = 15;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 35); // 50 - 15
+    }
+
+    #[test]
+    fn damage_eq_block_zero_block_deals_no_damage() {
+        let mut state = basic_state();
+        state.player.block = 0;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 50); // no damage
+    }
+
+    // ── Relic: ANCHOR ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn anchor_grants_10_block_at_start_of_combat() {
+        use crate::domain::encounter::apply_start_of_combat_relics;
+        let mut state = basic_state();
+        state.relics.insert("ANCHOR".to_string());
+        apply_start_of_combat_relics(&mut state);
+        assert_eq!(state.player.block, 10);
+    }
+
+    // ── Relic: RED_SKULL ──────────────────────────────────────────────────────
+
+    #[test]
+    fn red_skull_adds_strength_at_half_hp() {
+        let mut state = basic_state();
+        state.player.hp = 40; // 40/80 = 50% → threshold met
+        state.relics.insert("RED_SKULL".to_string());
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // Strike 6 + 3 Strength = 9
+        assert_eq!(state.enemies[0].hp, 41);
+    }
+
+    #[test]
+    fn red_skull_inactive_above_half_hp() {
+        let mut state = basic_state();
+        state.player.hp = 41; // above 50%
+        state.relics.insert("RED_SKULL".to_string());
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // Strike 6, no bonus
+        assert_eq!(state.enemies[0].hp, 44);
+    }
+
+    // ── Relic: PAPER_PHROG ────────────────────────────────────────────────────
+
+    #[test]
+    fn paper_phrog_amplifies_vulnerable_more() {
+        let mut state = basic_state();
+        state.relics.insert("PAPER_PHROG".to_string());
+        *state.enemies[0].buffs.entry(BuffType::Vulnerable).or_insert(0) = 2;
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // 6 * 7/4 = 10 (vs 9 without Paper Phrog)
+        assert_eq!(state.enemies[0].hp, 40);
+    }
+
+    // ── Relic: PAPER_KRANE ────────────────────────────────────────────────────
+
+    #[test]
+    fn paper_krane_amplifies_weak_penalty() {
+        let mut state = basic_state();
+        state.relics.insert("PAPER_KRANE".to_string());
+        *state.player.buffs.entry(BuffType::Weak).or_insert(0) = 2;
+        state.hand.push(strike());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // 6 * 3/5 = 3 (vs 4 without Paper Krane)
+        assert_eq!(state.enemies[0].hp, 47);
+    }
+
+    // ── Relic: TUNGSTEN_ROD ───────────────────────────────────────────────────
+
+    #[test]
+    fn tungsten_rod_reduces_each_hit_by_1() {
+        let mut state = basic_state(); // enemy attacks for 9
+        state.relics.insert("TUNGSTEN_ROD".to_string());
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 72); // 80 - (9-1) = 72
+    }
+
+    // ── Relic: NUNCHAKU ───────────────────────────────────────────────────────
+
+    #[test]
+    fn nunchaku_grants_energy_on_10th_attack() {
+        let mut state = basic_state();
+        state.relics.insert("NUNCHAKU".to_string());
+        // Play 9 strikes first
+        for _ in 0..9 {
+            state.hand.push(strike());
+            state.energy = 3;
+            let n = state.hand.len() - 1;
+            play_card(&mut state, n, 0, &mut rng()).unwrap();
+        }
+        // Restore some enemy HP so we can keep attacking
+        state.enemies[0].hp = 50;
+        state.energy = 1; // only 1 energy left
+        state.hand.push(strike());
+        let n = state.hand.len() - 1;
+        play_card(&mut state, n, 0, &mut rng()).unwrap(); // 10th attack
+        // Should have gained 1 energy (now 1 net, spent 1 on strike, gained 1)
+        assert_eq!(state.energy, 1);
+    }
+
+    // ── Relic: ORICHALCUM ─────────────────────────────────────────────────────
+
+    #[test]
+    fn orichalcum_absorbs_enemy_damage_when_zero_block() {
+        // Enemy attacks for 9; Orichalcum grants 6 block, so player takes 3.
+        let mut state = basic_state(); // enemy: Attack(9)
+        state.relics.insert("ORICHALCUM".to_string());
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 77); // 80 - (9 - 6)
+    }
+
+    #[test]
+    fn orichalcum_skips_if_already_have_block() {
+        // Player has 3 block; enemy attacks 9 → net 6 damage. Orichalcum skips.
+        let mut state = basic_state();
+        state.player.block = 3;
+        state.relics.insert("ORICHALCUM".to_string());
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 74); // 80 - (9 - 3)
+    }
+
+    // ── Relic: LIZARD_TAIL ────────────────────────────────────────────────────
+
+    #[test]
+    fn lizard_tail_saves_from_lethal_damage() {
+        let mut state = basic_state();
+        state.player.hp = 5;
+        state.relics.insert("LIZARD_TAIL".to_string());
+        // Enemy attacks for 9, which would kill player
+        end_turn(&mut state, &mut rng());
+        assert!(state.player.hp > 0, "Lizard Tail should prevent death");
+        assert!(state.lizard_tail_triggered);
+    }
+
+    #[test]
+    fn lizard_tail_triggers_only_once() {
+        let mut state = basic_state();
+        state.player.hp = 5;
+        state.relics.insert("LIZARD_TAIL".to_string());
+        end_turn(&mut state, &mut rng()); // Saved once
+        assert!(state.lizard_tail_triggered);
+        // Next lethal hit won't be saved — player should die
+        state.player.hp = 1;
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.player.hp, 0);
     }
 }

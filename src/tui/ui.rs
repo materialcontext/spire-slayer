@@ -23,9 +23,13 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::DeckDash => render_deck_dash(frame, app, area),
         AppMode::MapEv   => render_map_ev(frame, app, area),
         AppMode::MapView  => render_map_view(frame, app, area),
-        AppMode::RestSite  => render_rest_site(frame, app, area),
-        AppMode::EventRoom => render_event_room(frame, app, area),
-        AppMode::Exiting   => {}
+        AppMode::RestSite     => render_rest_site(frame, app, area),
+        AppMode::EventRoom    => render_event_room(frame, app, area),
+        AppMode::TreasureRoom => render_treasure_room(frame, app, area),
+        AppMode::Shop         => render_shop(frame, app, area),
+        AppMode::AncientBoon  => render_ancient_boon(frame, app, area),
+        AppMode::Victory      => render_victory(frame, app, area),
+        AppMode::Exiting      => {}
     }
 }
 
@@ -231,8 +235,12 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
         format!("  {}", app.status_message)
     };
 
+    let hint = match app.mode {
+        AppMode::MapView => "  [v]ev  [d]eck  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
+        _                => "  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit",
+    };
     let line = Line::from(vec![
-        Span::raw("  [s]im  [d]eck  [p]ick  [v]map  [e]dit  [n]ew  [q]uit"),
+        Span::raw(hint),
         Span::raw(status),
         Span::raw("          Threat: "),
         Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
@@ -593,6 +601,7 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
         for node in [
             &data.normal,
             &data.elite,
+            &data.boss,
             &data.treasure,
             &data.rest,
             &data.shop,
@@ -692,6 +701,69 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled(
                 "  (no events for this sub-act — change filter with [o/u/h/g])",
                 Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        // ── Run Projection ─────────────────────────────────────────────────────
+        if let Some(ref ev) = app.run_ev {
+            lines.push(Line::from(Span::raw("")));
+            let sim_tag = if ev.simulated { "[sim]" } else { "[est]" };
+            lines.push(Line::from(Span::styled(
+                format!("  ── Run Projection {sim_tag} ──────────────────────────────"),
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            let delta = ev.current_act_remaining_delta;
+            let after_boss = ev.hp_after_current_boss.max(0.0);
+            let sign = if delta >= 0.0 { "+" } else { "" };
+            let boss_color = if after_boss <= 0.0 { Color::Red } else if after_boss < 30.0 { Color::Yellow } else { Color::White };
+            let cur_act_label = format!("Act {} ({})", ev.current_act_number, capitalize(&ev.current_sub_act));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {cur_act_label:<16}  {sign}{delta:.0} HP   → {after_boss:.0} HP after boss",
+                ),
+                Style::default().fg(boss_color),
+            )));
+
+            if ev.hp_after_current_boss > 0.0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  Post-act heal:  → {:.0} HP", ev.hp_after_current_heal),
+                    Style::default().fg(Color::LightGreen),
+                )));
+            }
+
+            for act_ev in &ev.future_acts {
+                let name = format!("Act {} ({})", act_ev.act_number, capitalize(&act_ev.sub_act));
+                let d = act_ev.expected_delta;
+                let sign = if d >= 0.0 { "+" } else { "" };
+                let exit = act_ev.exit_hp.max(0.0);
+                let color = if exit <= 0.0 { Color::Red } else if exit < 30.0 { Color::Yellow } else { Color::White };
+                lines.push(Line::from(Span::styled(
+                    format!("  {name:<16}  {sign}{d:.0} HP   → {exit:.0} HP after boss"),
+                    Style::default().fg(color),
+                )));
+                if act_ev.exit_hp > 0.0 && act_ev.post_heal_hp != act_ev.exit_hp {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Post-act heal:  → {:.0} HP", act_ev.post_heal_hp),
+                        Style::default().fg(Color::LightGreen),
+                    )));
+                }
+                if act_ev.exit_hp <= 0.0 {
+                    break;
+                }
+            }
+
+            let final_hp = ev.projected_final_hp.max(0.0);
+            let (final_color, final_tag) = if final_hp <= 0.0 {
+                (Color::Red, " ⚠ LETHAL")
+            } else if final_hp < 20.0 {
+                (Color::Yellow, " ⚠ CRITICAL")
+            } else {
+                (Color::LightGreen, "")
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  Projected finish: {final_hp:.0} HP{final_tag}"),
+                Style::default().fg(final_color).add_modifier(Modifier::BOLD),
             )));
         }
     } else {
@@ -972,7 +1044,7 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
+            Constraint::Length(2), // header + run stats
             Constraint::Min(0),    // map grid
             Constraint::Length(2), // choices bar
             Constraint::Length(1), // status
@@ -985,13 +1057,20 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
         .and_then(|r| r.map_pos)
         .map(|p| format!("Floor {}/15", p.floor + 1))
         .unwrap_or_else(|| "Floor —/15".to_string());
-    let header = format!(
-        " MAP — {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
+    let header_line1 = format!(
+        " MAP \u{2014} {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
         capitalize(sub_act), floor_label,
     );
+    let run_stats_line = app.run.as_ref().map(|r| {
+        let relic_names: Vec<&str> = r.relics.iter().map(|rel| rel.name.as_str()).collect();
+        let relics_str = if relic_names.is_empty() { "none".to_string() } else { relic_names.join(", ") };
+        format!(" HP {}/{}  Gold {}  | {}", r.hp, r.max_hp, r.gold, relics_str)
+    }).unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(header)
-            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Paragraph::new(vec![
+            Line::from(Span::styled(header_line1, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(run_stats_line, Style::default().fg(Color::DarkGray))),
+        ]),
         chunks[0],
     );
 
@@ -1097,15 +1176,34 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             let rt_label = map.room_type(cf, col as usize)
                 .map(|r| r.label())
                 .unwrap_or("?");
-            let label = format!(" col{}[{}] ", col, rt_label);
-            choice_spans.push(Span::styled(
-                label,
-                if i == app.map_cursor {
-                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::LightGreen)
-                },
-            ));
+            // Annotate with path HP cost if available
+            let path_info = app.path_choices.iter().find(|pc| pc.col == col);
+            let path_str = path_info.map(|pc| {
+                let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
+                format!("{sign}{:.0}hp +{:.0}g", pc.total_hp_delta, pc.expected_gold)
+            }).unwrap_or_default();
+            let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
+            let label = if path_str.is_empty() {
+                format!(" col{}[{}] ", col, rt_label)
+            } else if best_marker {
+                format!(" col{}[{}] {} ▲ ", col, rt_label, path_str)
+            } else {
+                format!(" col{}[{}] {} ", col, rt_label, path_str)
+            };
+            let is_cursor = i == app.map_cursor;
+            let style = if is_cursor {
+                Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+            } else if best_marker {
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::LightGreen)
+            };
+            choice_spans.push(Span::styled(label, style));
+        }
+        // Show whether costs are from simulation or defaults
+        if let Some(pc) = app.path_choices.first() {
+            let tag = if pc.simulated { " [sim]" } else { " [est]" };
+            choice_spans.push(Span::styled(tag, Style::default().fg(Color::DarkGray)));
         }
     }
     frame.render_widget(
@@ -1302,12 +1400,320 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, rows[2]);
 }
 
+fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(6),     // relic display
+            Constraint::Length(1),  // hint
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let header = Paragraph::new(format!(" TREASURE CHEST   Floor {floor}   ↑↓ select  Enter confirm  Esc back"))
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    let (relic_name, relic_desc) = if let Some(ref relic) = app.offered_relic {
+        let name = relic.name.clone();
+        let desc = strip_tags(relic.description.as_deref().unwrap_or("No description."));
+        (name, desc)
+    } else {
+        ("No relic found".to_string(), String::new())
+    };
+
+    let options = ["[T]ake", "[S]kip"];
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![Span::styled(
+            format!("  {relic_name}"),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            format!("  {relic_desc}"),
+            Style::default().fg(Color::White),
+        )]),
+        Line::from(""),
+    ];
+
+    for (i, label) in options.iter().enumerate() {
+        let is_cursor = i == app.relic_cursor;
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![Span::styled(format!("{prefix}{label}"), style)]));
+    }
+
+    let relic_widget = Paragraph::new(Text::from(lines))
+        .block(Block::default().borders(Borders::ALL).title(" Relic "))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(relic_widget, rows[1]);
+
+    let hint = Paragraph::new("  ↑↓ select  Enter confirm  Esc back")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[2]);
+
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[3]);
+}
+
+fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::map_ev::strip_tags;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // header
+            Constraint::Min(8),     // cards
+            Constraint::Length(6),  // relics
+            Constraint::Length(2),  // removal service
+            Constraint::Length(1),  // hint
+            Constraint::Length(1),  // status
+        ])
+        .split(area);
+
+    let floor = app.run.as_ref().map(|r| r.floor).unwrap_or(0);
+    let gold = app.run.as_ref().map(|r| r.gold).unwrap_or(0);
+    let header = Paragraph::new(format!(" SHOP   Floor {floor}   Gold: {gold}g   ↑↓ navigate  Enter buy  Esc leave"))
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    // Cards section
+    let n_cards = app.shop_cards.len();
+    let n_relics = app.shop_relics.len();
+    let gold = app.run.as_ref().map(|r| r.gold).unwrap_or(0);
+
+    let card_lines: Vec<Line> = app.shop_cards.iter().enumerate().map(|(i, card)| {
+        let is_cursor = i == app.shop_cursor;
+        let is_best  = app.shop_best_buy_cursor == Some(i);
+        let advice   = app.shop_card_advice.iter().find(|a| a.card_index == i);
+        let price    = app.shop_card_prices.get(i).copied().unwrap_or(0);
+        let can_afford = gold >= price;
+        let is_discounted = app.shop_discounted_card_idx == Some(i);
+
+        let best_marker    = if is_best { "★ " } else { "  " };
+        let discount_marker = if is_discounted { " [SALE]" } else { "" };
+        let reason         = advice.map(|a| a.reason.as_str()).unwrap_or("");
+        let label = format!("{best_marker}{}{discount_marker}  {price}g   {reason}", card.name);
+
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best {
+            Style::default().fg(Color::LightGreen)
+        } else if is_discounted {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![Span::styled(label, style)])
+    }).collect();
+
+    let cards_widget = Paragraph::new(Text::from(card_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Cards (5 class · 2 colorless) "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(cards_widget, rows[1]);
+
+    // Relics section
+    let relic_lines: Vec<Line> = app.shop_relics.iter().enumerate().map(|(i, relic)| {
+        let cursor_idx = n_cards + i;
+        let is_cursor  = cursor_idx == app.shop_cursor;
+        let is_best    = app.shop_best_buy_cursor == Some(cursor_idx);
+        let price      = app.shop_relic_prices.get(i).copied().unwrap_or(0);
+        let can_afford = gold >= price;
+
+        let ra = app.shop_relic_advice.get(i);
+        let hp_str   = ra.map(|a| format!("{:.0}HP", a.hp_value)).unwrap_or_default();
+        let reason   = ra.map(|a| a.reason.as_str()).unwrap_or("");
+        let sim_mark = if ra.map(|a| a.simulated).unwrap_or(false) { "" } else { "" };
+
+        let best_marker = if is_best { "★ " } else { "  " };
+        let label = format!(
+            "{best_marker}{}  {price}g  {hp_str}{sim_mark} — {reason}",
+            relic.name
+        );
+
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::LightYellow)
+        };
+        Line::from(vec![Span::styled(label, style)])
+    }).collect();
+
+    let relics_widget = Paragraph::new(Text::from(relic_lines))
+        .block(Block::default().borders(Borders::ALL).title(" Relics "))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(relics_widget, rows[2]);
+
+    // Card Removal Service
+    let removal_cursor  = n_cards + n_relics;
+    let removal_is_cursor = app.shop_cursor == removal_cursor;
+    let is_best_removal = app.shop_best_buy_cursor == Some(removal_cursor);
+    let removal_line = if app.shop_has_removal {
+        let price      = app.shop_removal_price;
+        let can_afford = gold >= price;
+        let hp_val     = app.shop_removal_hp_value;
+        let hp_str     = if hp_val > 0.0 { format!("  {hp_val:.0}HP saved") } else { String::new() };
+        let best_marker = if is_best_removal { "★ " } else { "  " };
+        let style = if removal_is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else if is_best_removal {
+            Style::default().fg(Color::LightGreen)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Line::from(vec![Span::styled(
+            format!("{best_marker}Card Removal Service  {price}g{hp_str}"),
+            style,
+        )])
+    } else {
+        Line::from(vec![Span::styled("  Card Removal Service  [sold]", Style::default().fg(Color::DarkGray))])
+    };
+    let removal_widget = Paragraph::new(Text::from(vec![removal_line]))
+        .block(Block::default().borders(Borders::ALL).title(" Services "));
+    frame.render_widget(removal_widget, rows[3]);
+
+    let hint = Paragraph::new("  ↑↓ navigate  Enter buy  Esc leave")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[4]);
+
+    let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
+    let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[5]);
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         None    => String::new(),
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
+}
+
+fn render_victory(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new("  \u{2605}  VICTORY \u{2014} The Spire Has Been Conquered!  \u{2605}")
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw("")));
+    if let Some(run) = &app.run {
+        lines.push(Line::from(Span::styled(
+            format!("  Class:    {}", run.class),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Final HP: {}/{}", run.hp, run.max_hp),
+            Style::default().fg(Color::LightGreen),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Gold:     {}", run.gold),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Deck:     {} cards", run.deck.len()),
+            Style::default().fg(Color::White),
+        )));
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "  Relics:".to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        for relic in &run.relics {
+            lines.push(Line::from(Span::styled(
+                format!("    \u{2022} {}", relic.name),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+
+    frame.render_widget(
+        Paragraph::new("  [n/Enter] New Run  [q] Quit"),
+        rows[2],
+    );
+}
+
+fn render_ancient_boon(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header with ancient name
+            Constraint::Min(0),    // boon choices
+            Constraint::Length(1), // hint
+        ])
+        .split(area);
+
+    let header = format!(
+        "  {} — {}",
+        app.ancient_name,
+        if app.ancient_is_act_transition { "Act Transition Boon" } else { "Starting Boon" }
+    );
+    frame.render_widget(
+        Paragraph::new(header)
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw("")));
+    for (i, relic) in app.ancient_boons.iter().enumerate() {
+        let cursor = if i == app.ancient_cursor { "▶ " } else { "  " };
+        let rarity = relic.rarity.as_deref().unwrap_or("Relic");
+        let name_style = if i == app.ancient_cursor {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}  [{}]", cursor, relic.name, rarity),
+            name_style,
+        )));
+        let desc = relic.description.as_deref().unwrap_or("");
+        lines.push(Line::from(Span::styled(
+            format!("     {}", desc),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default()),
+        rows[1],
+    );
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] take boon  [q] quit");
+    frame.render_widget(hint, rows[2]);
 }
 
 #[cfg(test)]
@@ -1322,7 +1728,7 @@ mod tests {
     }
 
     fn make_empty_app() -> App {
-        App::new(vec![], vec![], vec![], vec![])
+        App::new(vec![], vec![], vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -1345,7 +1751,7 @@ mod tests {
             dialogues: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![ch], vec![], vec![], vec![]);
+        let app = App::new(vec![ch], vec![], vec![], vec![], vec![], vec![]);
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 
@@ -1467,7 +1873,102 @@ mod tests {
             loss_text: None,
         };
         let mut terminal = make_terminal();
-        let app = App::new(vec![], vec![enc], vec![], vec![]);
+        let app = App::new(vec![], vec![enc], vec![], vec![], vec![], vec![]);
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_treasure_room_does_not_panic() {
+        use rand::SeedableRng;
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let relic = SpireApiRelic {
+            id: "test_relic".into(),
+            name: "Test Relic".into(),
+            description: Some("A [gold]test[/gold] relic.".into()),
+            flavor: None,
+            rarity: Some("Common Relic".into()),
+            rarity_key: None,
+            pool: Some("shared".into()),
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic.clone()], vec![]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::TreasureRoom;
+        app.offered_relic = Some(relic);
+        app.relic_cursor = 0;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_shop_does_not_panic() {
+        use rand::SeedableRng;
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let relic = SpireApiRelic {
+            id: "shop_relic".into(),
+            name: "Shop Relic".into(),
+            description: Some("A [blue]shop[/blue] relic.".into()),
+            flavor: None,
+            rarity: Some("Shop Relic".into()),
+            rarity_key: None,
+            pool: Some("shared".into()),
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        let mut app = App::new(vec![], vec![], vec![], vec![], vec![relic], vec![]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        app.select_character(&mut rng);
+        app.mode = crate::tui::app::AppMode::Shop;
+        // Populate shop inventory directly.
+        app.shop_cards = crate::domain::catalog::ironclad::starter_deck().into_iter().take(3).collect();
+        app.shop_relics = Vec::new();
+        app.shop_cursor = 0;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_victory_does_not_panic() {
+        use crate::domain::run::{PlayerClass, RunState, starting_relics};
+        use crate::domain::catalog::ironclad;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        let deck = ironclad::starter_deck();
+        let relic = starting_relics::ironclad();
+        let run = RunState::new(PlayerClass::Ironclad, 75, 80, deck, relic);
+        app.run = Some(run);
+        app.mode = crate::tui::app::AppMode::Victory;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_ancient_boon_does_not_panic() {
+        use crate::data::api::SpireApiRelic;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        // Set up a fake boon relic
+        let fake_relic = SpireApiRelic {
+            id: "FAKE_RELIC".to_string(),
+            name: "Fake Relic".to_string(),
+            description: Some("A test relic.".to_string()),
+            flavor: None,
+            rarity: Some("Rare".to_string()),
+            rarity_key: None,
+            pool: None,
+            merchant_price: None,
+            image_url: None,
+            notes: None,
+        };
+        app.ancient_id = "NEOW".to_string();
+        app.ancient_name = "Neow".to_string();
+        app.ancient_boons = vec![fake_relic];
+        app.ancient_cursor = 0;
+        app.ancient_is_act_transition = false;
+        app.mode = crate::tui::app::AppMode::AncientBoon;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

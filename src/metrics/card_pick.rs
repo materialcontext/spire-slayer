@@ -51,14 +51,14 @@ fn eval_gauntlet(
     let mut hp_deltas: Vec<i32> = Vec::with_capacity(n as usize);
 
     for _ in 0..n {
-        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, rng);
+        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, &[], rng);
         let r1 = run_combat(s1, &GreedyDamagePolicy, rng);
         if !r1.player_alive {
             hp_deltas.push(-(hp as i32));
             continue;
         }
         let hp2 = r1.final_state.player.hp;
-        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, rng);
+        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, &[], rng);
         let r2 = run_combat(s2, &GreedyDamagePolicy, rng);
         hp_deltas.push(r1.player_hp_delta + r2.player_hp_delta);
         if r2.player_alive {

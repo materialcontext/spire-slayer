@@ -187,16 +187,17 @@ pub fn encounter_to_combat(
     state
 }
 
-/// Like `encounter_to_combat` but uses the caller-supplied deck and HP.
+/// Like `encounter_to_combat` but uses the caller-supplied deck, HP, and relics.
 ///
-/// Shuffles the deck and deals a starting hand of 5. Used by the card-pick
-/// evaluator and the deck dashboard to run simulations with arbitrary decks.
+/// Shuffles the deck and deals a starting hand (size adjusted by relics).
+/// Applies start-of-combat relic effects before returning.
 pub fn encounter_to_combat_with_deck(
     enc: &SpireApiEncounter,
     all_monsters: &[SpireApiMonster],
     deck: &[Card],
     hp: u32,
     max_hp: u32,
+    relics: &[String],
     rng: &mut impl Rng,
 ) -> CombatState {
     let mut state = encounter_to_combat(enc, all_monsters);
@@ -204,14 +205,86 @@ pub fn encounter_to_combat_with_deck(
     state.player.max_hp = max_hp;
     state.player.block = 0;
     state.player.buffs.clear();
+    state.relics = relics.iter().cloned().collect();
+    state.is_elite = enc.room_type.as_deref()
+        .map(|rt| rt.eq_ignore_ascii_case("Elite"))
+        .unwrap_or(false);
+
+    apply_start_of_combat_relics(&mut state);
+
     let mut draw = deck.to_vec();
     draw.shuffle(rng);
-    let hand: Vec<_> = draw.drain(..5.min(draw.len())).collect();
+    let draw_count = (state.hand_size as usize).min(draw.len());
+    let hand: Vec<_> = draw.drain(..draw_count).collect();
     state.hand = hand;
     state.draw_pile = draw;
     state.discard_pile.clear();
     state.energy = state.energy_max;
     state
+}
+
+/// Apply all start-of-combat relic effects to a freshly built CombatState.
+pub fn apply_start_of_combat_relics(state: &mut CombatState) {
+    use crate::domain::effect::BuffType;
+
+    let apply_all_enemies = |state: &mut CombatState, buff: BuffType, stacks: i32| {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                *enemy.buffs.entry(buff.clone()).or_insert(0) += stacks;
+            }
+        }
+    };
+
+    // ── Opening block ──────────────────────────────────────────────────────
+    if state.has_relic("ANCHOR")      { state.player.block += 10; }
+    if state.has_relic("FAKE_ANCHOR") { state.player.block += 4; }
+
+    // ── Opening hand size bonuses ──────────────────────────────────────────
+    if state.has_relic("BAG_OF_PREPARATION") { state.hand_size = (state.hand_size + 2).min(10); }
+    if state.has_relic("RING_OF_THE_SNAKE")  { state.hand_size = (state.hand_size + 2).min(10); }
+    if state.has_relic("BIG_MUSHROOM")       { state.hand_size = (state.hand_size + 2).min(10); }
+    if state.has_relic("BOOMING_CONCH") && state.is_elite {
+        state.hand_size = (state.hand_size + 2).min(10);
+    }
+
+    // ── Energy bonuses ─────────────────────────────────────────────────────
+    // LANTERN: +1 energy at combat start
+    if state.has_relic("LANTERN") { state.energy_max += 1; }
+    // PHILOSOPHERS_STONE: +1 energy per turn modelled as +1 energy_max
+    if state.has_relic("PHILOSOPHERS_STONE") { state.energy_max += 1; }
+
+    // ── Debuffs on all enemies ─────────────────────────────────────────────
+    if state.has_relic("BAG_OF_MARBLES")     { apply_all_enemies(state, BuffType::Vulnerable, 1); }
+    if state.has_relic("RED_MASK")           { apply_all_enemies(state, BuffType::Weak, 1); }
+    if state.has_relic("TWISTED_FUNNEL")     { apply_all_enemies(state, BuffType::Poison, 4); }
+    if state.has_relic("PHILOSOPHERS_STONE") { apply_all_enemies(state, BuffType::Strength, 1); }
+
+    // ── Player buffs ───────────────────────────────────────────────────────
+    if state.has_relic("BRONZE_SCALES") {
+        *state.player.buffs.entry(BuffType::Thorns).or_insert(0) += 3;
+    }
+    if state.has_relic("SWORD_OF_JADE") {
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) += 3;
+    }
+    if state.has_relic("GORGET") {
+        *state.player.buffs.entry(BuffType::Plating).or_insert(0) += 4;
+    }
+    if state.has_relic("SLING_OF_COURAGE") && state.is_elite {
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) += 2;
+    }
+    if state.has_relic("EMBER_TEA") {
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) += 2;
+    }
+
+    // ── Direct damage to all enemies ───────────────────────────────────────
+    if state.has_relic("FESTIVE_POPPER") {
+        for enemy in &mut state.enemies {
+            if enemy.is_alive() {
+                // Bypass block — Festive Popper deals direct HP damage
+                enemy.hp = enemy.hp.saturating_sub(9);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

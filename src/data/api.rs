@@ -33,6 +33,7 @@ const ENCHANTMENTS_SEED_JSON: &str = include_str!("../../data/enchantments_seed.
 const ACTS_SEED_JSON: &str = include_str!("../../data/acts_seed.json");
 const POTIONS_SEED_JSON: &str = include_str!("../../data/potions_seed.json");
 const ASCENSIONS_SEED_JSON: &str = include_str!("../../data/ascensions_seed.json");
+const ANCIENT_POOLS_SEED_JSON: &str = include_str!("../../data/ancient-pools_seed.json");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPower {
@@ -498,4 +499,33 @@ pub struct SpireApiAscension {
 
 pub fn load_ascensions() -> Vec<SpireApiAscension> {
     load_cached(ASCENSIONS_API_URL, "ascensions", ASCENSIONS_SEED_JSON)
+}
+
+// ── Ancient Pool API ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpireApiAncientRelicEntry {
+    pub id: String,
+    pub condition: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpireApiAncientPool {
+    pub name: String,
+    pub description: Option<String>,
+    pub relics: Vec<SpireApiAncientRelicEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpireApiAncient {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub selection: String,
+    pub pools: Vec<SpireApiAncientPool>,
+}
+
+pub fn load_ancients() -> Vec<SpireApiAncient> {
+    // Ancients data is seed-only (no live API endpoint)
+    serde_json::from_str(ANCIENT_POOLS_SEED_JSON).unwrap_or_default()
 }

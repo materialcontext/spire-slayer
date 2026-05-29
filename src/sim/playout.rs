@@ -50,6 +50,10 @@ pub struct CombatResult {
     pub combat_won: bool,
     /// State snapshot at the end of combat.
     pub final_state: CombatState,
+    /// Total damage dealt to enemies: initial_enemy_hp - final_enemy_hp.
+    pub damage_dealt: u32,
+    /// Sum of player.block captured before each end_turn call (across all turns).
+    pub block_absorbed: u32,
 }
 
 // Safety cap; prevents infinite loops against unkillable enemies.
@@ -65,6 +69,8 @@ pub fn run_combat(
     rng: &mut impl Rng,
 ) -> CombatResult {
     let initial_hp = state.player.hp;
+    let initial_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
+    let mut total_block = 0u32;
 
     if state.hand.is_empty() {
         let n = state.hand_size as usize;
@@ -94,6 +100,7 @@ pub fn run_combat(
             break;
         }
 
+        total_block += state.player.block;
         apply::end_turn(&mut state, rng);
 
         if state.is_over() {
@@ -101,12 +108,16 @@ pub fn run_combat(
         }
     }
 
+    let final_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
+
     CombatResult {
         player_hp_delta: state.player.hp as i32 - initial_hp as i32,
         turns: state.turn,
         player_alive: state.player.is_alive(),
         combat_won: state.is_won(),
         final_state: state,
+        damage_dealt: initial_enemy_hp.saturating_sub(final_enemy_hp),
+        block_absorbed: total_block,
     }
 }
 

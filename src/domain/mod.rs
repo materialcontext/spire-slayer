@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ancient;
 pub mod card;
 pub mod catalog;
 pub mod combat;
