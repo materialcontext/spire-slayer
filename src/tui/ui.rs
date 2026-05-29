@@ -1047,7 +1047,7 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::domain::map::{ActMap, MapPos, RoomType, COLS, ROWS};
+    use crate::domain::map::{MapPos, COLS, ROWS};
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1520,8 +1520,6 @@ fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::metrics::map_ev::strip_tags;
-
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

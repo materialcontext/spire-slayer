@@ -12,6 +12,7 @@ pub enum RewardKind {
     Monster,
     Elite,
     Boss,
+    #[allow(dead_code)]
     Shop,
 }
 
@@ -137,11 +138,9 @@ mod tests {
 
     #[test]
     fn offset_resets_to_minus5_after_rare() {
-        let mut offset = 20_i32;
+        // Force a rare: offset >= 97 makes effective_rare >= 100, guaranteeing rare.
+        let mut offset = 97_i32;
         let mut rng = rng();
-        // Force a rare by checking roll_rarity directly with a patched offset
-        // that makes rare guaranteed (offset >= 97 makes effective_rare >= 100).
-        offset = 97;
         let result = roll_rarity(RewardKind::Monster, &mut offset, &mut rng);
         // effective_rare = 3 + 97 = 100, so any roll < 100 hits rare.
         assert_eq!(result, Rarity::Rare);
@@ -150,10 +149,9 @@ mod tests {
 
     #[test]
     fn offset_increments_on_non_rare() {
-        let mut offset = 0_i32;
+        // Force a common: effective_rare = 3 + (-3) = 0, so rare impossible.
+        let mut offset = -3_i32;
         let mut rng = rng();
-        // Force a common: set offset so effective_rare = 0.
-        offset = -3; // 3 + (-3) = 0
         let result = roll_rarity(RewardKind::Monster, &mut offset, &mut rng);
         // roll is in [0,100); effective_rare=0 means nothing hits rare.
         // Uncommon threshold = 0 + 37 = 37.

@@ -8,7 +8,7 @@ use crate::domain::catalog;
 use crate::domain::combat::CombatState;
 use crate::domain::reward::{sample_offer, RewardKind};
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
-use crate::domain::run::{PlayerClass, Relic, RunState, starting_relics};
+use crate::domain::run::{PlayerClass, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
@@ -864,7 +864,6 @@ impl App {
             run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
         });
         let tel_room_type = room.map(|rt| format!("{:?}", rt)).unwrap_or_default();
-        drop(run);
         self.recompute_path_choices();
         self.compute_path_projections(rng);
 
@@ -913,9 +912,6 @@ impl App {
             Some(RoomType::Event) => self.open_event_room(rng),
             Some(RoomType::Treasure) => self.open_treasure_room(rng),
             Some(RoomType::Shop) => self.open_shop(rng),
-            Some(rt) => {
-                self.status_message = format!("Floor {} — {}", self.run.as_ref().map(|r| r.floor).unwrap_or(0), rt.label());
-            }
             None => {}
         }
     }
@@ -2002,7 +1998,7 @@ mod tests {
 
     #[test]
     fn j_k_navigation_in_encounter_list() {
-        use crate::data::api::{ApiEncounterMonster, SpireApiEncounter};
+        use crate::data::api::SpireApiEncounter;
         let make_enc = |id: &str| SpireApiEncounter {
             id: id.into(),
             name: id.into(),

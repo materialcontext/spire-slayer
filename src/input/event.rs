@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::domain::combat::CombatState;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AppEvent {
     Key(KeyEvent),
     StateUpdated(Box<CombatState>),
@@ -57,7 +58,6 @@ mod tests {
 
     #[test]
     fn app_event_is_clone() {
-        use crossterm::event::KeyEventKind;
         let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
         let ev = AppEvent::Key(key);
         let _ = ev.clone();

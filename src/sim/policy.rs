@@ -104,6 +104,7 @@ impl Policy for GreedyDamagePolicy {
 // ── SequentialPolicy ───────────────────────────────────────────────────────
 
 /// Plays cards left-to-right in hand order. Used as the MCTS rollout baseline.
+#[allow(dead_code)]
 pub struct SequentialPolicy;
 
 impl Policy for SequentialPolicy {

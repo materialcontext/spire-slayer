@@ -68,6 +68,7 @@ pub struct PathProjection {
     /// Total gold earned across the projected run.
     pub gold_earned: u32,
     /// Total gold spent across the projected run.
+    #[allow(dead_code)]
     pub gold_spent: u32,
 }
 

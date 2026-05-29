@@ -353,12 +353,14 @@ pub fn load_relics() -> Vec<SpireApiRelic> {
 // ── Ancient Pool API ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct SpireApiAncientRelicEntry {
     pub id: String,
     pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct SpireApiAncientPool {
     pub name: String,
     pub description: Option<String>,
@@ -366,6 +368,7 @@ pub struct SpireApiAncientPool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct SpireApiAncient {
     pub id: String,
     pub name: String,

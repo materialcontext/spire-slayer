@@ -1,5 +1,4 @@
 use rand::Rng;
-use rand::seq::SliceRandom;
 
 use crate::data::api::{SpireApiEncounter, SpireApiEvent, SpireApiMonster};
 use crate::domain::card::{Card, Rarity};
@@ -364,7 +363,7 @@ pub fn compute_map_ev(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
-    ascension: u8,
+    _ascension: u8,
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
@@ -510,7 +509,7 @@ mod tests {
 
     #[test]
     fn events_for_sub_act_includes_shared() {
-        use crate::data::api::{ApiEventOption, ApiEventPage, SpireApiEvent};
+        use crate::data::api::SpireApiEvent;
         let events = vec![
             SpireApiEvent {
                 id: "S".into(),

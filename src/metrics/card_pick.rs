@@ -12,6 +12,7 @@ use super::deck::synergy_score;
 // ── Public types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CardAdvice {
     /// Index into the offered slice; `usize::MAX` = skip.
     pub card_index: usize,
@@ -271,6 +272,7 @@ pub fn score_single(card: &Card, deck: &[Card], _act: u8) -> f32 {
 }
 
 /// Rank the offered cards best-first using heuristics only (no simulation).
+#[allow(dead_code)]
 pub fn pick_score(offered: &[Card], run: &RunState) -> Vec<CardAdvice> {
     heuristic_advice(offered, &run.deck)
 }
@@ -302,7 +304,6 @@ fn build_heuristic_reason(card: &Card, deck: &[Card]) -> String {
 mod tests {
     use super::*;
     use crate::domain::card::{Card, CardType, Rarity};
-    use crate::domain::combat::PlayerState;
     use crate::domain::effect::CardEffect;
     use crate::domain::run::{RunState, PlayerClass, starting_relics};
     use rand::SeedableRng;

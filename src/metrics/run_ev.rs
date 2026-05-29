@@ -5,7 +5,7 @@ use crate::domain::card::Card;
 use crate::domain::encounter::normalize_act;
 use crate::domain::map::ActMap;
 use crate::metrics::deck_dash::compute_deck_stats;
-use crate::metrics::map_ev::{post_act_heal_hp, POST_ACT_HEAL_ASCENSION_THRESHOLD};
+use crate::metrics::map_ev::post_act_heal_hp;
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts};
 
 // ── Act structure ──────────────────────────────────────────────────────────
@@ -46,6 +46,7 @@ pub fn acts_after(current_sub_act: &str) -> Vec<(&'static str, u8)> {
 // ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FutureActEv {
     pub sub_act: String,
     pub act_number: u8,
@@ -269,6 +270,7 @@ pub fn compute_run_ev(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::map_ev::POST_ACT_HEAL_ASCENSION_THRESHOLD;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 

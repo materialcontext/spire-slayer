@@ -6,7 +6,7 @@ use crate::domain::card::Card;
 use crate::domain::encounter::{encounter_to_combat_with_deck, normalize_act};
 use crate::sim::playout::run_combat;
 use crate::sim::policy::GreedyDamagePolicy;
-use super::deck::{attack_ratio, deck_score, has_block_density, mean_cost, synergy_score};
+use super::deck::{attack_ratio, deck_score, mean_cost, synergy_score};
 
 // ── Public types ───────────────────────────────────────────────────────────
 

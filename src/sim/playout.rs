@@ -7,6 +7,7 @@ use crate::domain::combat::CombatState;
 // ── Result types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PlayoutResult {
     /// Total damage dealt to all enemies this turn.
     pub damage_dealt: u32,
@@ -24,6 +25,7 @@ pub struct PlayoutResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PlayoutStats {
     pub mean_damage_dealt: f32,
     pub mean_block_gained: f32,
