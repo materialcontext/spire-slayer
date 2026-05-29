@@ -101,50 +101,183 @@ pub fn strip_tags(s: &str) -> String {
 
 // ── HP delta parsing ──────────────────────────────────────────────────────────
 
-fn parse_hp_delta(plain: &str) -> f32 {
+const REMAINING_FIGHTS: f32 = 5.0;
+
+/// Strip trailing punctuation so "damage." compares equal to "damage".
+fn strip_punct(w: &str) -> &str {
+    w.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'))
+}
+
+/// Parse HP-equivalent value for a single (already-lowercased, tag-stripped) option
+/// description.
+///
+/// In addition to numeric HP/damage patterns, recognises:
+/// - Gold gains → HP at shop conversion rate (50g ≈ 3 HP)
+/// - Relic rewards → 6 HP (same as treasure room)
+/// - Card removal → `removal_hp` (caller pre-computes once)
+/// - Card upgrade → `upgrade_hp` (caller pre-computes once)
+/// - Curse/junk cards added to deck → −5 HP each
+fn parse_option_hp_delta(plain: &str, removal_hp: f32, upgrade_hp: f32) -> f32 {
+    const GOLD_HP_RATE: f32 = 3.0 / 50.0; // 50 gold ≈ 3 HP at marginal shop value
+    const RELIC_HP: f32 = 6.0;
+    const CURSE_HP: f32 = 5.0;
+
     let words: Vec<&str> = plain.split_whitespace().collect();
     let mut delta = 0.0_f32;
+
+    // ── Numeric window scan: HP, damage, gold ─────────────────────────────
     for i in 0..words.len() {
         let Ok(n) = words[i].parse::<f32>() else { continue };
-        let prev  = if i > 0             { words[i-1] } else { "" };
-        let next  = if i+1 < words.len() { words[i+1] } else { "" };
-        let next2 = if i+2 < words.len() { words[i+2] } else { "" };
-        let is_hp  = next.eq_ignore_ascii_case("hp") || next.eq_ignore_ascii_case("health");
-        let is_dmg = next.eq_ignore_ascii_case("damage") || next.eq_ignore_ascii_case("dmg");
-        let is_hp2  = !is_hp  && (next2.eq_ignore_ascii_case("hp") || next2.eq_ignore_ascii_case("health"));
-        let is_dmg2 = !is_dmg && (next2.eq_ignore_ascii_case("damage") || next2.eq_ignore_ascii_case("dmg"));
-        match prev.to_lowercase().as_str() {
+        let prev  = strip_punct(if i > 0             { words[i-1] } else { "" });
+        let next  = strip_punct(if i+1 < words.len() { words[i+1] } else { "" });
+        let next2 = strip_punct(if i+2 < words.len() { words[i+2] } else { "" });
+        let is_hp   = next  == "hp" || next  == "health";
+        let is_dmg  = next  == "damage" || next  == "dmg";
+        let is_hp2  = !is_hp  && (next2 == "hp" || next2 == "health");
+        let is_dmg2 = !is_dmg && (next2 == "damage" || next2 == "dmg");
+        let is_gold = next == "gold" || next2 == "gold";
+        match prev {
             "heal" | "heals" | "restore" | "restores" => delta += n,
-            "gain" if is_hp || is_hp2   => delta += n,
-            "lose" | "loses" if is_hp || is_hp2 => delta -= n,
+            "gain" if is_hp || is_hp2  => delta += n,
+            "gain" if is_gold          => delta += n * GOLD_HP_RATE,
+            "lose" | "loses" if is_hp || is_hp2  => delta -= n,
             "take" | "takes" if is_dmg || is_dmg2 => delta -= n,
             "deal" | "deals" if is_dmg || is_dmg2 => delta -= n,
             _ => {}
         }
     }
+
+    // ── Keyword checks on the full description ─────────────────────────────
+    if plain.contains("relic") {
+        delta += RELIC_HP;
+    }
+    if plain.contains("remov") && (plain.contains(" card") || plain.contains("deck")) {
+        delta += removal_hp;
+    }
+    if plain.contains("upgrade") {
+        delta += upgrade_hp;
+    }
+    // Junk cards added: require "add"/"shuffle" near a known status/curse name.
+    const JUNK_NAMES: &[&str] = &[" decay", " wound", " dazed", " burn ", " slimed", " curse"];
+    if plain.contains("add ") || plain.contains("shuffle") {
+        for name in JUNK_NAMES {
+            if plain.contains(name) {
+                delta -= CURSE_HP;
+                break; // count at most one junk card per option
+            }
+        }
+    }
+
     delta
 }
 
+// ── Card upgrade simulation ────────────────────────────────────────────────────
+
+/// Return a copy of `card` with its primary combat effect boosted (+2 dmg / +3 block).
+/// Returns `None` when the card has no boostable effect.
+fn upgrade_card_copy(card: &Card) -> Option<Card> {
+    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Damage(_))) {
+        let mut c = card.clone();
+        if let CardEffect::Damage(d) = &mut c.effects[i] { *d += 2; }
+        return Some(c);
+    }
+    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Block(_))) {
+        let mut c = card.clone();
+        if let CardEffect::Block(b) = &mut c.effects[i] { *b += 3; }
+        return Some(c);
+    }
+    None
+}
+
+/// Estimate the HP value of upgrading the best card in the deck over the remaining run.
+///
+/// Finds the highest-scoring upgradeable card, boosts its primary effect,
+/// and measures the simulation delta. Falls back to `UPGRADE_HP_HEURISTIC` when
+/// no encounter data is available.
+fn best_upgrade_hp_value(
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    sub_act: &str,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    relics: &[String],
+    rng: &mut impl Rng,
+) -> f32 {
+    const UPGRADE_HP_HEURISTIC: f32 = 5.0;
+    if deck.is_empty() || all_encounters.is_empty() {
+        return UPGRADE_HP_HEURISTIC;
+    }
+    let best_idx = deck
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.cost < 255 && upgrade_card_copy(c).is_some())
+        .max_by(|(_, a), (_, b)| {
+            card_value_score(a)
+                .partial_cmp(&card_value_score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i);
+    let Some(idx) = best_idx else {
+        return UPGRADE_HP_HEURISTIC;
+    };
+    let Some(upgraded_card) = upgrade_card_copy(&deck[idx]) else {
+        return UPGRADE_HP_HEURISTIC;
+    };
+    let baseline = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    if baseline.encounter_count == 0 {
+        return UPGRADE_HP_HEURISTIC;
+    }
+    let mut upgraded_deck = deck.to_vec();
+    upgraded_deck[idx] = upgraded_card;
+    let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    ((baseline.mean_hp_loss - upgraded.mean_hp_loss) * REMAINING_FIGHTS).max(0.0)
+}
+
 /// Compute the mean best-option HP delta across the act event pool.
+///
+/// Pre-computes once per call:
+/// - `removal_hp` — HP value of removing the deck's worst card
+/// - `upgrade_hp` — HP value of upgrading the deck's best card (simulated when possible)
+///
+/// Both values are used by `parse_option_hp_delta` for options that mention card
+/// removal or upgrade.
 pub fn compute_event_hp_delta(
     events: &[SpireApiEvent],
     sub_act: &str,
-    _hp_ratio: f32,
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    relics: &[String],
+    rng: &mut impl Rng,
 ) -> f32 {
     let pool = events_for_sub_act(sub_act, events);
     if pool.is_empty() {
         return -2.0;
     }
+
+    // Pre-compute deck-dependent values once, shared across all options.
+    let baseline = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    let has_data = baseline.encounter_count > 0;
+
+    let removal_hp = crate::metrics::shop_ev::compute_removal_hp_value(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
+        baseline.mean_hp_loss, has_data, rng,
+    );
+    let upgrade_hp = best_upgrade_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+
     // For each event, find the best available option's HP delta; average over pool.
     let total: f32 = pool.iter().map(|event| {
         event.options.iter()
             .map(|opt| {
                 let raw = opt.description.as_deref().unwrap_or("");
                 let plain = strip_tags(raw).to_lowercase();
-                parse_hp_delta(&plain)
+                parse_option_hp_delta(&plain, removal_hp, upgrade_hp)
             })
             .fold(f32::NEG_INFINITY, f32::max)
-            .max(-50.0) // clamp runaway negatives
+            .max(-50.0)
     }).sum::<f32>();
     total / pool.len() as f32
 }
@@ -315,8 +448,9 @@ pub fn compute_map_ev(
         stars: 2,
     };
 
-    let hp_ratio = hp as f32 / max_hp.max(1) as f32;
-    let event_hp_delta = compute_event_hp_delta(all_events, sub_act, hp_ratio);
+    let event_hp_delta = compute_event_hp_delta(
+        all_events, sub_act, deck, hp, max_hp, all_encounters, all_monsters, relics, rng,
+    );
     let treasure_hp = 6.0_f32;
     let shop_hp_value = crate::metrics::shop_ev::compute_shop_total_value(
         deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, rng,
@@ -435,5 +569,102 @@ mod tests {
         assert_eq!(data.sub_act, "overgrowth");
         assert_eq!(data.treasure.stars, 3);
         assert_eq!(data.events.len(), 0);
+    }
+
+    // ── parse_option_hp_delta tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_heal_hp() {
+        assert_eq!(parse_option_hp_delta("heal 10 hp", 0.0, 0.0), 10.0);
+    }
+
+    #[test]
+    fn parse_damage_taken() {
+        assert_eq!(parse_option_hp_delta("take 8 damage", 0.0, 0.0), -8.0);
+    }
+
+    #[test]
+    fn parse_gold_gain() {
+        // 50g × (3/50) = 3.0 HP
+        let v = parse_option_hp_delta("gain 50 gold", 0.0, 0.0);
+        assert!((v - 3.0).abs() < 0.01, "expected ~3.0, got {v}");
+    }
+
+    #[test]
+    fn parse_relic_reward() {
+        let v = parse_option_hp_delta("obtain a relic", 0.0, 0.0);
+        assert_eq!(v, 6.0);
+    }
+
+    #[test]
+    fn parse_relic_and_damage() {
+        // "take 5 damage. gain a relic." → -5 + 6 = 1
+        let v = parse_option_hp_delta("take 5 damage. gain a relic.", 0.0, 0.0);
+        assert!((v - 1.0).abs() < 0.01, "expected ~1.0, got {v}");
+    }
+
+    #[test]
+    fn parse_card_removal() {
+        let v = parse_option_hp_delta("remove a card from your deck", 8.0, 0.0);
+        assert_eq!(v, 8.0);
+    }
+
+    #[test]
+    fn parse_card_upgrade() {
+        let v = parse_option_hp_delta("upgrade a card in your deck", 0.0, 5.0);
+        assert_eq!(v, 5.0);
+    }
+
+    #[test]
+    fn parse_curse_added() {
+        let v = parse_option_hp_delta("add a decay to your deck", 0.0, 0.0);
+        assert_eq!(v, -5.0);
+    }
+
+    #[test]
+    fn parse_curse_wound() {
+        let v = parse_option_hp_delta("shuffle a wound into your deck", 0.0, 0.0);
+        assert_eq!(v, -5.0);
+    }
+
+    #[test]
+    fn parse_no_keywords_returns_zero() {
+        let v = parse_option_hp_delta("you feel a chill in the air.", 0.0, 0.0);
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn upgrade_card_copy_boosts_damage() {
+        use crate::domain::card::{CardType, Rarity};
+        use crate::domain::effect::CardEffect;
+        let card = crate::domain::card::Card::new(
+            1, "Strike", 1, CardType::Attack, Rarity::Basic,
+            vec![CardEffect::Damage(6)],
+        );
+        let upgraded = upgrade_card_copy(&card).unwrap();
+        assert_eq!(upgraded.base_damage(), 8);
+    }
+
+    #[test]
+    fn upgrade_card_copy_boosts_block() {
+        use crate::domain::card::{CardType, Rarity};
+        use crate::domain::effect::CardEffect;
+        let card = crate::domain::card::Card::new(
+            2, "Defend", 1, CardType::Skill, Rarity::Basic,
+            vec![CardEffect::Block(5)],
+        );
+        let upgraded = upgrade_card_copy(&card).unwrap();
+        assert_eq!(upgraded.base_block(), 8);
+    }
+
+    #[test]
+    fn upgrade_card_copy_returns_none_for_passive() {
+        use crate::domain::card::{CardType, Rarity};
+        use crate::domain::effect::CardEffect;
+        let card = crate::domain::card::Card::new(
+            3, "Flex", 1, CardType::Skill, Rarity::Common,
+            vec![CardEffect::Passive("At the start of your turn, gain 2 Strength.".into())],
+        );
+        assert!(upgrade_card_copy(&card).is_none());
     }
 }
