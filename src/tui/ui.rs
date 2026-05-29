@@ -1234,7 +1234,7 @@ fn map_connection_row(floor_idx: usize, map: &crate::domain::map::ActMap,
             let src_cx = label_w + col * col_w + col_w / 2;
             let dst_cx = label_w + dst * col_w + col_w / 2;
             let mid    = (src_cx + dst_cx) / 2;
-            let ch = if col == dst { '|' } else if dst < col { '/' } else { '\\' };
+            let ch = if col == dst { '|' } else if dst < col { '\\' } else { '/' };
             if mid < buf.len() { buf[mid] = ch; }
         }
     }
