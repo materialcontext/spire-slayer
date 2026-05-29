@@ -609,6 +609,8 @@ impl App {
 
         let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
         let relics = relic_ids_from_run(self.run.as_ref());
+        let class_color = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+        let class_pool = catalog::cards_for_character(class_color);
         let data = compute_map_ev(
             &deck,
             hp,
@@ -620,6 +622,7 @@ impl App {
             &self.events,
             gold,
             &relics,
+            &class_pool,
             rng,
         );
         self.status_message = format!(
@@ -652,6 +655,7 @@ impl App {
             &self.events,
             gold,
             &relics,
+            &class_pool,
             rng,
         ));
 

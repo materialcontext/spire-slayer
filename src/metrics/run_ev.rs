@@ -94,6 +94,7 @@ fn act_node_costs(
     all_events: &[SpireApiEvent],
     gold: u32,
     relics: &[String],
+    class_cards: &[Card],
     rng: &mut impl Rng,
 ) -> (NodeCosts, bool) {
     let filter = |room: &str| -> Vec<SpireApiEncounter> {
@@ -126,7 +127,7 @@ fn act_node_costs(
         all_events, sub_act, hp as f32 / max_hp as f32
     );
     let shop_hp = crate::metrics::shop_ev::compute_shop_total_value(
-        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng,
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, rng,
     );
     costs.event_hp_delta = event_hp;
     costs.treasure_hp    = 6.0;
@@ -182,6 +183,7 @@ pub fn compute_run_ev(
     all_events: &[SpireApiEvent],
     gold: u32,
     relics: &[String],
+    class_cards: &[Card],
     rng: &mut impl Rng,
 ) -> RunEv {
     let current_act_number = act_number(current_sub_act);
@@ -219,7 +221,7 @@ pub fn compute_run_ev(
 
         let (costs, has_data) = act_node_costs(
             sub_act, deck, entry_hp as u32, max_hp, ascension, all_encounters, all_monsters,
-            all_events, gold, relics,
+            all_events, gold, relics, class_cards,
             rng,
         );
         if !has_data {
@@ -321,7 +323,7 @@ mod tests {
     fn run_ev_from_overgrowth_has_two_future_acts() {
         let result = compute_run_ev(
             &deck(), 60, 80, "overgrowth", -20.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         // overgrowth (Act 1) → hive (Act 2) → glory (Act 3)
         assert_eq!(result.current_act_number, 1);
@@ -334,8 +336,8 @@ mod tests {
 
     #[test]
     fn run_ev_from_underdocks_same_as_overgrowth_structure() {
-        let og = compute_run_ev(&deck(), 60, 80, "overgrowth", -20.0, &[], &[], 0, false, &[], 0, &[], &mut rng());
-        let ud = compute_run_ev(&deck(), 60, 80, "underdocks", -20.0, &[], &[], 0, false, &[], 0, &[], &mut rng());
+        let og = compute_run_ev(&deck(), 60, 80, "overgrowth", -20.0, &[], &[], 0, false, &[], 0, &[], &[], &mut rng());
+        let ud = compute_run_ev(&deck(), 60, 80, "underdocks", -20.0, &[], &[], 0, false, &[], 0, &[], &[], &mut rng());
         // Both are Act 1 — same future structure
         assert_eq!(og.future_acts.len(), ud.future_acts.len());
         assert_eq!(og.future_acts[0].sub_act, ud.future_acts[0].sub_act);
@@ -345,7 +347,7 @@ mod tests {
     fn run_ev_from_hive_has_one_future_act() {
         let result = compute_run_ev(
             &deck(), 60, 80, "hive", -20.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         assert_eq!(result.current_act_number, 2);
         assert_eq!(result.future_acts.len(), 1);
@@ -356,7 +358,7 @@ mod tests {
     fn run_ev_from_glory_has_no_future_acts() {
         let result = compute_run_ev(
             &deck(), 60, 80, "glory", -20.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         assert_eq!(result.current_act_number, 3);
         assert!(result.future_acts.is_empty());
@@ -367,7 +369,7 @@ mod tests {
     fn glory_has_no_post_act_heal() {
         let result = compute_run_ev(
             &deck(), 80, 80, "glory", 0.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         // Final act: no post-act heal, hp_after_current_heal == hp_after_current_boss
         assert_eq!(result.hp_after_current_heal, result.hp_after_current_boss);
@@ -377,7 +379,7 @@ mod tests {
     fn last_future_act_has_no_post_heal() {
         let result = compute_run_ev(
             &deck(), 80, 80, "overgrowth", 0.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         let last = result.future_acts.last().unwrap();
         // Glory (last act) has no post-act heal.
@@ -388,7 +390,7 @@ mod tests {
     fn projected_death_short_circuits() {
         let result = compute_run_ev(
             &deck(), 10, 80, "overgrowth", -50.0,
-            &[], &[], 0, false, &[], 0, &[], &mut rng(),
+            &[], &[], 0, false, &[], 0, &[], &[], &mut rng(),
         );
         assert_eq!(result.hp_after_current_boss, 0.0);
         assert!(result.future_acts.is_empty());

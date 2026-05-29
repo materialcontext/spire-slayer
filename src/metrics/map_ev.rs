@@ -217,6 +217,7 @@ pub fn compute_map_ev(
     all_events: &[SpireApiEvent],
     gold: u32,
     relics: &[String],
+    class_cards: &[Card],
     rng: &mut impl Rng,
 ) -> MapEvData {
     // Simulate vs. normal (Monster) encounters for this sub-act.
@@ -318,7 +319,7 @@ pub fn compute_map_ev(
     let event_hp_delta = compute_event_hp_delta(all_events, sub_act, hp_ratio);
     let treasure_hp = 6.0_f32;
     let shop_hp_value = crate::metrics::shop_ev::compute_shop_total_value(
-        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, rng,
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, rng,
     );
 
     MapEvData {
@@ -430,7 +431,7 @@ mod tests {
         use rand::rngs::StdRng;
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], 0, &[], &mut rng);
+        let data = compute_map_ev(&deck, 80, 80, 0, "overgrowth", &[], &[], &[], 0, &[], &[], &mut rng);
         assert_eq!(data.sub_act, "overgrowth");
         assert_eq!(data.treasure.stars, 3);
         assert_eq!(data.events.len(), 0);

@@ -1,11 +1,16 @@
 use rand::Rng;
+use rand::seq::SliceRandom;
 
 use crate::data::api::{SpireApiEncounter, SpireApiMonster};
-use crate::domain::card::Card;
+use crate::domain::card::{Card, Rarity};
 use crate::metrics::deck_dash::compute_deck_stats;
 use crate::metrics::map_ev::card_value_score;
 
 const REMAINING_FIGHTS: f32 = 5.0;
+/// Number of random shop samples used to estimate expected card value.
+const N_SHOP_SAMPLES: usize = 2;
+/// Scale factor: 2-fight gauntlet → 5 remaining run fights.
+const GAUNTLET_TO_RUN_SCALE: f32 = 2.5;
 
 // ── Public types ───────────────────────────────────────────────────────────────
 
@@ -128,13 +133,94 @@ pub fn compute_removal_hp_value(
     (base_loss - reduced.mean_hp_loss).max(0.0) * REMAINING_FIGHTS
 }
 
+// ── Catalog-based card value simulation ───────────────────────────────────────
+
+fn sample_shop_rarity(rng: &mut impl Rng) -> Rarity {
+    let r: f32 = rng.r#gen();
+    if r < 0.54 {
+        Rarity::Common
+    } else if r < 0.91 {
+        Rarity::Uncommon
+    } else {
+        Rarity::Rare
+    }
+}
+
+/// Sample `n` cards from the class pool using shop rarity weights.
+fn sample_shop_cards(class_cards: &[Card], n: usize, rng: &mut impl Rng) -> Vec<Card> {
+    if class_cards.is_empty() {
+        return vec![];
+    }
+    let mut result = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rarity = sample_shop_rarity(rng);
+        let card = class_cards
+            .iter()
+            .filter(|c| c.rarity == rarity)
+            .collect::<Vec<_>>()
+            .choose(rng)
+            .map(|c| (*c).clone())
+            .or_else(|| class_cards.choose(rng).cloned());
+        if let Some(c) = card {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Estimate the expected HP gain from the best card in a typical shop.
+///
+/// Samples `N_SHOP_SAMPLES` random shop offerings from the class catalog, runs
+/// `sim_pick_score` on each, and averages the best card's delta_hp (scaled from
+/// a 2-fight gauntlet to the remaining `REMAINING_FIGHTS`).
+/// Returns `None` when no encounter data or class cards are available.
+fn simulate_expected_card_value(
+    class_cards: &[Card],
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    sub_act: &str,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    rng: &mut impl Rng,
+) -> Option<f32> {
+    if class_cards.is_empty() || all_encounters.is_empty() {
+        return None;
+    }
+    let mut total = 0.0f32;
+    let mut count = 0usize;
+    for _ in 0..N_SHOP_SAMPLES {
+        let offered = sample_shop_cards(class_cards, 3, rng);
+        if offered.is_empty() {
+            continue;
+        }
+        let advice = crate::metrics::card_pick::sim_pick_score(
+            &offered, deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng,
+        );
+        let best_delta = advice
+            .iter()
+            .filter(|a| a.card_index != usize::MAX)
+            .map(|a| a.delta_hp)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if best_delta.is_finite() {
+            total += best_delta.max(0.0) * GAUNTLET_TO_RUN_SCALE;
+            count += 1;
+        }
+    }
+    if count > 0 {
+        Some(total / count as f32)
+    } else {
+        None
+    }
+}
+
 // ── Path DP shop node value ────────────────────────────────────────────────────
 
 /// Estimate total HP value from an optimal shop visit given a gold budget.
 ///
 /// Considers three purchase categories:
 /// - Card removal (simulated vs. deck quality)
-/// - Best card purchase (rarity-weighted heuristic — class catalog unavailable here)
+/// - Best card purchase (catalog-backed simulation when available, heuristic fallback)
 /// - Best relic purchase (rarity-weighted heuristic)
 ///
 /// All options are ranked by HP/gold efficiency. The player buys greedily starting
@@ -148,10 +234,10 @@ pub fn compute_shop_total_value(
     all_monsters: &[SpireApiMonster],
     gold: u32,
     relics: &[String],
+    class_cards: &[Card],
     rng: &mut impl Rng,
 ) -> f32 {
-    // Expected best card from a 7-card shop (54% C, 37% UC, 9% R).
-    // Best of 7 is likely uncommon–rare; not every card fits the deck → conservative.
+    // Expected best card: use sim when class catalog + encounter data are available.
     const EXPECTED_CARD_HP: f32 = 7.0;
     const EXPECTED_CARD_PRICE: u32 = 75; // typical uncommon
     // Expected best relic from 3 (50% C @175g, 33% UC @225g, 17% R @275g).
@@ -160,6 +246,10 @@ pub fn compute_shop_total_value(
     const EXPECTED_RELIC_PRICE: u32 = 210;
     // First removal costs 75g (price escalates per purchase; use base for path DP).
     const REMOVAL_PRICE: u32 = 75;
+
+    let expected_card_hp = simulate_expected_card_value(
+        class_cards, deck, hp, max_hp, sub_act, all_encounters, all_monsters, rng,
+    ).unwrap_or(EXPECTED_CARD_HP);
 
     let mut candidates: Vec<(f32, u32)> = Vec::new();
 
@@ -175,8 +265,8 @@ pub fn compute_shop_total_value(
         }
     }
 
-    // Best card and relic (heuristic)
-    candidates.push((EXPECTED_CARD_HP, EXPECTED_CARD_PRICE));
+    // Best card and relic
+    candidates.push((expected_card_hp, EXPECTED_CARD_PRICE));
     candidates.push((EXPECTED_RELIC_HP, EXPECTED_RELIC_PRICE));
 
     // Sort by HP/gold ratio descending; buy greedily within budget.
@@ -273,7 +363,7 @@ mod tests {
     #[test]
     fn shop_total_value_zero_gold() {
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 0, &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 0, &[], &[], &mut rng(),
         );
         assert_eq!(v, 0.0);
     }
@@ -282,7 +372,7 @@ mod tests {
     fn shop_total_value_card_only() {
         // 80g: can afford card (75g) but not relic (210g)
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 80, &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 80, &[], &[], &mut rng(),
         );
         // Removal returns 3.0 (no data, no curse) — also 75g; tie goes to first in sorted order.
         // Card is 7 HP at 75g vs removal 3 HP at 75g: card wins ratio. Both cost 75g; only one fits.
@@ -293,7 +383,7 @@ mod tests {
     fn shop_total_value_ample_gold_covers_all() {
         // 400g covers removal (75) + card (75) + relic (210) = 360g
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 400, &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 400, &[], &[], &mut rng(),
         );
         // Card + relic at minimum (removal = 3.0 no-data); total ≥ 3 + 7 + 10 = 20
         assert!(v >= 17.0);
@@ -306,7 +396,7 @@ mod tests {
         // After buying card (75g), 135g left — not enough for relic (210g).
         // But removal (3HP, 75g) = 0.040 ratio — skip. So just card = 7 HP.
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 210, &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 210, &[], &[], &mut rng(),
         );
         // Should be able to buy card (75g) with 135g remaining, can't afford relic (210g)
         // So v ≈ 7 HP (card) + maybe removal if it beats card ratio
