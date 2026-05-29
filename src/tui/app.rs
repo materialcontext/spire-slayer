@@ -13,6 +13,7 @@ use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts, PathChoice};
+use crate::metrics::path_sim::{simulate_path_choices, PathProjection};
 use crate::metrics::run_ev::{compute_run_ev, RunEv};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::event::{advise_event, EventOptionAdvice};
@@ -76,6 +77,10 @@ pub struct App {
     pub map_cursor: usize,
     /// HP-cost estimates for each available map choice (recomputed on position change).
     pub path_choices: Vec<PathChoice>,
+    /// Full 3-act sequential run projections for each selectable node.
+    pub path_projections: Vec<PathProjection>,
+    /// All cards available for this character class (used by path simulation).
+    pub class_cards: Vec<Card>,
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
@@ -171,6 +176,8 @@ impl App {
             filtered_indices: Vec::new(),
             map_cursor: 0,
             path_choices: Vec::new(),
+            path_projections: Vec::new(),
+            class_cards: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
             active_event: None,
@@ -716,6 +723,7 @@ impl App {
         self.run_id = now_secs();
         self.hp_at_act_start = 0;
         self.best_path_predicted_delta = 0.0;
+        self.class_cards = catalog::cards_for_character(&color);
         self.act_filter = sub_act.clone();
         self.refresh_filter();
         self.selected_row = 0;
@@ -732,6 +740,7 @@ impl App {
         }
         self.map_cursor = 0;
         self.recompute_path_choices();
+        self.compute_path_projections(rng);
         // Capture act-start HP and the best predicted delta (only on first open per act).
         if self.hp_at_act_start == 0 {
             if let Some(ref run) = self.run {
@@ -773,6 +782,45 @@ impl App {
         } else {
             vec![]
         };
+    }
+
+    /// Compute full 3-act forward-simulated run projections for each selectable node.
+    pub fn compute_path_projections(&mut self, rng: &mut impl rand::Rng) {
+        use crate::domain::map::ROWS;
+        let Some(ref run) = self.run else { self.path_projections.clear(); return; };
+        let Some(ref map) = run.map else { self.path_projections.clear(); return; };
+
+        let (choices, next_floor) = match run.map_pos {
+            None => (map.entry_nodes(), 0usize),
+            Some(pos) => {
+                let nf = pos.floor + 1;
+                (map.choices_from(pos).to_vec(), nf)
+            }
+        };
+
+        if next_floor >= ROWS || choices.is_empty() {
+            self.path_projections.clear();
+            return;
+        }
+
+        let hp      = run.hp;
+        let max_hp  = run.max_hp;
+        let deck    = run.deck.clone();
+        let relics  = relic_ids_from_run(Some(run));
+        let gold    = run.gold;
+        let asc     = run.ascension;
+        let sub_act = run.sub_act.clone();
+        let event_hp_delta = self.map_ev.as_ref().map(|me| me.event_hp_delta).unwrap_or(-2.0);
+        let map_clone = map.clone();
+        let class_cards = self.class_cards.clone();
+        let encounters  = self.encounters.clone();
+        let monsters    = self.monsters.clone();
+
+        self.path_projections = simulate_path_choices(
+            &map_clone, &choices, next_floor,
+            hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+            &encounters, &monsters, &class_cards, event_hp_delta, rng,
+        );
     }
 
     /// Columns available to move to from the current map position.
@@ -818,6 +866,7 @@ impl App {
         let tel_room_type = room.map(|rt| format!("{:?}", rt)).unwrap_or_default();
         drop(run);
         self.recompute_path_choices();
+        self.compute_path_projections(rng);
 
         // Emit map decision event.
         self.log_event(RunEvent::MapDecision {
@@ -1604,6 +1653,7 @@ impl App {
         self.map_ev = None;
         self.run_ev = None;
         self.path_choices.clear();
+        self.path_projections.clear();
         self.open_ancient_boon(next_sub_act, true, rng);
     }
 
@@ -1635,6 +1685,7 @@ impl App {
                 self.map_ev = None;
                 self.run_ev = None;
                 self.path_choices.clear();
+                self.path_projections.clear();
                 self.ancient_had_darv_act2 = false;
                 self.selected_row = 0;
                 self.mode = if self.characters.is_empty() {

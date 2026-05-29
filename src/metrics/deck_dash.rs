@@ -43,7 +43,7 @@ pub struct DeckStats {
 
 /// Compute deck statistics by running simulations against a sampled act panel.
 ///
-/// Samples up to 5 normal/elite encounters from `act`, runs 8 full combats each,
+/// Samples up to 5 normal/elite encounters from `act`, runs 5 full combats each,
 /// and aggregates damage-per-turn, block-per-turn, and survival distributions.
 pub fn compute_deck_stats(
     deck: &[Card],
@@ -55,17 +55,6 @@ pub fn compute_deck_stats(
     relics: &[String],
     rng: &mut impl Rng,
 ) -> DeckStats {
-    const MAX_ENCOUNTERS: usize = 5;
-    const FULL_COMBATS_PER_ENC: u32 = 5;
-
-    let deck_size = deck.len();
-    let cycle_turns = if deck_size == 0 { 0.0 } else { deck_size as f32 / 5.0 };
-    let mean_energy_cost = mean_cost(deck);
-    let attack_fraction = attack_ratio(deck);
-    let block_card_count = deck.iter().filter(|c| c.base_block() > 0).count();
-    let synergy_axes = synergy_score(deck);
-    let heuristic_score = deck_score(deck, 1);
-
     let pool: Vec<&SpireApiEncounter> = all_encounters
         .iter()
         .filter(|e| {
@@ -74,6 +63,34 @@ pub fn compute_deck_stats(
                 && e.room_type.as_deref().map(|rt| rt != "Boss").unwrap_or(true)
         })
         .collect();
+    compute_deck_stats_vs_pool(deck, hp, max_hp, sub_act, &pool, 5, 5, all_monsters, relics, rng)
+}
+
+/// Compute deck statistics against a caller-supplied, pre-filtered encounter pool.
+///
+/// Unlike `compute_deck_stats`, this does **no** sub-act or room-type filtering
+/// internally — the caller is responsible for passing the right pool. Use this
+/// for boss fights, custom room filters, or path simulation with configurable
+/// playout counts.
+pub fn compute_deck_stats_vs_pool(
+    deck: &[Card],
+    hp: u32,
+    max_hp: u32,
+    sub_act: &str,
+    pool: &[&SpireApiEncounter],
+    max_encounters: usize,
+    combats_per_enc: u32,
+    all_monsters: &[SpireApiMonster],
+    relics: &[String],
+    rng: &mut impl Rng,
+) -> DeckStats {
+    let deck_size = deck.len();
+    let cycle_turns = if deck_size == 0 { 0.0 } else { deck_size as f32 / 5.0 };
+    let mean_energy_cost = mean_cost(deck);
+    let attack_fraction = attack_ratio(deck);
+    let block_card_count = deck.iter().filter(|c| c.base_block() > 0).count();
+    let synergy_axes = synergy_score(deck);
+    let heuristic_score = deck_score(deck, 1);
 
     if pool.is_empty() || deck.is_empty() {
         return DeckStats {
@@ -102,9 +119,9 @@ pub fn compute_deck_stats(
     }
 
     let sampled: Vec<&SpireApiEncounter> =
-        pool.choose_multiple(rng, MAX_ENCOUNTERS.min(pool.len())).copied().collect();
+        pool.choose_multiple(rng, max_encounters.min(pool.len())).copied().collect();
 
-    let total_playouts = sampled.len() as u32 * FULL_COMBATS_PER_ENC;
+    let total_playouts = sampled.len() as u32 * combats_per_enc;
     let mut damages: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut blocks: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut hp_losses: Vec<f32> = Vec::with_capacity(total_playouts as usize);
@@ -112,7 +129,7 @@ pub fn compute_deck_stats(
     let mut survivals = 0u32;
 
     for enc in &sampled {
-        for _ in 0..FULL_COMBATS_PER_ENC {
+        for _ in 0..combats_per_enc {
             let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, relics, rng);
             let r = run_combat(state, &GreedyDamagePolicy, rng);
             damages.push(r.damage_dealt as f32 / r.turns.max(1) as f32);

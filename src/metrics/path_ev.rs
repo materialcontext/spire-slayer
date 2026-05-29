@@ -103,7 +103,7 @@ impl GoldValues {
     }
 }
 
-fn node_cost(rt: Option<RoomType>, costs: &NodeCosts) -> f32 {
+pub(crate) fn node_cost(rt: Option<RoomType>, costs: &NodeCosts) -> f32 {
     match rt {
         Some(RoomType::Monster)  => -costs.monster_loss,
         Some(RoomType::Elite)    => -costs.elite_loss,
@@ -113,6 +113,42 @@ fn node_cost(rt: Option<RoomType>, costs: &NodeCosts) -> f32 {
         Some(RoomType::Shop)     => costs.shop_hp_value,
         _ => 0.0,
     }
+}
+
+/// Build the bottom-up HP-delta DP table for a map segment.
+///
+/// Returns `dp[floor][col]` = best expected HP delta from entering `(floor, col)`
+/// through the act boss. Used by path_sim to select the greedy-optimal successor
+/// at each floor during forward simulation.
+pub fn build_dp_table(map: &ActMap, start_floor: usize, costs: &NodeCosts) -> Vec<Vec<f32>> {
+    let neg_inf = f32::NEG_INFINITY;
+    let mut dp = vec![vec![neg_inf; COLS]; ROWS];
+    for floor in (start_floor..ROWS).rev() {
+        for col in 0..COLS {
+            if !map.is_connected(floor, col) { continue; }
+            let rt   = map.room_type(floor, col);
+            let cost = node_cost(rt, costs);
+            let succs = map.next_nodes(floor, col);
+            if succs.is_empty() {
+                dp[floor][col] = cost - costs.boss_loss;
+            } else {
+                let best = succs.iter()
+                    .filter(|&&c| dp[floor + 1][c as usize].is_finite())
+                    .copied()
+                    .max_by(|&a, &b| {
+                        dp[floor + 1][a as usize]
+                            .partial_cmp(&dp[floor + 1][b as usize])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                dp[floor][col] = if let Some(sc) = best {
+                    cost + dp[floor + 1][sc as usize]
+                } else {
+                    cost
+                };
+            }
+        }
+    }
+    dp
 }
 
 fn node_gold(rt: Option<RoomType>, costs: &NodeCosts) -> f32 {
