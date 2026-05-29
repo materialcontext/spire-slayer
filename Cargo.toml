@@ -12,3 +12,6 @@ ratatui    = "0.28"
 ureq       = "2"
 thiserror  = "1"
 crossterm  = "0.28"
+
+[dev-dependencies]
+tempfile = "3"
