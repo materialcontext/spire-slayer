@@ -137,14 +137,8 @@ impl App {
         relics: Vec<SpireApiRelic>,
         ancients: Vec<SpireApiAncient>,
     ) -> Self {
-        // Show character picker if we have data; otherwise skip straight to encounter pick.
-        let initial_mode = if characters.is_empty() {
-            AppMode::EncounterPick
-        } else {
-            AppMode::CharacterPick
-        };
         let mut app = Self {
-            mode: initial_mode,
+            mode: AppMode::CharacterPick,
             combat: None,
             run: None,
             play_advice: None,
@@ -1557,6 +1551,13 @@ pub fn run_app() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
+    // Drain any keystrokes that buffered while API data was loading (before raw mode
+    // was active). Without this, those events replay immediately and make the app
+    // appear to "run by itself" on first launch.
+    while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        let _ = crossterm::event::read();
+    }
+
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -1636,9 +1637,9 @@ mod tests {
     }
 
     #[test]
-    fn new_app_starts_in_encounter_pick() {
+    fn new_app_starts_in_character_pick() {
         let app = empty_app();
-        assert_eq!(app.mode, AppMode::EncounterPick);
+        assert_eq!(app.mode, AppMode::CharacterPick);
     }
 
     #[test]
@@ -1652,6 +1653,7 @@ mod tests {
     #[test]
     fn enter_with_no_encounters_falls_back_to_default() {
         let mut app = empty_app();
+        app.mode = AppMode::EncounterPick;
         let mut rng = seeded_rng();
         app.handle_event(make_key(KeyCode::Enter), &mut rng);
         assert_eq!(app.mode, AppMode::CombatAdvice);
@@ -1661,6 +1663,7 @@ mod tests {
     #[test]
     fn act_filter_keys_change_filter() {
         let mut app = empty_app();
+        app.mode = AppMode::EncounterPick;
         let mut rng = seeded_rng();
         app.handle_event(make_key(KeyCode::Char('u')), &mut rng);
         assert_eq!(app.act_filter, "underdocks");
@@ -1693,6 +1696,7 @@ mod tests {
             loss_text: None,
         };
         let mut app = App::new(vec![], vec![enc], vec![], vec![], vec![], vec![]);
+        app.mode = AppMode::EncounterPick;
         let mut rng = seeded_rng();
         // Default filter is "overgrowth" → should match
         assert_eq!(app.filtered_indices.len(), 1);
@@ -1747,6 +1751,7 @@ mod tests {
             loss_text: None,
         };
         let mut app = App::new(vec![], vec![make_enc("a"), make_enc("b"), make_enc("c")], vec![], vec![], vec![], vec![]);
+        app.mode = AppMode::EncounterPick;
         let mut rng = seeded_rng();
         assert_eq!(app.selected_row, 0);
         app.handle_event(make_key(KeyCode::Char('j')), &mut rng);
