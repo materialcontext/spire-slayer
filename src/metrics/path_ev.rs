@@ -33,13 +33,13 @@ pub struct NodeCosts {
 }
 
 impl NodeCosts {
-    pub fn from_map_ev(map_ev: &MapEvData, max_hp: u32, ascension: u8) -> Self {
+    pub fn from_map_ev(map_ev: &MapEvData, max_hp: u32, current_hp: u32, ascension: u8) -> Self {
         let gold = GoldValues::for_ascension(ascension);
         Self {
             monster_loss: map_ev.normal.mean_hp_loss,
             elite_loss:   map_ev.elite.mean_hp_loss,
             boss_loss:    map_ev.boss.mean_hp_loss,
-            rest_heal:    (max_hp as f32 * 0.30).floor(),
+            rest_heal:    effective_rest_heal(max_hp, current_hp),
             monster_gold: gold.monster,
             elite_gold:   gold.elite,
             boss_gold:    gold.boss,
@@ -66,6 +66,22 @@ impl NodeCosts {
             shop_hp_value:  0.0,
         }
     }
+}
+
+/// Rest heal value capped at the actual HP deficit and discounted by a
+/// mid-act HP ratio estimate.
+///
+/// Because the path DP doesn't track HP state per node, we approximate the
+/// expected HP at rest sites: on average the player arrives at ~70% of their
+/// current HP ratio (they've taken some damage since the last heal). The heal
+/// is then capped at that expected deficit so overheal scenarios aren't
+/// counted at full value.
+fn effective_rest_heal(max_hp: u32, current_hp: u32) -> f32 {
+    let full_heal = (max_hp as f32 * 0.30).floor();
+    // Expected HP at the rest site: current ratio × 0.7 (damage taken en-route)
+    let hp_ratio_at_rest = (current_hp as f32 / max_hp.max(1) as f32) * 0.70;
+    let expected_deficit = max_hp as f32 * (1.0 - hp_ratio_at_rest);
+    full_heal.min(expected_deficit)
 }
 
 struct GoldValues {

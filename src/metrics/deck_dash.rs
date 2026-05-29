@@ -56,7 +56,7 @@ pub fn compute_deck_stats(
     rng: &mut impl Rng,
 ) -> DeckStats {
     const MAX_ENCOUNTERS: usize = 5;
-    const FULL_COMBATS_PER_ENC: u32 = 8;
+    const FULL_COMBATS_PER_ENC: u32 = 5;
 
     let deck_size = deck.len();
     let cycle_turns = if deck_size == 0 { 0.0 } else { deck_size as f32 / 5.0 };

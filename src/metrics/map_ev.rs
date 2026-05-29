@@ -98,7 +98,15 @@ pub fn strip_tags(s: &str) -> String {
 
 // ── HP delta parsing ──────────────────────────────────────────────────────────
 
-const REMAINING_FIGHTS: f32 = 5.0;
+/// Expected remaining combat encounters in the current act.
+///
+/// Act 3 (glory) is shorter than acts 1/2; everything else is ≈5 fights.
+pub(crate) fn remaining_fights(sub_act: &str) -> f32 {
+    match sub_act {
+        "glory" => 3.0,
+        _       => 5.0,
+    }
+}
 
 /// Strip trailing punctuation so "damage." compares equal to "damage".
 fn strip_punct(w: &str) -> &str {
@@ -133,13 +141,19 @@ fn parse_option_hp_delta(plain: &str, removal_hp: f32, upgrade_hp: f32) -> f32 {
         let is_hp2  = !is_hp  && (next2 == "hp" || next2 == "health");
         let is_dmg2 = !is_dmg && (next2 == "damage" || next2 == "dmg");
         let is_gold = next == "gold" || next2 == "gold";
+        // Guard: "enemy takes X damage" and "deal X damage" mean the player is
+        // dealing damage — don't count those as HP loss to the player.
+        let subject = if i >= 2 { strip_punct(words[i - 2]) } else { "" };
+        let enemy_subject = matches!(subject, "enemy" | "enemies" | "it" | "they");
+        let dealer_subject = matches!(prev, "deal" | "deals");
+
         match prev {
             "heal" | "heals" | "restore" | "restores" => delta += n,
             "gain" if is_hp || is_hp2  => delta += n,
             "gain" if is_gold          => delta += n * GOLD_HP_RATE,
             "lose" | "loses" if is_hp || is_hp2  => delta -= n,
-            "take" | "takes" if is_dmg || is_dmg2 => delta -= n,
-            "deal" | "deals" if is_dmg || is_dmg2 => delta -= n,
+            "take" | "takes" if (is_dmg || is_dmg2) && !enemy_subject => delta -= n,
+            _ if dealer_subject && (is_dmg || is_dmg2) && !enemy_subject => delta -= n,
             _ => {}
         }
     }
@@ -186,11 +200,11 @@ fn upgrade_card_copy(card: &Card) -> Option<Card> {
     None
 }
 
-/// Estimate the HP value of upgrading the best card in the deck over the remaining run.
+/// Estimate the HP value of upgrading the best card in the deck over the remaining act.
 ///
-/// Finds the highest-scoring upgradeable card, boosts its primary effect,
-/// and measures the simulation delta. Falls back to `UPGRADE_HP_HEURISTIC` when
-/// no encounter data is available.
+/// Accepts a precomputed `baseline_loss` (and `has_data` flag) so the caller
+/// can share the deck-stats computation already done for event parsing.
+/// Falls back to `UPGRADE_HP_HEURISTIC` when no encounter data is available.
 fn best_upgrade_hp_value(
     deck: &[Card],
     hp: u32,
@@ -199,10 +213,12 @@ fn best_upgrade_hp_value(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    baseline_loss: f32,
+    has_data: bool,
     rng: &mut impl Rng,
 ) -> f32 {
     const UPGRADE_HP_HEURISTIC: f32 = 5.0;
-    if deck.is_empty() || all_encounters.is_empty() {
+    if deck.is_empty() || !has_data {
         return UPGRADE_HP_HEURISTIC;
     }
     let best_idx = deck
@@ -221,14 +237,10 @@ fn best_upgrade_hp_value(
     let Some(upgraded_card) = upgrade_card_copy(&deck[idx]) else {
         return UPGRADE_HP_HEURISTIC;
     };
-    let baseline = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
-    if baseline.encounter_count == 0 {
-        return UPGRADE_HP_HEURISTIC;
-    }
     let mut upgraded_deck = deck.to_vec();
     upgraded_deck[idx] = upgraded_card;
     let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
-    ((baseline.mean_hp_loss - upgraded.mean_hp_loss) * REMAINING_FIGHTS).max(0.0)
+    ((baseline_loss - upgraded.mean_hp_loss) * remaining_fights(sub_act)).max(0.0)
 }
 
 /// Compute the mean best-option HP delta across the act event pool.
@@ -263,7 +275,19 @@ pub fn compute_event_hp_delta(
         deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
         baseline.mean_hp_loss, has_data, rng,
     );
-    let upgrade_hp = best_upgrade_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+
+    // Only simulate upgrade value when at least one event in the pool mentions it.
+    let pool_text_mentions_upgrade = pool.iter().any(|e| {
+        e.options.iter().any(|o| {
+            o.description.as_deref().unwrap_or("").to_lowercase().contains("upgrade")
+        })
+    });
+    let upgrade_hp = if pool_text_mentions_upgrade {
+        best_upgrade_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
+            baseline.mean_hp_loss, has_data, rng)
+    } else {
+        5.0 // heuristic fallback; never used unless an option mentions "upgrade"
+    };
 
     // For each event, find the best available option's HP delta; average over pool.
     let total: f32 = pool.iter().map(|event| {
@@ -350,31 +374,32 @@ pub fn compute_map_ev(
     class_cards: &[Card],
     rng: &mut impl Rng,
 ) -> MapEvData {
-    // Simulate vs. normal (Monster) encounters for this sub-act.
-    let normal_enc: Vec<SpireApiEncounter> = all_encounters
+    // Pre-filter by sub-act once; room-type sub-filters below are then cheap.
+    let act_enc: Vec<&SpireApiEncounter> = all_encounters
         .iter()
-        .filter(|e| e.room_type.as_deref() == Some("Monster"))
-        .cloned()
+        .filter(|e| e.act.as_deref().map(crate::domain::encounter::normalize_act).unwrap_or("other") == sub_act)
         .collect();
+
+    let by_room = |room: &str| -> Vec<SpireApiEncounter> {
+        act_enc.iter()
+            .filter(|e| e.room_type.as_deref() == Some(room))
+            .map(|e| (*e).clone())
+            .collect()
+    };
+
+    // Simulate vs. normal (Monster) encounters for this sub-act.
+    let normal_enc = by_room("Monster");
     let normal_stats =
         compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, rng);
 
     // Simulate vs. elite encounters — elites give a guaranteed relic so the
     // star bonus reflects the relic reward even at moderate HP risk.
-    let elite_enc: Vec<SpireApiEncounter> = all_encounters
-        .iter()
-        .filter(|e| e.room_type.as_deref() == Some("Elite"))
-        .cloned()
-        .collect();
+    let elite_enc = by_room("Elite");
     let elite_stats =
         compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, relics, rng);
 
     // Simulate vs. boss encounters for this sub-act.
-    let boss_enc: Vec<SpireApiEncounter> = all_encounters
-        .iter()
-        .filter(|e| e.room_type.as_deref() == Some("Boss"))
-        .cloned()
-        .collect();
+    let boss_enc = by_room("Boss");
     let boss_stats =
         compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, relics, rng);
 

@@ -29,6 +29,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Shop         => render_shop(frame, app, area),
         AppMode::AncientBoon  => render_ancient_boon(frame, app, area),
         AppMode::Victory      => render_victory(frame, app, area),
+        AppMode::Calibration  => render_calibration(frame, app, area),
         AppMode::Exiting      => {}
     }
 }
@@ -1670,6 +1671,101 @@ fn render_victory(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn render_calibration(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new("  Path Prediction Calibration")
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::raw("")));
+
+    let store = &app.residuals;
+    let sub_acts = store.sub_acts();
+    if sub_acts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No calibration data yet. Complete an act to record a data point.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:16}", "Act"), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:>8}", "Pred"), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:>8}", "Actual"), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:>8}", "Error"), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:>6}", "n"), Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("  {:─<46}", ""),
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let mut all_acts = sub_acts;
+        all_acts.sort();
+        for act in &all_acts {
+            if let Some(s) = store.summary_for(act) {
+                let err_color = if s.mean_error.abs() < 5.0 {
+                    Color::LightGreen
+                } else if s.mean_error.abs() < 15.0 {
+                    Color::Yellow
+                } else {
+                    Color::LightRed
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:16}", s.sub_act), Style::default().fg(Color::White)),
+                    Span::styled(format!("{:>8.1}", s.mean_predicted), Style::default().fg(Color::LightBlue)),
+                    Span::styled(format!("{:>8.1}", s.mean_actual), Style::default().fg(Color::White)),
+                    Span::styled(format!("{:>+8.1}", s.mean_error), Style::default().fg(err_color)),
+                    Span::styled(format!("{:>6}", s.sample_count), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
+        if let Some(overall) = store.overall_summary() {
+            lines.push(Line::from(Span::styled(
+                format!("  {:─<46}", ""),
+                Style::default().fg(Color::DarkGray),
+            )));
+            let err_color = if overall.mean_error.abs() < 5.0 {
+                Color::LightGreen
+            } else if overall.mean_error.abs() < 15.0 {
+                Color::Yellow
+            } else {
+                Color::LightRed
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:16}", "Overall"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:>8.1}", overall.mean_predicted), Style::default().fg(Color::LightBlue)),
+                Span::styled(format!("{:>8.1}", overall.mean_actual), Style::default().fg(Color::White)),
+                Span::styled(format!("{:>+8.1}", overall.mean_error), Style::default().fg(err_color)),
+                Span::styled(format!("{:>6}", overall.sample_count), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            "  Error = Predicted − Actual  (+ means we over-predicted HP loss)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+    frame.render_widget(
+        Paragraph::new("  [Esc/c/q] Back to map"),
+        rows[2],
+    );
+}
+
 fn render_ancient_boon(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1976,6 +2072,33 @@ mod tests {
         app.ancient_cursor = 0;
         app.ancient_is_act_transition = false;
         app.mode = crate::tui::app::AppMode::AncientBoon;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_calibration_empty_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        app.mode = crate::tui::app::AppMode::Calibration;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_calibration_with_data_does_not_panic() {
+        use crate::telemetry::residual::ActResidual;
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        app.residuals.record(ActResidual {
+            sub_act: "overgrowth".into(),
+            predicted_delta: -20.0,
+            actual_delta: -15.0,
+        });
+        app.residuals.record(ActResidual {
+            sub_act: "hive".into(),
+            predicted_delta: -30.0,
+            actual_delta: -35.0,
+        });
+        app.mode = crate::tui::app::AppMode::Calibration;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

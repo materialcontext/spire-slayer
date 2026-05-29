@@ -21,6 +21,8 @@ use crate::metrics::rest::{advise_rest, RestAction, RestAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
+use crate::telemetry::log::{default_log_path, now_secs, RunEvent, RunLogger, ScoredChoice};
+use crate::telemetry::residual::{ActResidual, ResidualStore};
 use crate::tui::ui;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,7 @@ pub enum AppMode {
     Victory,
     ManualInput,
     Simulating,
+    Calibration,
     Exiting,
 }
 
@@ -126,6 +129,17 @@ pub struct App {
     pub ancient_had_darv_act2: bool,
     /// Action to take after the current card pick is confirmed.
     pub post_pick_action: Option<PostPickAction>,
+    // ── Telemetry ──────────────────────────────────────────────────────────
+    /// Append-only JSONL run logger; None when the log file could not be opened.
+    pub run_logger: Option<RunLogger>,
+    /// In-memory accumulator of act HP prediction residuals.
+    pub residuals: ResidualStore,
+    /// Monotonic run identifier (Unix seconds at run start).
+    pub run_id: u64,
+    /// HP at the beginning of the current act (captured when the map first opens).
+    pub hp_at_act_start: u32,
+    /// Best-path HP delta predicted by the DP when the act map first opened.
+    pub best_path_predicted_delta: f32,
 }
 
 impl App {
@@ -189,9 +203,21 @@ impl App {
             ancient_is_act_transition: false,
             ancient_had_darv_act2: false,
             post_pick_action: None,
+            run_logger: None,
+            residuals: ResidualStore::new(),
+            run_id: 0,
+            hp_at_act_start: 0,
+            best_path_predicted_delta: 0.0,
         };
         app.refresh_filter();
         app
+    }
+
+    /// Emit a telemetry event to the run log, silently ignoring IO errors.
+    fn log_event(&mut self, event: RunEvent) {
+        if let Some(ref mut logger) = self.run_logger {
+            let _ = logger.write(&event);
+        }
     }
 
     pub fn refresh_filter(&mut self) {
@@ -247,6 +273,7 @@ impl App {
             AppMode::MapEv          => self.handle_key_map_ev(key),
             AppMode::AncientBoon    => self.handle_key_ancient_boon(key, rng),
             AppMode::Victory        => self.handle_key_victory(key),
+            AppMode::Calibration    => self.handle_key_calibration(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -286,6 +313,9 @@ impl App {
             }
             KeyCode::Char('d') => {
                 self.compute_deck_dash(rng);
+            }
+            KeyCode::Char('c') => {
+                self.mode = AppMode::Calibration;
             }
             KeyCode::Char('j') | KeyCode::Right => {
                 let n = self.map_choices().len();
@@ -683,6 +713,9 @@ impl App {
             char_name, hp, run.deck.len(),
         );
         self.run = Some(run);
+        self.run_id = now_secs();
+        self.hp_at_act_start = 0;
+        self.best_path_predicted_delta = 0.0;
         self.act_filter = sub_act.clone();
         self.refresh_filter();
         self.selected_row = 0;
@@ -699,6 +732,16 @@ impl App {
         }
         self.map_cursor = 0;
         self.recompute_path_choices();
+        // Capture act-start HP and the best predicted delta (only on first open per act).
+        if self.hp_at_act_start == 0 {
+            if let Some(ref run) = self.run {
+                self.hp_at_act_start = run.hp;
+            }
+            let best = self.path_choices.iter()
+                .map(|pc| pc.total_hp_delta)
+                .fold(f32::NEG_INFINITY, f32::max);
+            self.best_path_predicted_delta = if best.is_finite() { best } else { 0.0 };
+        }
         self.mode = AppMode::MapView;
     }
 
@@ -710,8 +753,9 @@ impl App {
 
         let max_hp = run.max_hp;
         let ascension = run.ascension;
+        let current_hp = run.hp;
         let (simulated, costs) = if let Some(ref me) = self.map_ev {
-            (true, NodeCosts::from_map_ev(me, max_hp, ascension))
+            (true, NodeCosts::from_map_ev(me, max_hp, current_hp, ascension))
         } else {
             (false, NodeCosts::defaults(max_hp, ascension))
         };
@@ -746,6 +790,24 @@ impl App {
         use crate::domain::map::RoomType;
         let choices = self.map_choices();
         let Some(&col) = choices.get(self.map_cursor) else { return; };
+
+        // Snapshot telemetry data before mutating state.
+        let tel_choices: Vec<ScoredChoice> = self.path_choices.iter()
+            .map(|pc| ScoredChoice {
+                label: format!("col{} {:?}", pc.col, pc.room_type),
+                hp_delta: pc.total_hp_delta,
+            })
+            .collect();
+        let tel_predicted = self.path_choices.get(self.map_cursor)
+            .map(|pc| pc.total_hp_delta)
+            .unwrap_or(0.0);
+        let tel_chose = self.map_cursor;
+        let tel_run_id = self.run_id;
+        let tel_hp_before = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+        let tel_max_hp = self.run.as_ref().map(|r| r.max_hp).unwrap_or(0);
+        let tel_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+        let tel_floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+
         let Some(ref mut run) = self.run else { return; };
         run.move_to(col as usize);
         self.map_cursor = 0;
@@ -753,8 +815,23 @@ impl App {
         let room = run.map_pos.and_then(|pos| {
             run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
         });
+        let tel_room_type = room.map(|rt| format!("{:?}", rt)).unwrap_or_default();
         drop(run);
         self.recompute_path_choices();
+
+        // Emit map decision event.
+        self.log_event(RunEvent::MapDecision {
+            run_id: tel_run_id,
+            timestamp: now_secs(),
+            floor: tel_floor,
+            sub_act: tel_sub_act,
+            room_type: tel_room_type,
+            hp_before: tel_hp_before,
+            max_hp: tel_max_hp,
+            predicted_hp_delta: tel_predicted,
+            choices: tel_choices,
+            chose_index: tel_chose,
+        });
 
         match room {
             Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {
@@ -766,6 +843,7 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
                 self.load_pick(offered, rng, AppMode::MapView);
             }
@@ -777,6 +855,7 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                self.apply_combat_hp_loss(RoomType::Boss, rng);
                 self.apply_post_combat_relics();
                 self.post_pick_action = Some(PostPickAction::BossActTransition);
                 self.load_pick(offered, rng, AppMode::MapView);
@@ -1062,7 +1141,7 @@ impl App {
         // ── Score cards (sim-backed when encounter data is present) ────────
         let card_advice = crate::metrics::card_pick::sim_pick_score(
             &shop_cards, &deck, hp, max_hp, &sub_act,
-            &self.encounters, &self.monsters, rng,
+            &self.encounters, &self.monsters, &current_relics, rng,
         );
 
         // ── Baseline combat sim (shared across relic scoring + removal) ────
@@ -1263,6 +1342,7 @@ impl App {
         let max_hp = self.run.as_ref().map(|r| r.max_hp)
             .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
             .unwrap_or(80);
+        let relics = relic_ids_from_run(self.run.as_ref());
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -1271,6 +1351,7 @@ impl App {
             &self.act_filter,
             &self.encounters,
             &self.monsters,
+            &relics,
             rng,
         );
         self.offered_cards = offered;
@@ -1281,8 +1362,32 @@ impl App {
 
     fn apply_card_pick(&mut self) {
         let Some(advice) = self.card_advice.get(self.selected_row) else { return; };
+
+        // Build telemetry before mutating state.
+        let offered = &self.offered_cards;
+        let tel_choices: Vec<ScoredChoice> = self.card_advice.iter()
+            .map(|a| ScoredChoice {
+                label: if a.card_index == usize::MAX {
+                    "Skip".into()
+                } else {
+                    offered.get(a.card_index).map(|c| c.name.clone()).unwrap_or_default()
+                },
+                hp_delta: a.delta_hp,
+            })
+            .collect();
+        let tel_event = RunEvent::CardPick {
+            run_id: self.run_id,
+            timestamp: now_secs(),
+            floor: self.run.as_ref().map(|r| r.floor).unwrap_or(0),
+            sub_act: self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default(),
+            hp_before: self.run.as_ref().map(|r| r.hp).unwrap_or(0),
+            choices: tel_choices,
+            chose_index: self.selected_row,
+        };
+
         if advice.card_index == usize::MAX {
             self.status_message = "Skipped card reward".to_string();
+            self.log_event(tel_event);
             return;
         }
         let card = self.offered_cards.get(advice.card_index).cloned();
@@ -1292,6 +1397,56 @@ impl App {
                 run.deck.push(card);
                 self.status_message = format!("Added {} to deck ({} cards)", name, run.deck.len());
             }
+        }
+        self.log_event(tel_event);
+    }
+
+    /// Deduct expected HP loss for a combat room from the current run.
+    ///
+    /// Simulates the act's encounter pool for the given room type to compute
+    /// mean HP loss. Falls back to hard-coded heuristics when no encounter data
+    /// exists. HP is clamped to 1 (the run advisor doesn't model in-combat death).
+    fn apply_combat_hp_loss(&mut self, room_type: crate::domain::map::RoomType, rng: &mut impl rand::Rng) {
+        use crate::domain::encounter::normalize_act;
+        use crate::domain::map::RoomType;
+
+        let Some(ref run) = self.run else { return; };
+        let sub_act   = run.sub_act.clone();
+        let deck      = run.deck.clone();
+        let hp        = run.hp;
+        let max_hp    = run.max_hp;
+        let relics    = relic_ids_from_run(Some(run));
+
+        let room_str = match room_type {
+            RoomType::Monster  => "Monster",
+            RoomType::Elite    => "Elite",
+            RoomType::Boss     => "Boss",
+            _                  => return,
+        };
+
+        let pool: Vec<SpireApiEncounter> = self.encounters.iter()
+            .filter(|e| {
+                let act = e.act.as_deref().map(normalize_act).unwrap_or("other");
+                act == sub_act && e.room_type.as_deref() == Some(room_str)
+            })
+            .cloned()
+            .collect();
+
+        let loss = if pool.is_empty() {
+            match room_type {
+                RoomType::Monster => 7,
+                RoomType::Elite   => 15,
+                RoomType::Boss    => 25,
+                _                 => 0,
+            }
+        } else {
+            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, rng);
+            stats.mean_hp_loss.round() as u32
+        };
+
+        if let Some(ref mut run) = self.run {
+            run.hp = run.hp.saturating_sub(loss).max(1);
+            self.status_message = format!("Combat: -{} HP  ({} HP remaining)", loss, run.hp);
         }
     }
 
@@ -1391,6 +1546,38 @@ impl App {
     fn begin_act_transition(&mut self, rng: &mut impl rand::Rng) {
         let current_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
         let future = crate::metrics::run_ev::acts_after(&current_sub_act);
+
+        // Record act-completion telemetry before HP is restored by the ancient.
+        let tel_hp_end  = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+        let tel_max_hp  = self.run.as_ref().map(|r| r.max_hp).unwrap_or(0);
+        let tel_floor   = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+        let tel_predicted = self.best_path_predicted_delta;
+        let tel_start_hp = self.hp_at_act_start;
+        let actual_delta = tel_hp_end as f32 - tel_start_hp as f32;
+
+        self.log_event(RunEvent::ActComplete {
+            run_id: self.run_id,
+            timestamp: now_secs(),
+            sub_act: current_sub_act.clone(),
+            hp_at_act_start: tel_start_hp,
+            hp_at_act_end: tel_hp_end,
+            max_hp: tel_max_hp,
+            predicted_hp_delta: tel_predicted,
+            floors_completed: tel_floor,
+        });
+
+        // Record the residual for calibration.
+        if tel_start_hp > 0 {
+            self.residuals.record(ActResidual {
+                sub_act: current_sub_act.clone(),
+                predicted_delta: tel_predicted,
+                actual_delta,
+            });
+        }
+        // Reset act-tracking so the next act captures fresh data.
+        self.hp_at_act_start = 0;
+        self.best_path_predicted_delta = 0.0;
+
         let Some(&(next_sub_act, _)) = future.first() else {
             // No more acts — victory
             self.open_victory_screen();
@@ -1421,6 +1608,21 @@ impl App {
     }
 
     pub fn open_victory_screen(&mut self) {
+        let tel_hp   = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+        let tel_max  = self.run.as_ref().map(|r| r.max_hp).unwrap_or(0);
+        let tel_deck = self.run.as_ref().map(|r| r.deck.len()).unwrap_or(0);
+        let tel_floor= self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+        let tel_sub  = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+        self.log_event(RunEvent::RunComplete {
+            run_id: self.run_id,
+            timestamp: now_secs(),
+            sub_act: tel_sub,
+            final_hp: tel_hp,
+            max_hp: tel_max,
+            won: true,
+            deck_size: tel_deck,
+            floors_completed: tel_floor,
+        });
         self.status_message = "You have conquered the Spire!".to_string();
         self.mode = AppMode::Victory;
     }
@@ -1441,6 +1643,15 @@ impl App {
                     AppMode::CharacterPick
                 };
                 self.status_message = "Choose your character.".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_calibration(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                self.mode = AppMode::MapView;
             }
             _ => {}
         }
@@ -1562,6 +1773,7 @@ pub fn run_app() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(characters, encounters, monsters, events, relics, ancients);
+    app.run_logger = RunLogger::open(&default_log_path()).ok();
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
