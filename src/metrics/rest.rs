@@ -58,7 +58,7 @@ pub fn advise_rest(run: &RunState) -> RestAdvice {
 fn best_smith_candidate(deck: &[Card]) -> Option<(usize, &Card)> {
     deck.iter()
         .enumerate()
-        .filter(|(_, c)| !c.upgraded && !matches!(c.card_type, CardType::Status | CardType::Curse))
+        .filter(|(_, c)| !matches!(c.card_type, CardType::Status | CardType::Curse))
         .max_by_key(|(_, c)| smith_priority(c))
 }
 
@@ -105,11 +105,9 @@ mod tests {
     }
 
     #[test]
-    fn all_upgraded_falls_back_to_heal() {
+    fn empty_deck_falls_back_to_heal() {
         let mut run = run_at_hp(80, 80);
-        for card in &mut run.deck {
-            card.upgraded = true;
-        }
+        run.deck.clear();
         let advice = advise_rest(&run);
         assert!(matches!(advice.action, RestAction::Heal));
     }

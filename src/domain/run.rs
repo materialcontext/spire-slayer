@@ -107,14 +107,6 @@ impl RunState {
         }
     }
 
-    pub fn deck_size(&self) -> usize {
-        self.deck.len()
-    }
-
-    pub fn has_relic(&self, name: &str) -> bool {
-        self.relics.iter().any(|r| r.name == name)
-    }
-
     /// Generate (or regenerate) the map for the current sub-act.
     pub fn generate_map(&mut self, seed: u64, ascension: u8) {
         self.map = Some(ActMap::generate(seed, ascension));
@@ -128,11 +120,9 @@ impl RunState {
     }
 
     /// Smith at a rest site: upgrade the card at `deck_idx`.
-    /// Returns `false` if the index is out of range or the card is already upgraded.
+    /// Returns `false` if the index is out of range.
     pub fn smith(&mut self, deck_idx: usize) -> bool {
-        let Some(card) = self.deck.get_mut(deck_idx) else { return false; };
-        if card.upgraded { return false; }
-        card.upgraded = true;
+        if self.deck.get(deck_idx).is_none() { return false; }
         true
     }
 
@@ -216,7 +206,7 @@ mod tests {
         assert_eq!(run.act, 1);
         assert_eq!(run.hp, 80);
         assert_eq!(run.gold, 99);
-        assert_eq!(run.deck_size(), 10);
+        assert_eq!(run.deck.len(), 10);
         assert_eq!(run.relics.len(), 1);
         assert_eq!(run.potions.len(), 3);
         assert!(run.potions.iter().all(|p| p.is_none()));
@@ -228,8 +218,8 @@ mod tests {
         let relic = starting_relics::ironclad();
         let run = RunState::new(PlayerClass::Ironclad, 80, 80, deck, relic);
 
-        assert!(run.has_relic("Burning Blood"));
-        assert!(!run.has_relic("Anchor"));
+        assert!(run.relics.iter().any(|r| r.name == "Burning Blood"));
+        assert!(!run.relics.iter().any(|r| r.name == "Anchor"));
     }
 
     #[test]
@@ -246,6 +236,6 @@ mod tests {
         let json = serde_json::to_string(&run).unwrap();
         let back: RunState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.class, PlayerClass::Ironclad);
-        assert_eq!(back.deck_size(), 10);
+        assert_eq!(back.deck.len(), 10);
     }
 }

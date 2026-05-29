@@ -39,9 +39,6 @@ pub struct MapEvData {
     pub event_node: NodeEv,
     pub events: Vec<EventSummary>,
     pub shared_event_count: usize,
-    /// HP the player will have at the start of the next act (post-act heal).
-    /// Full heal at ascension < 6; 80 % of max HP at ascension ≥ 6.
-    pub post_act_heal_hp: f32,
     /// Expected HP change from the best event option, averaged over the act event pool.
     pub event_hp_delta: f32,
     /// Expected HP equivalent from a treasure relic (rarity-weighted heuristic).
@@ -467,7 +464,6 @@ pub fn compute_map_ev(
         event_node,
         events,
         shared_event_count,
-        post_act_heal_hp: post_act_heal_hp(max_hp, ascension),
         event_hp_delta,
         treasure_hp,
         shop_hp_value,

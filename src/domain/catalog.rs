@@ -325,32 +325,6 @@ pub mod colorless {
     }
 }
 
-/// Status cards that enemies or card effects can shuffle into the deck.
-pub mod status {
-    use super::*;
-
-    fn find_status(id: &str) -> Option<Card> {
-        load_api_cards()
-            .iter()
-            .find(|c| {
-                c.id.eq_ignore_ascii_case(id)
-                    && c.color.as_deref() == Some("status")
-            })
-            .map(api_to_domain)
-    }
-
-    pub fn wound() -> Option<Card> {
-        find_status("WOUND")
-    }
-
-    pub fn burn() -> Option<Card> {
-        find_status("BURN")
-    }
-
-    pub fn dazed() -> Option<Card> {
-        find_status("DAZED")
-    }
-}
 
 #[cfg(test)]
 mod tests {
