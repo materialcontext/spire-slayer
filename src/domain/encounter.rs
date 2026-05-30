@@ -77,7 +77,7 @@ pub fn map_intent(intent_str: &str, damage: u32, hits: u32) -> Intent {
     Intent::Unknown
 }
 
-pub fn monster_to_enemy(monster: &SpireApiMonster) -> EnemyState {
+pub fn monster_to_enemy(monster: &SpireApiMonster, slot_index: usize) -> EnemyState {
     let hp = monster.max_hp.unwrap_or(50).max(1) as u32;
 
     let intent = monster
@@ -115,6 +115,17 @@ pub fn monster_to_enemy(monster: &SpireApiMonster) -> EnemyState {
         let initial_state_id = script.initial_state_id.clone();
         enemy.ai_script = Some(script);
         enemy.ai_runtime.current_state_id = initial_state_id;
+
+        // Inklet: outer instances (slot != 1) start at the INIT_RAND routing state
+        // instead of the default WHIRLWIND_MOVE.
+        if slot_index != 1 {
+            if let Some(ref script) = enemy.ai_script {
+                if script.states.contains_key("INIT_RAND") {
+                    enemy.ai_runtime.current_state_id = "INIT_RAND".to_string();
+                }
+            }
+        }
+
         if let Some(mid) = initial_move_id {
             enemy.ai_runtime.last_move_id = Some(mid.clone());
             enemy.ai_runtime.used_moves.insert(mid.clone());
@@ -155,8 +166,11 @@ pub fn encounter_to_combat(
     let enemies: Vec<EnemyState> = encounter
         .monsters
         .iter()
-        .filter_map(|em| all_monsters.iter().find(|m| m.id == em.id))
-        .map(monster_to_enemy)
+        .enumerate()
+        .filter_map(|(slot, em)| {
+            all_monsters.iter().find(|m| m.id == em.id).map(|m| (slot, m))
+        })
+        .map(|(slot, m)| monster_to_enemy(m, slot))
         .collect();
 
     let enemies = if enemies.is_empty() {
@@ -427,7 +441,7 @@ mod tests {
             innate_powers: vec![],
             attack_pattern: None,
         };
-        let enemy = monster_to_enemy(&monster);
+        let enemy = monster_to_enemy(&monster, 0);
         assert_eq!(enemy.name, "Cultist");
         assert_eq!(enemy.hp, 48);
         assert_eq!(enemy.intent, Intent::Buff);

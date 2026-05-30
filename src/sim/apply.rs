@@ -67,7 +67,11 @@ fn damage_enemy(state: &mut CombatState, enemy_idx: usize, dmg: u32) -> u32 {
     let enemy = &mut state.enemies[enemy_idx];
     let absorbed = enemy.block.min(dmg);
     enemy.block -= absorbed;
-    enemy.hp = enemy.hp.saturating_sub(dmg - absorbed);
+    let hp_lost = dmg - absorbed;
+    enemy.hp = enemy.hp.saturating_sub(hp_lost);
+    if hp_lost > 0 {
+        enemy.ai_runtime.took_unblocked_damage = true;
+    }
 
     thorns
 }
@@ -546,8 +550,42 @@ pub fn play_card(
 /// Returns `true` if combat is over (won or lost) after the enemy phase.
 /// Step the enemy's move AI: determine next intent and advance internal state.
 /// No-ops if the enemy has no AI script (preserves existing test behaviour).
-pub fn advance_enemy_ai(enemy: &mut EnemyState, slot_index: usize, rng: &mut impl Rng) {
+pub fn advance_enemy_ai(
+    enemy: &mut EnemyState,
+    slot_index: usize,
+    enemy_hps: &[(u32, u32)],
+    rng: &mut impl Rng,
+) {
     let Some(ref script) = enemy.ai_script else { return };
+
+    // ── Lagavulin-style sleep/wake logic ─────────────────────────────────────
+    // A sleeping state is a Move state with `next: None` (loops on itself).
+    let current_id = enemy.ai_runtime.current_state_id.clone();
+    let is_sleeping = matches!(
+        script.states.get(&current_id).map(|s| &s.kind),
+        Some(AiStateKind::Move { next: None, .. })
+    ) && script.wake_state_id.is_some();
+
+    if is_sleeping {
+        enemy.ai_runtime.sleep_turns += 1;
+        let should_wake = enemy.ai_runtime.sleep_turns >= 3
+            || enemy.ai_runtime.took_unblocked_damage;
+        enemy.ai_runtime.took_unblocked_damage = false;
+
+        if should_wake {
+            if let Some(ref wake_id) = script.wake_state_id.clone() {
+                enemy.ai_runtime.current_state_id = wake_id.clone();
+                // Fall through to resolve the wake state's move below.
+            } else {
+                return;
+            }
+        } else {
+            // Still sleeping — keep current intent (already set at init).
+            return;
+        }
+    } else {
+        enemy.ai_runtime.took_unblocked_damage = false;
+    }
 
     // Starting from the current state (a Move state), find what state comes next.
     let current_id = enemy.ai_runtime.current_state_id.clone();
@@ -559,8 +597,16 @@ pub fn advance_enemy_ai(enemy: &mut EnemyState, slot_index: usize, rng: &mut imp
         _ => current_id.clone(),
     };
 
-    let (resolved_move_id, resolved_state_id) =
-        resolve_to_move(&next_state_id, script, &enemy.ai_runtime, enemy.hp, enemy.max_hp, slot_index, rng);
+    let (resolved_move_id, resolved_state_id) = resolve_to_move(
+        &next_state_id,
+        script,
+        &enemy.ai_runtime,
+        enemy.hp,
+        enemy.max_hp,
+        slot_index,
+        enemy_hps,
+        rng,
+    );
 
     if let Some(move_id) = resolved_move_id {
         let runtime = &mut enemy.ai_runtime;
@@ -571,6 +617,7 @@ pub fn advance_enemy_ai(enemy: &mut EnemyState, slot_index: usize, rng: &mut imp
         }
         runtime.last_move_id = Some(move_id.clone());
         runtime.used_moves.insert(move_id.clone());
+        *runtime.move_use_counts.entry(move_id.clone()).or_insert(0) += 1;
         runtime.current_state_id = resolved_state_id;
 
         if let Some(data) = script.moves.get(&move_id) {
@@ -588,6 +635,7 @@ fn resolve_to_move(
     hp: u32,
     max_hp: u32,
     slot_index: usize,
+    enemy_hps: &[(u32, u32)],
     rng: &mut impl Rng,
 ) -> (Option<String>, String) {
     let Some(state) = script.states.get(state_id) else {
@@ -622,7 +670,7 @@ fn resolve_to_move(
         AiStateKind::Conditional { branches } => {
             let picked = branches
                 .iter()
-                .find(|b| eval_condition(&b.condition, hp, max_hp, slot_index))
+                .find(|b| eval_condition(&b.condition, hp, max_hp, slot_index, runtime, enemy_hps))
                 .or_else(|| branches.first());
 
             match picked {
@@ -653,13 +701,34 @@ fn is_eligible(branch: &crate::domain::ai::RandomBranch, runtime: &AiRuntime) ->
     }
 }
 
-fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -> bool {
+fn eval_condition(
+    cond: &AiCondition,
+    hp: u32,
+    max_hp: u32,
+    slot_index: usize,
+    runtime: &AiRuntime,
+    enemy_hps: &[(u32, u32)],
+) -> bool {
     match cond {
         AiCondition::HpAtOrAboveHalf => hp * 2 >= max_hp,
         AiCondition::HpBelowHalf => hp * 2 < max_hp,
         AiCondition::SlotIndex(i) => slot_index == *i,
         AiCondition::AlwaysTrue => true,
         AiCondition::AlwaysFalse => false,
+        AiCondition::MoveUsedLessThan(move_id, threshold) => {
+            runtime.move_use_counts.get(move_id).copied().unwrap_or(0) < *threshold
+        }
+        AiCondition::MoveUsedAtLeast(move_id, threshold) => {
+            runtime.move_use_counts.get(move_id).copied().unwrap_or(0) >= *threshold
+        }
+        AiCondition::AllyDead => enemy_hps
+            .iter()
+            .enumerate()
+            .any(|(i, &(hp, _))| i != slot_index && hp == 0),
+        AiCondition::AllyAlive => enemy_hps
+            .iter()
+            .enumerate()
+            .all(|(i, &(hp, _))| i == slot_index || hp > 0),
     }
 }
 
@@ -785,9 +854,10 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     }
 
     // Advance each living enemy's AI to set next turn's intent
+    let enemy_hps: Vec<(u32, u32)> = state.enemies.iter().map(|e| (e.hp, e.max_hp)).collect();
     for i in 0..state.enemies.len() {
         if state.enemies[i].is_alive() {
-            advance_enemy_ai(&mut state.enemies[i], i, rng);
+            advance_enemy_ai(&mut state.enemies[i], i, &enemy_hps, rng);
         }
     }
 
