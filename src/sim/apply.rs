@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::domain::ai::{AiCondition, AiRuntime, AiStateKind, EnemyAiScript, RepeatConstraint};
 use crate::domain::card::{Card, CardType};
 use crate::domain::combat::{CombatState, EnemyState, Intent};
-use crate::domain::effect::{BuffType, CardEffect};
+use crate::domain::effect::{BuffType, CardEffect, OrbType};
 use crate::domain::encounter::map_intent;
 
 #[derive(Debug, Error)]
@@ -141,6 +141,111 @@ pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
     }
 }
 
+// ── Orb system (Defect) ────────────────────────────────────────────────────
+
+/// Apply an orb's evoke effect, then the orb is consumed.
+fn evoke_orb(state: &mut CombatState, orb: OrbType, rng: &mut impl Rng) {
+    let focus = state.player.buff(&BuffType::Focus);
+    match orb {
+        OrbType::Lightning => {
+            let dmg = (8i32 + focus).max(0) as u32;
+            let living: Vec<usize> = (0..state.enemies.len())
+                .filter(|&i| state.enemies[i].is_alive())
+                .collect();
+            if !living.is_empty() {
+                let idx = living[rng.gen_range(0..living.len())];
+                damage_enemy(state, idx, dmg);
+            }
+        }
+        OrbType::Frost => {
+            let block = (5i32 + focus).max(0) as u32;
+            state.player.block += block;
+        }
+        OrbType::Dark(val) => {
+            let dmg = (val as i32 + focus).max(0) as u32;
+            // Target lowest-HP enemy
+            let idx = (0..state.enemies.len())
+                .filter(|&i| state.enemies[i].is_alive())
+                .min_by_key(|&i| state.enemies[i].hp);
+            if let Some(i) = idx {
+                damage_enemy(state, i, dmg);
+            }
+        }
+        OrbType::Plasma => {
+            state.energy = state.energy.saturating_add(2);
+        }
+        OrbType::Glass(val) => {
+            let dmg = (val as i32 * 2 + focus).max(0) as u32;
+            for i in 0..state.enemies.len() {
+                if state.enemies[i].is_alive() {
+                    damage_enemy(state, i, dmg);
+                }
+            }
+        }
+    }
+}
+
+/// Channel an orb: push to queue; if full, evoke and remove the leftmost.
+fn channel_orb(state: &mut CombatState, orb: OrbType, rng: &mut impl Rng) {
+    if state.orbs.len() >= state.orb_slots {
+        let displaced = state.orbs.remove(0);
+        evoke_orb(state, displaced, rng);
+    }
+    state.orbs.push(orb);
+}
+
+/// Evoke the rightmost orb `count` times. Pass `u32::MAX` to evoke all orbs.
+fn evoke_rightmost(state: &mut CombatState, count: u32, rng: &mut impl Rng) {
+    let n = if count == u32::MAX { state.orbs.len() } else { count as usize };
+    for _ in 0..n {
+        if let Some(orb) = state.orbs.pop() {
+            evoke_orb(state, orb, rng);
+        } else {
+            break;
+        }
+    }
+}
+
+/// Trigger each orb's passive ability (called at end of player turn, before discarding).
+fn trigger_orb_passives(state: &mut CombatState, rng: &mut impl Rng) {
+    let focus = state.player.buff(&BuffType::Focus);
+    for i in 0..state.orbs.len() {
+        let orb = state.orbs[i].clone();
+        match &orb {
+            OrbType::Lightning => {
+                let dmg = (3i32 + focus).max(0) as u32;
+                let living: Vec<usize> = (0..state.enemies.len())
+                    .filter(|&j| state.enemies[j].is_alive())
+                    .collect();
+                if !living.is_empty() {
+                    let idx = living[rng.gen_range(0..living.len())];
+                    damage_enemy(state, idx, dmg);
+                }
+            }
+            OrbType::Frost => {
+                let block = (2i32 + focus).max(0) as u32;
+                state.player.block += block;
+            }
+            OrbType::Dark(val) => {
+                let incr = (6i32 + focus).max(0) as u32;
+                state.orbs[i] = OrbType::Dark(val + incr);
+            }
+            OrbType::Plasma => {
+                state.energy = state.energy.saturating_add(1);
+            }
+            OrbType::Glass(val) => {
+                let dmg = (*val as i32 + focus).max(0) as u32;
+                for j in 0..state.enemies.len() {
+                    if state.enemies[j].is_alive() {
+                        damage_enemy(state, j, dmg);
+                    }
+                }
+                state.orbs[i] = OrbType::Glass(val.saturating_sub(1));
+            }
+        }
+    }
+}
+
 /// Apply a single card effect to the combat state.
 ///
 /// `Passive` effects are no-ops in the simulator; they are display-only.
@@ -268,6 +373,14 @@ pub(crate) fn apply_effect(
 
         CardEffect::GainStars(n) => {
             state.stars = state.stars.saturating_add(*n);
+        }
+
+        CardEffect::ChannelOrb(orb) => {
+            channel_orb(state, orb.clone(), rng);
+        }
+
+        CardEffect::EvokeOrb(count) => {
+            evoke_rightmost(state, *count, rng);
         }
     }
 }
@@ -587,6 +700,9 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     state.skills_this_turn  = 0;
     state.hp_lost_this_turn = 0;
 
+    // ── Orb passives (Defect) ──────────────────────────────────────────────
+    trigger_orb_passives(state, rng);
+
     // ── Poison tick ────────────────────────────────────────────────────────
     for enemy in &mut state.enemies {
         if enemy.is_alive() {
@@ -832,7 +948,7 @@ mod tests {
     use super::*;
     use crate::domain::card::{Card, CardType, Rarity};
     use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
-    use crate::domain::effect::{BuffType, CardEffect};
+    use crate::domain::effect::{BuffType, CardEffect, OrbType};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 

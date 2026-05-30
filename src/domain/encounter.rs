@@ -264,6 +264,15 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
     // DIVINE_DESTINY: upgraded variant — gain 6 Stars
     if state.has_relic("DIVINE_DESTINY") { state.stars += 6; }
 
+    // ── Defect: channel orb at combat start ───────────────────────────────
+    // CRACKED_CORE: Channel 1 Lightning at the start of each combat
+    if state.has_relic("CRACKED_CORE") {
+        use crate::domain::effect::OrbType;
+        if state.orbs.len() < state.orb_slots {
+            state.orbs.push(OrbType::Lightning);
+        }
+    }
+
     // ── Opening block ──────────────────────────────────────────────────────
     if state.has_relic("ANCHOR")      { state.player.block += 10; }
     if state.has_relic("FAKE_ANCHOR") { state.player.block += 4; }

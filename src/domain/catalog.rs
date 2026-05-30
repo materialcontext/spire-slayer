@@ -6,7 +6,7 @@
 
 use crate::data::api::{self, SpireApiCard};
 use crate::domain::card::{Card, CardId, CardType, Rarity};
-use crate::domain::effect::{BuffType, CardEffect};
+use crate::domain::effect::{BuffType, CardEffect, OrbType};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -51,6 +51,7 @@ fn map_buff(power: &str) -> Option<BuffType> {
         "Intangible" => Some(BuffType::Intangible),
         "Barricade" => Some(BuffType::Barricade),
         "NoxiousFumes" | "Noxious Fumes" => Some(BuffType::NoxiousFumes),
+        "Focus" => Some(BuffType::Focus),
         _ => None,
     }
 }
@@ -144,23 +145,59 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
     // Special-case cards whose API structured fields don't capture their primary mechanic.
     match api.id.as_str() {
         "BODY_SLAM" => {
-            // Deal damage equal to current Block (api.damage is 0 and gets filtered out)
             effects.push(CardEffect::DamageEqBlock);
         }
         "NOXIOUS_FUMES" => {
-            // At the start of each turn, apply 2 Poison to all enemies
-            effects.push(CardEffect::ApplyToSelf {
-                buff: BuffType::NoxiousFumes,
-                stacks: 2,
-            });
+            effects.push(CardEffect::ApplyToSelf { buff: BuffType::NoxiousFumes, stacks: 2 });
         }
         "BARRICADE" => {
-            // Block is not removed at the start of your turn
-            effects.push(CardEffect::ApplyToSelf {
-                buff: BuffType::Barricade,
-                stacks: 1,
-            });
+            effects.push(CardEffect::ApplyToSelf { buff: BuffType::Barricade, stacks: 1 });
         }
+        // ── Defect: Channel orb cards ─────────────────────────────────────────
+        "ZAP"           => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "BALL_LIGHTNING" => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "COLD_SNAP"     => { effects.push(CardEffect::ChannelOrb(OrbType::Frost)); }
+        "COOLHEADED"    => { effects.push(CardEffect::ChannelOrb(OrbType::Frost)); }
+        "CHILL"         => { effects.push(CardEffect::ChannelOrb(OrbType::Frost)); }
+        "GLACIER"       => {
+            effects.push(CardEffect::ChannelOrb(OrbType::Frost));
+            effects.push(CardEffect::ChannelOrb(OrbType::Frost));
+        }
+        "ICE_LANCE"     => {
+            for _ in 0..3 { effects.push(CardEffect::ChannelOrb(OrbType::Frost)); }
+        }
+        "LIGHTNING_ROD" => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "CHAOS"         => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "TEMPEST"       => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "STORM"         => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "VOLTAIC"       => { effects.push(CardEffect::ChannelOrb(OrbType::Lightning)); }
+        "DARKNESS" | "SHADOW_SHIELD" => {
+            effects.push(CardEffect::ChannelOrb(OrbType::Dark(6)));
+        }
+        "CONSUMING_SHADOW" => {
+            effects.push(CardEffect::ChannelOrb(OrbType::Dark(6)));
+            effects.push(CardEffect::ChannelOrb(OrbType::Dark(6)));
+        }
+        "FUSION"        => { effects.push(CardEffect::ChannelOrb(OrbType::Plasma)); }
+        "NULL"          => { effects.push(CardEffect::ChannelOrb(OrbType::Plasma)); }
+        "METEOR_STRIKE" => {
+            for _ in 0..3 { effects.push(CardEffect::ChannelOrb(OrbType::Plasma)); }
+        }
+        "GLASSWORK"     => { effects.push(CardEffect::ChannelOrb(OrbType::Glass(4))); }
+        "REFRACT"       => {
+            effects.push(CardEffect::ChannelOrb(OrbType::Glass(4)));
+            effects.push(CardEffect::ChannelOrb(OrbType::Glass(4)));
+        }
+        "RAINBOW"       => {
+            effects.push(CardEffect::ChannelOrb(OrbType::Lightning));
+            effects.push(CardEffect::ChannelOrb(OrbType::Frost));
+            effects.push(CardEffect::ChannelOrb(OrbType::Dark(6)));
+        }
+        // ── Defect: Evoke orb cards ───────────────────────────────────────────
+        "DUALCAST"      => { effects.push(CardEffect::EvokeOrb(2)); }
+        "QUADCAST"      => { effects.push(CardEffect::EvokeOrb(4)); }
+        "MULTI_CAST"    => { effects.push(CardEffect::EvokeOrb(1)); }
+        "SHATTER"       => { effects.push(CardEffect::EvokeOrb(u32::MAX)); }
         _ => {}
     }
 

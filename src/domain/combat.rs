@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use crate::domain::ai::{AiRuntime, EnemyAiScript};
 use crate::domain::card::Card;
-use crate::domain::effect::BuffType;
+use crate::domain::effect::{BuffType, OrbType};
 
 pub type Buffs = HashMap<BuffType, i32>;
 
@@ -94,6 +94,10 @@ pub struct CombatState {
     pub is_elite: bool,
     /// Regent's Stars resource (starts at 0; populated by DIVINE_RIGHT relic).
     pub stars: u32,
+    /// Defect's orb queue (leftmost = oldest; evoked first when displaced).
+    pub orbs: Vec<OrbType>,
+    /// Maximum orb slots (default 3; changed by Capacitor/Bulk Up).
+    pub orb_slots: usize,
     // Per-turn counters, reset at start of each turn
     pub attacks_this_turn: u32,
     pub skills_this_turn: u32,
@@ -120,6 +124,8 @@ impl CombatState {
             relics: HashSet::new(),
             is_elite: false,
             stars: 0,
+            orbs: Vec::new(),
+            orb_slots: 3,
             attacks_this_turn: 0,
             skills_this_turn: 0,
             attacks_this_combat: 0,
