@@ -44,6 +44,7 @@ pub enum AppMode {
     ManualInput,
     Simulating,
     Calibration,
+    Statistics,
     Exiting,
 }
 
@@ -160,6 +161,9 @@ pub struct App {
     pub best_path_predicted_delta: f32,
     /// True while the path projection simulation is running in a background thread.
     pub sim_in_progress: bool,
+    /// Monotonically increasing counter; each new sim invocation increments this so stale
+    /// PathSimResult messages from previous floors are ignored.
+    pub sim_generation: u64,
     /// Sender end of the background-task result channel; None in tests.
     pub bg_sender: Option<std::sync::mpsc::Sender<AppEvent>>,
 }
@@ -236,6 +240,7 @@ impl App {
             hp_at_act_start: 0,
             best_path_predicted_delta: 0.0,
             sim_in_progress: false,
+            sim_generation: 0,
             bg_sender: None,
         };
         app.refresh_filter();
@@ -272,9 +277,11 @@ impl App {
                 self.run_simulation(rng);
                 return true;
             }
-            AppEvent::PathSimResult(projections) => {
-                self.path_projections = projections;
-                self.sim_in_progress = false;
+            AppEvent::PathSimResult(generation, projections) => {
+                if generation == self.sim_generation {
+                    self.path_projections = projections;
+                    self.sim_in_progress = false;
+                }
                 return true;
             }
             AppEvent::StateUpdated(state) => {
@@ -308,6 +315,7 @@ impl App {
             AppMode::AncientBoon    => self.handle_key_ancient_boon(key, rng),
             AppMode::Victory        => self.handle_key_victory(key),
             AppMode::Calibration    => self.handle_key_calibration(key),
+            AppMode::Statistics     => self.handle_key_statistics(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -356,6 +364,9 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.mode = AppMode::Calibration;
+            }
+            KeyCode::Char('?') => {
+                self.mode = AppMode::Statistics;
             }
             KeyCode::Char('j') | KeyCode::Right => {
                 let n = self.map_choices().len();
@@ -787,6 +798,27 @@ impl App {
 
     /// Generate the map (if not already present) and switch to MapView.
     pub fn open_map_view(&mut self, rng: &mut impl rand::Rng) {
+        // Determine act boss before generating the map (once per act).
+        let needs_boss = self.run.as_ref()
+            .map(|r| r.boss_name.is_none() && r.map.is_none())
+            .unwrap_or(false);
+        if needs_boss {
+            use rand::seq::SliceRandom;
+            let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+            let chosen = self.encounters.iter()
+                .filter(|e| e.room_type.as_deref() == Some("Boss")
+                    && e.act.as_deref()
+                        .map(crate::domain::encounter::normalize_act)
+                        .unwrap_or("") == sub_act)
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+                .choose(rng)
+                .cloned();
+            if let Some(ref mut run) = self.run {
+                run.boss_name = chosen;
+            }
+        }
+
         if let Some(ref mut run) = self.run {
             if run.map.is_none() {
                 let seed: u64 = rng.r#gen();
@@ -842,8 +874,16 @@ impl App {
     /// Compute full 3-act forward-simulated run projections for each selectable node.
     pub fn compute_path_projections(&mut self, rng: &mut impl rand::Rng) {
         use crate::domain::map::ROWS;
-        let Some(ref run) = self.run else { self.path_projections.clear(); return; };
-        let Some(ref map) = run.map else { self.path_projections.clear(); return; };
+        let Some(ref run) = self.run else {
+            self.path_projections.clear();
+            self.sim_in_progress = false;
+            return;
+        };
+        let Some(ref map) = run.map else {
+            self.path_projections.clear();
+            self.sim_in_progress = false;
+            return;
+        };
 
         let (choices, next_floor) = match run.map_pos {
             None => (map.entry_nodes(), 0usize),
@@ -855,6 +895,7 @@ impl App {
 
         if next_floor >= ROWS || choices.is_empty() {
             self.path_projections.clear();
+            self.sim_in_progress = false;
             return;
         }
 
@@ -873,17 +914,22 @@ impl App {
 
         if let Some(ref tx) = self.bg_sender {
             // Run asynchronously: mark in-progress, spawn thread, deliver via channel.
+            self.sim_generation += 1;
+            let generation = self.sim_generation;
             self.sim_in_progress = true;
             self.path_projections.clear();
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::rngs::StdRng::from_entropy();
-                let result = simulate_path_choices(
-                    &map_clone, &choices, next_floor,
-                    hp, max_hp, &deck, &relics, gold, asc, &sub_act,
-                    &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
-                );
-                let _ = tx.send(AppEvent::PathSimResult(result));
+                // catch_unwind ensures sim_in_progress is never stuck on thread panic
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    simulate_path_choices(
+                        &map_clone, &choices, next_floor,
+                        hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                        &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
+                    )
+                })).unwrap_or_default();
+                let _ = tx.send(AppEvent::PathSimResult(generation, result));
             });
         } else {
             // Synchronous fallback used in tests (no channel wired up).
@@ -896,12 +942,21 @@ impl App {
     }
 
     /// Columns available to move to from the current map position.
+    /// Returns `[u8::MAX]` as a sentinel when the player has cleared all floors and must
+    /// proceed to the act boss.
     pub fn map_choices(&self) -> Vec<u8> {
+        use crate::domain::map::ROWS;
         let Some(ref run) = self.run else { return vec![]; };
         let Some(ref map) = run.map else { return vec![]; };
         match run.map_pos {
             None      => map.entry_nodes(),
-            Some(pos) => map.choices_from(pos).to_vec(),
+            Some(pos) => {
+                if pos.floor + 1 >= ROWS {
+                    vec![u8::MAX] // boss sentinel: no further map nodes, proceed to boss
+                } else {
+                    map.choices_from(pos).to_vec()
+                }
+            }
         }
     }
 
@@ -910,6 +965,23 @@ impl App {
         use crate::domain::map::RoomType;
         let choices = self.map_choices();
         let Some(&col) = choices.get(self.map_cursor) else { return; };
+
+        // Boss sentinel: player has completed all floors and must fight the act boss.
+        if col == u8::MAX {
+            self.map_cursor = 0;
+            let pool = card_pool_for_run(self);
+            let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+            let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
+            let offered = if let Some(off) = offset {
+                sample_offer(&pool, RewardKind::Boss, off, asc, rng)
+            } else {
+                pool.into_iter().take(3).collect()
+            };
+            self.apply_combat_hp_loss(RoomType::Boss, rng);
+            self.apply_post_combat_relics();
+            self.open_boss_relic_room(offered, rng);
+            return;
+        }
 
         // Snapshot telemetry data before mutating state.
         let tel_choices: Vec<ScoredChoice> = self.path_choices.iter()
@@ -1814,10 +1886,11 @@ impl App {
             // Update act
             run.sub_act = next_sub_act.to_string();
             run.act = crate::metrics::run_ev::act_number(next_sub_act);
-            // Reset map
+            // Reset map and boss for the new act
             run.map = None;
             run.map_pos = None;
             run.floor = 0;
+            run.boss_name = None;
         }
 
         self.act_filter = next_sub_act.to_string();
@@ -1874,6 +1947,15 @@ impl App {
     fn handle_key_calibration(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                self.mode = AppMode::MapView;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_statistics(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
                 self.mode = AppMode::MapView;
             }
             _ => {}

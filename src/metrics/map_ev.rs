@@ -69,6 +69,10 @@ pub fn events_for_sub_act<'a>(sub_act: &str, events: &'a [SpireApiEvent]) -> Vec
     events
         .iter()
         .filter(|e| {
+            // Ancient-type events only appear at act transitions, never in event rooms.
+            if e.event_type.as_deref() == Some("Ancient") {
+                return false;
+            }
             if e.event_type.as_deref() == Some("Shared") || e.act.is_none() {
                 return true;
             }
