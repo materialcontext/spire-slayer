@@ -6,6 +6,7 @@ pub mod event;
 pub mod map_ev;
 pub mod path_ev;
 pub mod path_sim;
+pub mod potion_ev;
 pub mod rest;
 pub mod run_ev;
 pub mod shop_ev;

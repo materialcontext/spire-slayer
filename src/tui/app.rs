@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::data::api::{SpireApiAncient, SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster, SpireApiRelic};
+use crate::data::api::{SpireApiAncient, SpireApiCharacter, SpireApiEncounter, SpireApiEvent, SpireApiMonster, SpireApiPotion, SpireApiRelic};
 use crate::domain::card::Card;
 use crate::domain::catalog;
 use crate::domain::combat::CombatState;
@@ -172,6 +172,16 @@ pub struct App {
     pub sim_generation: u64,
     /// Sender end of the background-task result channel; None in tests.
     pub bg_sender: Option<std::sync::mpsc::Sender<AppEvent>>,
+    /// All potion data loaded at startup.
+    pub all_potions: Vec<SpireApiPotion>,
+    /// Whether the current combat encounter is an elite fight.
+    pub is_elite: bool,
+    /// Whether the current combat encounter is a boss fight.
+    pub is_boss: bool,
+    /// Potions available for purchase in the current shop.
+    pub shop_potions: Vec<(String, String, u32)>,
+    /// Cursor index for shop potions (separate from main shop_cursor).
+    pub shop_potion_cursor: usize,
 }
 
 impl App {
@@ -250,6 +260,11 @@ impl App {
             sim_in_progress: false,
             sim_generation: 0,
             bg_sender: None,
+            all_potions: crate::data::api::load_potions(),
+            is_elite: false,
+            is_boss: false,
+            shop_potions: Vec::new(),
+            shop_potion_cursor: 0,
         };
         app.refresh_filter();
         app
@@ -1037,6 +1052,9 @@ impl App {
         match room {
             Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {
                 let kind = if rt == RoomType::Elite { RewardKind::Elite } else { RewardKind::Monster };
+                // Set is_elite / is_boss flags for potion advice
+                self.is_elite = rt == RoomType::Elite;
+                self.is_boss = false;
                 let pool = card_pool_for_run(self);
                 let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
                 let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
@@ -1049,6 +1067,8 @@ impl App {
                 self.apply_post_combat_relics();
                 self.apply_combat_gold(rt);
                 if rt == RoomType::Elite {
+                    // Elite potion drop: 40% chance
+                    self.maybe_award_elite_potion(rng);
                     // Elite fights award a relic (Uncommon/Common tier) before the card pick.
                     self.open_elite_relic_room(offered, rng);
                 } else {
@@ -1056,6 +1076,9 @@ impl App {
                 }
             }
             Some(RoomType::Boss) => {
+                // Set boss flag for potion advice
+                self.is_elite = false;
+                self.is_boss = true;
                 let pool = card_pool_for_run(self);
                 let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
                 let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
@@ -1511,6 +1534,37 @@ impl App {
         });
         let best_buy_cursor = ranked.iter().find(|(_, _, price)| gold >= *price).map(|(cursor, _, _)| *cursor);
 
+        // ── Shop potions: 2 random potions from class + shared pool ──────────
+        let shop_potions: Vec<(String, String, u32)> = {
+            use rand::seq::SliceRandom;
+            let class_pool_str = self.run.as_ref()
+                .map(|r| r.class.to_string().to_lowercase())
+                .unwrap_or_else(|| "ironclad".to_string());
+            let pool: Vec<&crate::data::api::SpireApiPotion> = self.all_potions.iter()
+                .filter(|p| {
+                    let pv = p.pool.as_deref().unwrap_or("shared");
+                    (pv == "shared" || pv == class_pool_str.as_str())
+                        && p.rarity.as_deref().map(|r| r != "Event" && r != "Token").unwrap_or(true)
+                })
+                .collect();
+            let mut result = Vec::new();
+            let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for _ in 0..2 {
+                let filtered: Vec<&&crate::data::api::SpireApiPotion> = pool.iter()
+                    .filter(|p| !used_ids.contains(&p.id))
+                    .collect();
+                if let Some(&potion) = filtered.choose(rng) {
+                    let price: u32 = match potion.rarity.as_deref().unwrap_or("Common") {
+                        "Common" => 50,
+                        _ => 75,
+                    };
+                    used_ids.insert(potion.id.clone());
+                    result.push((potion.id.clone(), potion.name.clone(), price));
+                }
+            }
+            result
+        };
+
         self.shop_cards = shop_cards;
         self.shop_card_advice = card_advice;
         self.shop_card_prices = shop_card_prices;
@@ -1523,12 +1577,15 @@ impl App {
         self.shop_relic_advice = relic_advice;
         self.shop_best_buy_cursor = best_buy_cursor;
         self.shop_cursor = 0;
+        self.shop_potions = shop_potions;
+        self.shop_potion_cursor = 0;
         self.mode = AppMode::Shop;
     }
 
     fn handle_key_shop(&mut self, key: KeyEvent) {
         let n_cards = self.shop_cards.len();
         let n_relics = self.shop_relics.len();
+        let n_potions = self.shop_potions.len();
         let has_removal = self.shop_has_removal;
         let total = n_cards + n_relics + if has_removal { 1 } else { 0 };
         match key.code {
@@ -1537,6 +1594,39 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.shop_cursor > 0 { self.shop_cursor -= 1; }
+            }
+            KeyCode::Char('p') => {
+                // Navigate shop potions via 'p' key cycling through shop_potion_cursor
+                if n_potions > 0 {
+                    self.shop_potion_cursor = (self.shop_potion_cursor + 1) % (n_potions + 1);
+                }
+            }
+            KeyCode::Char('b') => {
+                // Buy the currently-focused shop potion
+                let idx = self.shop_potion_cursor;
+                if idx < self.shop_potions.len() {
+                    let (p_id, p_name, price) = self.shop_potions[idx].clone();
+                    let desc = self.all_potions.iter()
+                        .find(|p| p.id == p_id)
+                        .and_then(|p| p.description.clone())
+                        .unwrap_or_default();
+                    if let Some(run) = self.run.as_mut() {
+                        if run.gold < price {
+                            self.status_message = format!("Not enough gold ({}/{}g)", run.gold, price);
+                            return;
+                        }
+                        // Find empty potion slot
+                        if let Some(slot) = run.potions.iter_mut().find(|s| s.is_none()) {
+                            run.gold -= price;
+                            *slot = Some(crate::domain::run::Potion::new(&p_id, &p_name, desc));
+                            self.status_message = format!("Bought {} for {}g ({}g left)", p_name, price, run.gold);
+                            self.shop_potions.remove(idx);
+                            self.shop_potion_cursor = self.shop_potion_cursor.saturating_sub(1);
+                        } else {
+                            self.status_message = "No empty potion slots".to_string();
+                        }
+                    }
+                }
             }
             KeyCode::Enter => {
                 if self.shop_cursor < n_cards {
@@ -1609,6 +1699,8 @@ impl App {
                 self.shop_relics.clear();
                 self.shop_relic_prices.clear();
                 self.shop_discounted_card_idx = None;
+                self.shop_potions.clear();
+                self.shop_potion_cursor = 0;
                 self.mode = AppMode::MapView;
             }
             KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
@@ -1773,6 +1865,35 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Award a potion drop after an elite fight (40% chance).
+    fn maybe_award_elite_potion(&mut self, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        if rng.gen_range(0..100) >= 40 { return; }
+
+        let class_pool_str = self.run.as_ref()
+            .map(|r| r.class.to_string().to_lowercase())
+            .unwrap_or_else(|| "ironclad".to_string());
+
+        let pool: Vec<&crate::data::api::SpireApiPotion> = self.all_potions.iter()
+            .filter(|p| {
+                let pool_val = p.pool.as_deref().unwrap_or("shared");
+                pool_val == "shared" || pool_val == class_pool_str.as_str()
+            })
+            .collect();
+
+        let Some(chosen) = pool.choose(rng).map(|p| (*p).clone()) else { return };
+
+        // Find first empty slot
+        let run = self.run.as_mut().unwrap();
+        let empty_slot = run.potions.iter_mut().find(|slot| slot.is_none());
+        if let Some(slot) = empty_slot {
+            let desc = chosen.description.clone().unwrap_or_default();
+            *slot = Some(crate::domain::run::Potion::new(&chosen.id, &chosen.name, desc));
+            let prev_msg = self.status_message.clone();
+            self.status_message = format!("{prev_msg}  +{} (elite drop)", chosen.name);
         }
     }
 
@@ -2230,9 +2351,13 @@ fn rng_gold(lo: u32, hi: u32, rng: &mut impl rand::Rng) -> u32 {
 
 fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
     run.map(|r| {
-        r.relics.iter()
-            .map(|rel| rel.id.clone())
-            .collect()
+        let mut ids: Vec<String> = r.relics.iter().map(|rel| rel.id.clone()).collect();
+        // Fairy in a Bottle is a potion but acts like a death-trigger; include it so the sim
+        // can model the correct trigger order (Fairy fires before Lizard Tail).
+        if r.potions.iter().any(|s| s.as_ref().map(|p| p.id == "FAIRY_IN_A_BOTTLE").unwrap_or(false)) {
+            ids.push("FAIRY_IN_A_BOTTLE".to_string());
+        }
+        ids
     }).unwrap_or_default()
 }
 

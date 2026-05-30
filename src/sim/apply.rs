@@ -115,7 +115,12 @@ fn damage_player(state: &mut CombatState, dmg: u32) {
                 }
             }
         }
-        // LIZARD_TAIL: survive lethal damage once per combat
+        // Death-trigger order: Fairy in a Bottle fires first, then Lizard Tail.
+        // Die → Fairy? → die again? → Lizard Tail? → really dead.
+        if state.player.hp == 0 && !state.fairy_triggered && state.has_relic("FAIRY_IN_A_BOTTLE") {
+            state.fairy_triggered = true;
+            state.player.hp = ((state.player.max_hp as f32 * 0.30) as u32).max(1);
+        }
         if state.player.hp == 0 && !state.lizard_tail_triggered && state.has_relic("LIZARD_TAIL") {
             state.lizard_tail_triggered = true;
             state.player.hp = (state.player.max_hp / 2).max(1);
@@ -1512,5 +1517,49 @@ mod tests {
         state.player.hp = 1;
         end_turn(&mut state, &mut rng());
         assert_eq!(state.player.hp, 0);
+    }
+
+    // ── FAIRY_IN_A_BOTTLE ordering ────────────────────────────────────────────
+
+    #[test]
+    fn fairy_triggers_before_lizard_tail() {
+        let mut state = basic_state();
+        state.player.hp = 1; // will die to the 9-damage enemy
+        state.relics.insert("FAIRY_IN_A_BOTTLE".to_string());
+        state.relics.insert("LIZARD_TAIL".to_string());
+        end_turn(&mut state, &mut rng());
+        // Fairy should have fired (30% of 80 = 24 HP), not Lizard Tail (50% = 40 HP)
+        assert!(state.fairy_triggered, "Fairy should have triggered");
+        assert!(!state.lizard_tail_triggered, "Lizard Tail should not trigger if Fairy saved first");
+        assert!(state.player.hp > 0);
+    }
+
+    #[test]
+    fn lizard_tail_triggers_after_fairy_is_spent() {
+        let mut state = basic_state();
+        state.player.hp = 1;
+        state.relics.insert("FAIRY_IN_A_BOTTLE".to_string());
+        state.relics.insert("LIZARD_TAIL".to_string());
+        end_turn(&mut state, &mut rng()); // Fairy fires
+        assert!(state.fairy_triggered);
+        // Drain HP to 1 again so next hit is lethal
+        state.player.hp = 1;
+        end_turn(&mut state, &mut rng()); // Now Lizard Tail fires
+        assert!(state.lizard_tail_triggered, "Lizard Tail should fire on second lethal hit");
+        assert!(state.player.hp > 0);
+    }
+
+    #[test]
+    fn both_spent_means_death() {
+        let mut state = basic_state();
+        state.player.hp = 1;
+        state.relics.insert("FAIRY_IN_A_BOTTLE".to_string());
+        state.relics.insert("LIZARD_TAIL".to_string());
+        end_turn(&mut state, &mut rng()); // Fairy fires
+        state.player.hp = 1;
+        end_turn(&mut state, &mut rng()); // Lizard Tail fires
+        state.player.hp = 1;
+        end_turn(&mut state, &mut rng()); // Both spent — should die
+        assert_eq!(state.player.hp, 0, "Should die when both safety nets are spent");
     }
 }
