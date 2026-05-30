@@ -55,6 +55,15 @@ pub fn advise_rest(run: &RunState) -> RestAdvice {
     }
 }
 
+pub fn smith_candidates(deck: &[Card]) -> Vec<(usize, &Card)> {
+    let mut candidates: Vec<(usize, &Card)> = deck.iter()
+        .enumerate()
+        .filter(|(_, c)| !c.upgraded && !matches!(c.card_type, CardType::Status | CardType::Curse))
+        .collect();
+    candidates.sort_by(|a, b| smith_priority(b.1).cmp(&smith_priority(a.1)));
+    candidates
+}
+
 fn best_smith_candidate(deck: &[Card]) -> Option<(usize, &Card)> {
     deck.iter()
         .enumerate()
@@ -62,7 +71,7 @@ fn best_smith_candidate(deck: &[Card]) -> Option<(usize, &Card)> {
         .max_by_key(|(_, c)| smith_priority(c))
 }
 
-fn smith_priority(card: &Card) -> u32 {
+pub fn smith_priority(card: &Card) -> u32 {
     let base = card.base_damage() + card.base_block();
     let type_bonus: u32 = match card.card_type {
         CardType::Attack => 100,

@@ -32,6 +32,7 @@ pub enum AppMode {
     EncounterPick,
     MapView,
     RestSite,
+    SmithPick,
     EventRoom,
     TreasureRoom,
     Shop,
@@ -94,6 +95,9 @@ pub struct App {
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
+    /// Deck indices of upgradeable cards sorted best→worst for SmithPick mode.
+    pub smith_candidates: Vec<usize>,
+    pub smith_cursor: usize,
     /// Active event and scored options for EventRoom mode.
     pub active_event: Option<SpireApiEvent>,
     pub event_advice: Vec<EventOptionAdvice>,
@@ -203,6 +207,8 @@ impl App {
             class_cards: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
+            smith_candidates: Vec::new(),
+            smith_cursor: 0,
             active_event: None,
             event_advice: Vec::new(),
             event_cursor: 0,
@@ -306,6 +312,7 @@ impl App {
             AppMode::EncounterPick  => self.handle_key_encounter(key, rng),
             AppMode::MapView        => self.handle_key_map_view(key, rng),
             AppMode::RestSite       => self.handle_key_rest_site(key),
+            AppMode::SmithPick      => self.handle_key_smith_pick(key),
             AppMode::EventRoom      => self.handle_key_event_room(key),
             AppMode::TreasureRoom   => self.handle_key_treasure_room(key, rng),
             AppMode::Shop           => self.handle_key_shop(key),
@@ -1099,33 +1106,59 @@ impl App {
     }
 
     fn confirm_rest(&mut self) {
-        let Some(ref run) = self.run else { return; };
-        let smith_idx = match self.rest_advice.as_ref().and_then(|a| {
-            if let RestAction::Smith(i) = a.action { Some(i) } else { None }
-        }) {
-            Some(i) => i,
-            None => {
-                // No smith candidate — treat as heal regardless of cursor.
-                let run = self.run.as_mut().unwrap();
-                run.heal();
-                self.status_message = format!("Healed to {} HP", run.hp);
-                self.mode = AppMode::MapView;
-                return;
-            }
-        };
-        let _ = run; // drop shared borrow before mut
+        let Some(ref _run) = self.run else { return; };
+        let _ = _run;
         let run = self.run.as_mut().unwrap();
         if self.rest_cursor == 0 {
             run.heal();
             self.status_message = format!("Healed to {} HP", run.hp);
+            self.rest_advice = None;
+            self.mode = AppMode::MapView;
         } else {
-            if run.smith(smith_idx) {
-                let name = run.deck[smith_idx].name.clone();
-                self.status_message = format!("Upgraded {}", name);
+            use crate::metrics::rest::smith_candidates;
+            let candidates: Vec<usize> = smith_candidates(&run.deck)
+                .into_iter().map(|(i, _)| i).collect();
+            if candidates.is_empty() {
+                run.heal();
+                self.status_message = format!("Healed to {} HP", run.hp);
+                self.rest_advice = None;
+                self.mode = AppMode::MapView;
+            } else {
+                self.smith_candidates = candidates;
+                self.smith_cursor = 0;
+                self.rest_advice = None;
+                self.mode = AppMode::SmithPick;
             }
         }
-        self.rest_advice = None;
-        self.mode = AppMode::MapView;
+    }
+
+    fn handle_key_smith_pick(&mut self, key: KeyEvent) {
+        let n = self.smith_candidates.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 { self.smith_cursor = (self.smith_cursor + 1) % n; }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if n > 0 { self.smith_cursor = (self.smith_cursor + n - 1) % n; }
+            }
+            KeyCode::Enter => {
+                if let Some(&deck_idx) = self.smith_candidates.get(self.smith_cursor) {
+                    let run = self.run.as_mut().unwrap();
+                    if run.smith(deck_idx) {
+                        let name = run.deck[deck_idx].name.clone();
+                        self.status_message = format!("Upgraded {}", name);
+                    }
+                }
+                self.smith_candidates.clear();
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Esc => {
+                self.smith_candidates.clear();
+                self.mode = AppMode::RestSite;
+            }
+            KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
+            _ => {}
+        }
     }
 
     fn open_event_room(&mut self, rng: &mut impl rand::Rng) {

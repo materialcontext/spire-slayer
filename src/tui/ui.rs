@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::MapEv   => render_map_ev(frame, app, area),
         AppMode::MapView  => render_map_view(frame, app, area),
         AppMode::RestSite     => render_rest_site(frame, app, area),
+        AppMode::SmithPick    => render_smith_pick(frame, app, area),
         AppMode::EventRoom    => render_event_room(frame, app, area),
         AppMode::TreasureRoom => render_treasure_room(frame, app, area),
         AppMode::Shop         => render_shop(frame, app, area),
@@ -1623,6 +1624,92 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, rows[2]);
+}
+
+fn render_smith_pick(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(8), Constraint::Length(1)])
+        .split(area);
+
+    let header = Paragraph::new(" SMITH   Choose a card to upgrade   j/k navigate  Enter confirm  Esc back")
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    let run = match &app.run {
+        Some(r) => r,
+        None => return,
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (list_pos, &deck_idx) in app.smith_candidates.iter().enumerate() {
+        let Some(card) = run.deck.get(deck_idx) else { continue };
+
+        let dmg_before = card.base_damage();
+        let blk_before = card.base_block();
+        let mut upgraded = card.clone();
+        upgraded.upgrade();
+        let dmg_after = upgraded.base_damage();
+        let blk_after = upgraded.base_block();
+
+        let is_cursor = list_pos == app.smith_cursor;
+        let is_best   = list_pos == 0;
+
+        let type_label = match card.card_type {
+            crate::domain::card::CardType::Attack => "Atk",
+            crate::domain::card::CardType::Skill  => "Skl",
+            crate::domain::card::CardType::Power  => "Pwr",
+            _ => "   ",
+        };
+
+        let mut delta_parts: Vec<String> = Vec::new();
+        if dmg_before > 0 || dmg_after > 0 {
+            if dmg_after != dmg_before {
+                delta_parts.push(format!("dmg {}→{}", dmg_before, dmg_after));
+            } else {
+                delta_parts.push(format!("dmg {}", dmg_before));
+            }
+        }
+        if blk_before > 0 || blk_after > 0 {
+            if blk_after != blk_before {
+                delta_parts.push(format!("blk {}→{}", blk_before, blk_after));
+            } else {
+                delta_parts.push(format!("blk {}", blk_before));
+            }
+        }
+        if delta_parts.is_empty() {
+            delta_parts.push("no stat change".to_string());
+        }
+        let delta_str = delta_parts.join("  ");
+
+        let rec_marker = if is_best { " ★" } else { "  " };
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let label = format!("{prefix}{:<22} [{type_label}]  {delta_str}{rec_marker}", card.name);
+
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if is_best {
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("  No upgradeable cards", Style::default().fg(Color::DarkGray))));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL).title(" Choose Card to Upgrade ")),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("  {}", app.status_message))
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
 }
 
 fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
