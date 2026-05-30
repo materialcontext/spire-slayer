@@ -104,7 +104,10 @@ fn is_single_target_damage(card: &Card) -> bool {
     let has_single = card.effects.iter().any(|e| {
         matches!(
             e,
-            CardEffect::Damage(_) | CardEffect::DamageMulti { .. } | CardEffect::DamageEqBlock
+            CardEffect::Damage(_)
+                | CardEffect::DamageMulti { .. }
+                | CardEffect::DamageEqBlock
+                | CardEffect::EnemyLoseHp(_)
         )
     });
     let has_aoe = card.effects.iter().any(|e| matches!(e, CardEffect::DamageAll(_)));
@@ -630,8 +633,64 @@ mod tests {
             vec![CardEffect::DamageAll(5)]);
         let sk = Card::new(3, "Defend", 1, CardType::Skill, Rarity::Basic,
             vec![CardEffect::Block(5)]);
+        let lose_hp = Card::new(4, "Haunt", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::EnemyLoseHp(12)]);
         assert!(is_single_target_damage(&s));
         assert!(!is_single_target_damage(&aoe));
         assert!(!is_single_target_damage(&sk));
+        assert!(is_single_target_damage(&lose_hp));
+    }
+
+    #[test]
+    fn four_cost_card_not_available_with_three_energy() {
+        // A 4-cost card must not appear in available actions when player has only 3 energy.
+        let heavy = Card::new(10, "HeavyHitter", 4, CardType::Attack, Rarity::Rare,
+            vec![CardEffect::Damage(30)]);
+        let state = make_state(vec![heavy], 50);
+        // state starts with 3 energy (default)
+        assert_eq!(state.energy, 3);
+        let actions = available_card_plays(&state);
+        assert!(actions.is_empty(), "4-cost card should not be playable with 3 energy");
+    }
+
+    #[test]
+    fn x_cost_card_is_always_playable_with_any_energy() {
+        // X-cost cards (cost=255) are playable as long as energy > 0.
+        let mut xcost = Card::new(11, "Whirlwind", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::DamageAll(5)]);
+        xcost.cost = 255;
+        let mut state = make_state(vec![xcost], 50);
+        state.energy = 1;
+        let actions = available_card_plays(&state);
+        assert!(!actions.is_empty(), "X-cost card should be playable with 1 energy");
+    }
+
+    #[test]
+    fn x_cost_card_not_playable_with_zero_energy() {
+        let mut xcost = Card::new(12, "Whirlwind", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::DamageAll(5)]);
+        xcost.cost = 255;
+        let mut state = make_state(vec![xcost], 50);
+        state.energy = 0;
+        let actions = available_card_plays(&state);
+        assert!(actions.is_empty(), "X-cost card must not play at 0 energy");
+    }
+
+    #[test]
+    fn evaluate_actions_replays_correct_cards() {
+        // Verify that evaluate_actions correctly replays a multi-card sequence
+        // even after the hand shrinks on each play.
+        let s1 = Card::new(1, "Strike", 1, CardType::Attack, Rarity::Basic,
+            vec![CardEffect::Damage(6)]);
+        let s2 = Card::new(2, "Strike2", 1, CardType::Attack, Rarity::Basic,
+            vec![CardEffect::Damage(6)]);
+        let state = make_state(vec![s1, s2], 50);
+        let actions = vec![
+            Action { card_hand_idx: 0, target_idx: 0 },
+            Action { card_hand_idx: 0, target_idx: 0 }, // idx=0 again after first card removed
+        ];
+        let (dmg, _hp) = evaluate_actions(&state, &actions, &mut rng());
+        // Two strikes of 6 each → 12 total damage
+        assert!((dmg - 12.0).abs() < 1.0, "expected ~12 damage, got {dmg}");
     }
 }
