@@ -270,14 +270,29 @@ fn simulate_act_map(
         col   = next as usize;
     }
 
-    // Boss fight (A10 glory: two sequential bosses)
+    // Boss fight (A10 glory: two sequential bosses, each a different encounter)
     let boss_entry_hp = state.hp;
-    let boss_fights = if state.ascension >= 10 && sub_act == "glory" { 2 } else { 1 };
-    for fight_idx in 0..boss_fights {
-        let boss_loss = sim_combat_loss(state, &boss_pool, sub_act, monsters, rng, 35);
+    let double_boss = state.ascension >= 10 && sub_act == "glory";
+    let boss_sequences: Vec<Vec<&SpireApiEncounter>> = if double_boss && boss_pool.len() >= 2 {
+        // Pick a random index for fight 1, exclude it for fight 2.
+        let idx1 = rng.gen_range(0..boss_pool.len());
+        let pool2: Vec<&SpireApiEncounter> = boss_pool.iter().enumerate()
+            .filter(|&(i, _)| i != idx1)
+            .map(|(_, e)| *e)
+            .collect();
+        vec![vec![boss_pool[idx1]], pool2]
+    } else if double_boss {
+        // Only one boss in pool: run it twice.
+        vec![boss_pool.to_vec(), boss_pool.to_vec()]
+    } else {
+        vec![boss_pool.to_vec()]
+    };
+
+    for (fight_idx, pool) in boss_sequences.iter().enumerate() {
+        let boss_loss = sim_combat_loss(state, pool, sub_act, monsters, rng, 35);
         if boss_loss >= state.hp {
             state.hp = 0;
-            let note = if boss_fights > 1 {
+            let note = if double_boss {
                 format!("Boss{}", fight_idx + 1)
             } else {
                 "Boss".into()
