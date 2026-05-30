@@ -5,7 +5,7 @@ use crate::domain::effect::{BuffType, CardEffect, OrbType};
 
 // ── Action ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
     /// Index into `CombatState::hand` at the time the action is taken.
     pub card_hand_idx: usize,
