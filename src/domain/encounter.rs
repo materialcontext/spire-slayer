@@ -258,6 +258,12 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
         }
     };
 
+    // ── Regent's Stars resource ────────────────────────────────────────────
+    // DIVINE_RIGHT: Regent's starter relic — gain 3 Stars at start of combat
+    if state.has_relic("DIVINE_RIGHT") { state.stars += 3; }
+    // DIVINE_DESTINY: upgraded variant — gain 6 Stars
+    if state.has_relic("DIVINE_DESTINY") { state.stars += 6; }
+
     // ── Opening block ──────────────────────────────────────────────────────
     if state.has_relic("ANCHOR")      { state.player.block += 10; }
     if state.has_relic("FAKE_ANCHOR") { state.player.block += 4; }

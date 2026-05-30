@@ -54,6 +54,10 @@ pub struct SpireApiCard {
     #[serde(default, deserialize_with = "null_as_default")]
     pub keywords_key: Vec<String>,
     pub description: Option<String>,
+    /// Star cost (Regent's secondary resource cost). None or 0 means no star cost.
+    pub star_cost: Option<i32>,
+    /// Raw vars blob from the API (contains "Summon", "Stars", etc.).
+    pub vars: Option<serde_json::Value>,
 }
 
 fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>

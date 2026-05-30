@@ -93,6 +93,28 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
         effects.push(CardEffect::Block(b as u32));
     }
 
+    // Extract Summon value from vars (Necrobinder companion HP — treat as Block in sim)
+    let summon_val = api.vars.as_ref()
+        .and_then(|v| v.get("Summon"))
+        .and_then(|v| v.as_i64())
+        .filter(|&n| n > 0)
+        .map(|n| n as u32);
+    if let Some(n) = summon_val {
+        effects.push(CardEffect::Block(n)); // Osty HP ≈ Block for simulation
+    }
+
+    // Extract Stars gained from vars (only for non-star-cost cards, i.e., these generate Stars)
+    if api.star_cost.filter(|&s| s > 0).is_none() {
+        let stars_gain = api.vars.as_ref()
+            .and_then(|v| v.get("Stars"))
+            .and_then(|v| v.as_i64())
+            .filter(|&n| n > 0)
+            .map(|n| n as u32);
+        if let Some(n) = stars_gain {
+            effects.push(CardEffect::GainStars(n));
+        }
+    }
+
     if let Some(d) = api.cards_draw.filter(|&d| d > 0) {
         effects.push(CardEffect::Draw(d as u32));
     }
@@ -158,6 +180,11 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
             "innate" => card = card.with_innate(),
             _ => {}
         }
+    }
+
+    // Set star_cost from API (Regent's secondary resource cost)
+    if let Some(sc) = api.star_cost.filter(|&s| s > 0) {
+        card.star_cost = sc.clamp(0, 255) as u8;
     }
 
     card

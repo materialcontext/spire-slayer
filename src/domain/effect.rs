@@ -48,6 +48,8 @@ pub enum CardEffect {
     ApplyToSelf { buff: BuffType, stacks: i32 },
     /// Placeholder for passive/triggered effects not yet simulated.
     Passive(String),
+    /// Add Stars (Regent's secondary resource). Tracked in CombatState.stars.
+    GainStars(u32),
 }
 
 impl CardEffect {

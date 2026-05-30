@@ -14,6 +14,8 @@ pub enum SimError {
     InvalidCardIndex(usize),
     #[error("not enough energy: need {need}, have {have}")]
     NotEnoughEnergy { need: u8, have: u8 },
+    #[error("not enough stars: need {need}, have {have}")]
+    NotEnoughStars { need: u8, have: u32 },
     #[error("card is not playable (Status or Curse type)")]
     CardNotPlayable,
     #[error("invalid target index {0}")]
@@ -263,6 +265,10 @@ pub(crate) fn apply_effect(
         CardEffect::Passive(_) => {
             // Passive/triggered effects are not simulated.
         }
+
+        CardEffect::GainStars(n) => {
+            state.stars = state.stars.saturating_add(*n);
+        }
     }
 }
 
@@ -296,6 +302,14 @@ pub fn play_card(
         });
     }
 
+    // Check star cost (Regent's secondary resource)
+    if card.star_cost > 0 && state.stars < card.star_cost as u32 {
+        return Err(SimError::NotEnoughStars {
+            need: card.star_cost,
+            have: state.stars,
+        });
+    }
+
     // Validate target for single-target damage cards
     let needs_target = card.effects.iter().any(|e| {
         matches!(
@@ -312,6 +326,8 @@ pub fn play_card(
     // X-cost (255) spends all remaining energy; regular cards spend their printed cost
     let cost_spent = if card.cost == 255 { state.energy } else { card.cost };
     state.energy -= cost_spent;
+    // Deduct star cost (Regent's Stars resource)
+    state.stars = state.stars.saturating_sub(card.star_cost as u32);
 
     // Update per-turn/combat counters
     let is_attack = card.card_type == CardType::Attack;

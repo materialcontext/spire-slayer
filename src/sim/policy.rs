@@ -84,7 +84,7 @@ impl Policy for GreedyDamagePolicy {
         if lethal_threat {
             // Try to play the highest-block card to survive.
             let best_block = state.hand.iter().enumerate()
-                .filter(|(_, c)| c.is_playable(state.energy) && c.base_block() > 0)
+                .filter(|(_, c)| c.is_playable(state.energy) && state.stars >= c.star_cost as u32 && c.base_block() > 0)
                 .max_by_key(|(_, c)| c.base_block());
             if let Some((i, _)) = best_block {
                 return Some(Action { card_hand_idx: i, target_idx: target });
@@ -95,7 +95,7 @@ impl Policy for GreedyDamagePolicy {
             .hand
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.is_playable(state.energy))
+            .filter(|(_, c)| c.is_playable(state.energy) && state.stars >= c.star_cost as u32)
             .max_by_key(|(_, c)| c.base_damage())
             .map(|(i, _)| Action { card_hand_idx: i, target_idx: target })
     }
@@ -114,7 +114,7 @@ impl Policy for SequentialPolicy {
             .hand
             .iter()
             .enumerate()
-            .find(|(_, c)| c.is_playable(state.energy))
+            .find(|(_, c)| c.is_playable(state.energy) && state.stars >= c.star_cost as u32)
             .map(|(i, _)| Action { card_hand_idx: i, target_idx: target })
     }
 }

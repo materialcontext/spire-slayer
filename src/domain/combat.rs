@@ -92,6 +92,8 @@ pub struct CombatState {
     pub relics: HashSet<String>,
     /// True for Elite combats (affects relics like Sling of Courage).
     pub is_elite: bool,
+    /// Regent's Stars resource (starts at 0; populated by DIVINE_RIGHT relic).
+    pub stars: u32,
     // Per-turn counters, reset at start of each turn
     pub attacks_this_turn: u32,
     pub skills_this_turn: u32,
@@ -117,6 +119,7 @@ impl CombatState {
             turn: 1,
             relics: HashSet::new(),
             is_elite: false,
+            stars: 0,
             attacks_this_turn: 0,
             skills_this_turn: 0,
             attacks_this_combat: 0,
