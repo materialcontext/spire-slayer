@@ -1313,6 +1313,17 @@ fn render_map_sidebar(
         }
     }
 
+    // ── Simulation status ─────────────────────────────────────────────────────
+    lines.push(Line::from(Span::raw("")));
+    let (status_text, status_color) = if app.sim_in_progress {
+        ("  \u{25cf} Simulating...", Color::Yellow)
+    } else if !app.path_projections.is_empty() {
+        ("  \u{25cf} Ready", Color::Green)
+    } else {
+        ("  \u{25cf} —", Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(status_text, Style::default().fg(status_color))));
+
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Run ")),
         area,

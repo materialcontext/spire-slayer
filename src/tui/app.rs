@@ -158,6 +158,10 @@ pub struct App {
     pub hp_at_act_start: u32,
     /// Best-path HP delta predicted by the DP when the act map first opened.
     pub best_path_predicted_delta: f32,
+    /// True while the path projection simulation is running in a background thread.
+    pub sim_in_progress: bool,
+    /// Sender end of the background-task result channel; None in tests.
+    pub bg_sender: Option<std::sync::mpsc::Sender<AppEvent>>,
 }
 
 impl App {
@@ -231,6 +235,8 @@ impl App {
             run_id: 0,
             hp_at_act_start: 0,
             best_path_predicted_delta: 0.0,
+            sim_in_progress: false,
+            bg_sender: None,
         };
         app.refresh_filter();
         app
@@ -264,6 +270,11 @@ impl App {
             AppEvent::Quit => return false,
             AppEvent::RunSim => {
                 self.run_simulation(rng);
+                return true;
+            }
+            AppEvent::PathSimResult(projections) => {
+                self.path_projections = projections;
+                self.sim_in_progress = false;
                 return true;
             }
             AppEvent::StateUpdated(state) => {
@@ -860,11 +871,28 @@ impl App {
         let encounters  = self.encounters.clone();
         let monsters    = self.monsters.clone();
 
-        self.path_projections = simulate_path_choices(
-            &map_clone, &choices, next_floor,
-            hp, max_hp, &deck, &relics, gold, asc, &sub_act,
-            &encounters, &monsters, &class_cards, event_hp_delta, rng,
-        );
+        if let Some(ref tx) = self.bg_sender {
+            // Run asynchronously: mark in-progress, spawn thread, deliver via channel.
+            self.sim_in_progress = true;
+            self.path_projections.clear();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut rng = rand::rngs::StdRng::from_entropy();
+                let result = simulate_path_choices(
+                    &map_clone, &choices, next_floor,
+                    hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                    &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
+                );
+                let _ = tx.send(AppEvent::PathSimResult(result));
+            });
+        } else {
+            // Synchronous fallback used in tests (no channel wired up).
+            self.path_projections = simulate_path_choices(
+                &map_clone, &choices, next_floor,
+                hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                &encounters, &monsters, &class_cards, event_hp_delta, rng,
+            );
+        }
     }
 
     /// Columns available to move to from the current map position.
@@ -2006,7 +2034,11 @@ pub fn run_app() -> anyhow::Result<()> {
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
-    let result = run_loop(&mut terminal, &mut app, &mut rng, events);
+    // Channel for background thread results (path simulation, etc.).
+    let (bg_tx, bg_rx) = std::sync::mpsc::channel::<AppEvent>();
+    app.bg_sender = Some(bg_tx);
+
+    let result = run_loop(&mut terminal, &mut app, &mut rng, events, bg_rx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -2020,6 +2052,7 @@ fn run_loop(
     app: &mut App,
     rng: &mut impl rand::Rng,
     events: std::sync::mpsc::Receiver<AppEvent>,
+    bg_rx: std::sync::mpsc::Receiver<AppEvent>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -2034,6 +2067,13 @@ fn run_loop(
                 }
             }
             Err(_) => break,
+        }
+
+        // Drain any results that arrived from background threads.
+        while let Ok(bg_event) = bg_rx.try_recv() {
+            if !app.handle_event(bg_event, rng) {
+                break;
+            }
         }
     }
     Ok(())
