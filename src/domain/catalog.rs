@@ -216,9 +216,12 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
             "ethereal" => card = card.with_ethereal(),
             "innate" => card = card.with_innate(),
             "retain" => card = card.with_retain(),
-            "ostyattack" => card = card.with_osty_attack(),
             _ => {}
         }
+    }
+    // OstyAttack is stored in `tags`, not `keywords_key`
+    if api.tags.iter().any(|t| t == "OstyAttack") {
+        card = card.with_osty_attack();
     }
 
     // Set star_cost from API (Regent's secondary resource cost)

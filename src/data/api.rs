@@ -54,6 +54,9 @@ pub struct SpireApiCard {
     /// Lower-cased keyword slugs (e.g. "exhaust", "ethereal", "innate").
     #[serde(default, deserialize_with = "null_as_default")]
     pub keywords_key: Vec<String>,
+    /// Gameplay tags (e.g. "OstyAttack"). Distinct from display keywords.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub tags: Vec<String>,
     pub description: Option<String>,
     /// Star cost (Regent's secondary resource cost). None or 0 means no star cost.
     pub star_cost: Option<i32>,
