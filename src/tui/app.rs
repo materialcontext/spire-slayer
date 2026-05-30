@@ -59,6 +59,8 @@ pub enum PostPickAction {
 pub enum AfterTreasure {
     /// Load a boss card pick then begin act transition.
     BossCardPick,
+    /// Load a normal/elite card pick and return to the map.
+    CombatCardPick(Vec<Card>),
 }
 
 pub struct App {
@@ -1039,7 +1041,12 @@ impl App {
                 self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
                 self.apply_combat_gold(rt);
-                self.load_pick(offered, rng, AppMode::MapView);
+                if rt == RoomType::Elite {
+                    // Elite fights award a relic (Uncommon/Common tier) before the card pick.
+                    self.open_elite_relic_room(offered, rng);
+                } else {
+                    self.load_pick(offered, rng, AppMode::MapView);
+                }
             }
             Some(RoomType::Boss) => {
                 let pool = card_pool_for_run(self);
@@ -1238,10 +1245,31 @@ impl App {
                     self.post_pick_action = Some(PostPickAction::BossActTransition);
                     self.load_pick(cards, rng, AppMode::MapView);
                 }
+                AfterTreasure::CombatCardPick(cards) => {
+                    self.load_pick(cards, rng, AppMode::MapView);
+                }
             }
         } else {
             self.mode = AppMode::MapView;
         }
+    }
+
+    /// Open a relic offer for an elite fight (Uncommon/Common tier), then proceed to card pick.
+    fn open_elite_relic_room(&mut self, elite_cards: Vec<Card>, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool = self.run.as_ref()
+            .map(|r| char_color(&r.class))
+            .unwrap_or("ironclad");
+        let pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            matches!(rarity, "Common Relic" | "Uncommon Relic")
+                && (p == "shared" || p == class_pool)
+        }).collect();
+        self.offered_relic = pool.choose(rng).map(|r| (*r).clone());
+        self.after_treasure = Some(AfterTreasure::CombatCardPick(elite_cards));
+        self.relic_cursor = 0;
+        self.mode = AppMode::TreasureRoom;
     }
 
     fn open_shop(&mut self, rng: &mut impl rand::Rng) {

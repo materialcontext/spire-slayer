@@ -441,11 +441,11 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::default()
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // title
-            Constraint::Min(12),   // stats body
+            Constraint::Min(12),   // body
             Constraint::Length(1), // hint
         ])
         .split(area);
@@ -453,200 +453,177 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
     let title = Paragraph::new(" DECK DASHBOARD")
         .block(Block::default().borders(Borders::BOTTOM))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    frame.render_widget(title, rows[0]);
+    frame.render_widget(title, outer[0]);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Two-column body: stats left, relics + cards right (always visible)
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(outer[1]);
+
+    // ── Left column: combat stats ─────────────────────────────────────────────
+    let mut stats: Vec<Line<'static>> = Vec::new();
 
     if let Some(ref s) = app.deck_stats {
-        // ── Deck properties ────────────────────────────────────────────────
-        lines.push(Line::from(Span::styled(
+        stats.push(Line::from(Span::styled(
             format!(
-                "  Deck: {} cards   Cycle: {:.1}t   Cost: {:.1}/e   Attacks: {:.0}%   Block cards: {}",
-                s.deck_size,
-                s.cycle_turns,
-                s.mean_energy_cost,
-                s.attack_fraction * 100.0,
-                s.block_card_count,
+                "  Deck: {} cards   Cycle: {:.1}t   Cost: {:.1}/e",
+                s.deck_size, s.cycle_turns, s.mean_energy_cost,
             ),
             Style::default().fg(Color::White),
         )));
-        lines.push(Line::from(Span::styled(
+        stats.push(Line::from(Span::styled(
             format!(
-                "  Synergy axes: {}   Quality score: {:.2}",
-                s.synergy_axes, s.heuristic_score
+                "  Attacks: {:.0}%   Block cards: {}   Synergy: {}   Score: {:.2}",
+                s.attack_fraction * 100.0, s.block_card_count, s.synergy_axes, s.heuristic_score
             ),
             Style::default().fg(Color::DarkGray),
         )));
-        lines.push(Line::from(Span::raw("")));
+        stats.push(Line::from(Span::raw("")));
 
         if s.encounter_count > 0 {
-            let panel_label = format!(
-                "  {} panel ({} encounters × {} sims = {} samples):",
-                s.sub_act,
-                s.encounter_count,
-                s.playout_count / s.encounter_count as u32,
-                s.playout_count,
-            );
-            lines.push(Line::from(Span::styled(
-                panel_label,
+            stats.push(Line::from(Span::styled(
+                format!(
+                    "  {} — {} enc × {} sims",
+                    s.sub_act,
+                    s.encounter_count,
+                    s.playout_count / s.encounter_count as u32,
+                ),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── DPT ───────────────────────────────────────────────────────
-            lines.push(Line::from(Span::styled(
-                "  Damage Per Turn:",
+            // DPT
+            stats.push(Line::from(Span::styled(
+                "  Damage Per Turn",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )));
             let dbar = dist_bar(s.dpt_p10, s.dpt_p50, s.dpt_p90);
-            let dpt_color = if s.dpt_p50 >= 10.0 {
-                Color::Green
-            } else if s.dpt_p50 >= 6.0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
-                    s.dpt_p10, s.dpt_p50, s.dpt_p90, s.mean_dpt
-                ),
+            let dpt_color = if s.dpt_p50 >= 10.0 { Color::Green }
+                else if s.dpt_p50 >= 6.0 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
+                format!("    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}", s.dpt_p10, s.dpt_p50, s.dpt_p90, s.mean_dpt),
                 Style::default().fg(dpt_color),
             )));
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 format!("    [{}]  0──────────{:.0}", dbar, s.dpt_p90),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── BPT ───────────────────────────────────────────────────────
-            lines.push(Line::from(Span::styled(
-                "  Block Per Turn:",
+            // BPT
+            stats.push(Line::from(Span::styled(
+                "  Block Per Turn",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
             let bbar = dist_bar(s.bpt_p10, s.bpt_p50, s.bpt_p90);
-            let bpt_color = if s.bpt_p50 >= 8.0 {
-                Color::Green
-            } else if s.bpt_p50 >= 4.0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
-                    s.bpt_p10, s.bpt_p50, s.bpt_p90, s.mean_bpt
-                ),
+            let bpt_color = if s.bpt_p50 >= 8.0 { Color::Green }
+                else if s.bpt_p50 >= 4.0 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
+                format!("    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}", s.bpt_p10, s.bpt_p50, s.bpt_p90, s.mean_bpt),
                 Style::default().fg(bpt_color),
             )));
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 format!("    [{}]  0──────────{:.0}", bbar, s.bpt_p90),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── Outcomes ──────────────────────────────────────────────────
-            let outcome_color = if s.kill_rate >= 0.7 {
-                Color::Green
-            } else if s.kill_rate >= 0.4 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
+            // Outcomes
+            let outcome_color = if s.kill_rate >= 0.7 { Color::Green }
+                else if s.kill_rate >= 0.4 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
                 format!(
                     "  Win rate: {:.0}%   Survive rate: {:.0}%   Avg HP loss: {:.0}",
-                    s.kill_rate * 100.0,
-                    s.survival_rate * 100.0,
-                    s.mean_hp_loss
+                    s.kill_rate * 100.0, s.survival_rate * 100.0, s.mean_hp_loss
                 ),
                 Style::default().fg(outcome_color),
             )));
         } else {
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 "  (No encounter data — load seed files to enable sim stats)",
                 Style::default().fg(Color::DarkGray),
             )));
         }
     } else {
-        lines.push(Line::from(Span::raw("  No deck stats computed yet.")));
+        stats.push(Line::from(Span::raw("  No deck stats computed yet.")));
     }
 
-    // ── Relics ────────────────────────────────────────────────────────────────
-    lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled(
-        "  Relics:",
+    frame.render_widget(
+        Paragraph::new(Text::from(stats))
+            .block(Block::default().borders(Borders::ALL).title(" Stats ")),
+        cols[0],
+    );
+
+    // ── Right column: relics + deck cards ─────────────────────────────────────
+    let mut right: Vec<Line<'static>> = Vec::new();
+
+    // Relics
+    right.push(Line::from(Span::styled(
+        "  Relics",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )));
     if let Some(ref run) = app.run {
         if run.relics.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "    (none)",
-                Style::default().fg(Color::DarkGray),
-            )));
+            right.push(Line::from(Span::styled("    (none)", Style::default().fg(Color::DarkGray))));
         } else {
             for relic in &run.relics {
-                lines.push(Line::from(Span::styled(
-                    format!("    \u{2022} {}", relic.name),
+                right.push(Line::from(Span::styled(
+                    format!("  \u{2022} {}", relic.name),
                     Style::default().fg(Color::Cyan),
                 )));
+                if !relic.description.is_empty() {
+                    right.push(Line::from(Span::styled(
+                        format!("    {}", truncate_chars(&relic.description, 38)),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            "    (no run loaded)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        right.push(Line::from(Span::styled("    (no run)", Style::default().fg(Color::DarkGray))));
     }
 
-    // ── Deck card list ────────────────────────────────────────────────────────
-    lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled(
-        "  Deck cards:",
+    right.push(Line::from(Span::raw("")));
+
+    // Deck cards
+    let deck_count = app.run.as_ref().map(|r| r.deck.len()).unwrap_or(0);
+    right.push(Line::from(Span::styled(
+        format!("  Deck  ({})", deck_count),
         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
     )));
     if let Some(ref run) = app.run {
         if run.deck.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "    (empty)",
-                Style::default().fg(Color::DarkGray),
-            )));
+            right.push(Line::from(Span::styled("    (empty)", Style::default().fg(Color::DarkGray))));
         } else {
             let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
             for card in &run.deck {
-                let key = if card.upgraded {
-                    format!("{}+", card.name)
-                } else {
-                    card.name.clone()
-                };
+                let key = if card.upgraded { format!("{}+", card.name) } else { card.name.clone() };
                 *counts.entry(key).or_insert(0) += 1;
             }
             for (name, count) in &counts {
                 let label = if *count > 1 {
-                    format!("    \u{2022} {} \u{00d7}{}", name, count)
+                    format!("  \u{2022} {} \u{00d7}{}", name, count)
                 } else {
-                    format!("    \u{2022} {}", name)
+                    format!("  \u{2022} {}", name)
                 };
-                lines.push(Line::from(Span::styled(label, Style::default().fg(Color::Green))));
+                right.push(Line::from(Span::styled(label, Style::default().fg(Color::Green))));
             }
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            "    (no run loaded)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        right.push(Line::from(Span::styled("    (no run)", Style::default().fg(Color::DarkGray))));
     }
 
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL))
+        Paragraph::new(Text::from(right))
+            .block(Block::default().borders(Borders::ALL).title(" Relics & Deck "))
             .wrap(Wrap { trim: false }),
-        rows[1],
+        cols[1],
     );
 
     let hint = Paragraph::new("  [d/q] close dashboard")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[2]);
+    frame.render_widget(hint, outer[2]);
 }
 
 fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {

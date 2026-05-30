@@ -48,6 +48,48 @@ pub struct MapEvData {
 
 // ── Event filtering ───────────────────────────────────────────────────────────
 
+/// Map a sub-act name to the game's act number (1, 2, or 3).
+/// Both Act 1 sub-acts (overgrowth + underdocks) are act number 1.
+fn sub_act_to_act_number(sub_act: &str) -> u8 {
+    match sub_act {
+        "overgrowth" | "underdocks" => 1,
+        "hive"                      => 2,
+        "glory"                     => 3,
+        _                           => 0,
+    }
+}
+
+/// Returns `false` if any precondition string explicitly restricts to a different act.
+/// Non-act preconditions (gold, HP, potions, etc.) are intentionally ignored here —
+/// we can only gate by act without a full RunState.
+fn passes_act_preconditions(preconditions: &[String], act_number: u8) -> bool {
+    for prec in preconditions {
+        let lower = prec.to_lowercase();
+        // Match "act N only", "act N–M only", "act N+", "act N–M"
+        let Some(rest) = lower.strip_prefix("act ") else { continue };
+        // Strip trailing " only" if present
+        let rest = rest.trim_end_matches(" only").trim();
+
+        if let Some(min_str) = rest.strip_suffix('+') {
+            // "N+" — requires act ≥ N
+            if let Ok(min) = min_str.trim().parse::<u8>() {
+                if act_number < min { return false; }
+            }
+        } else if rest.contains('\u{2013}') || rest.contains('-') {
+            // "N–M" or "N-M" — requires N ≤ act ≤ M
+            let sep = if rest.contains('\u{2013}') { '\u{2013}' } else { '-' };
+            let mut parts = rest.splitn(2, sep);
+            let min = parts.next().and_then(|s| s.trim().parse::<u8>().ok()).unwrap_or(0);
+            let max = parts.next().and_then(|s| s.trim().parse::<u8>().ok()).unwrap_or(99);
+            if act_number < min || act_number > max { return false; }
+        } else if let Ok(n) = rest.parse::<u8>() {
+            // "N only"
+            if act_number != n { return false; }
+        }
+    }
+    true
+}
+
 /// Returns all canonical sub-act names that an event `act` string covers.
 /// Handles both single-act ("Act 1 - Overgrowth") and cross-sub-act
 /// ("Act 1 - Overgrowth / Underdocks") formats.
@@ -64,13 +106,19 @@ fn event_sub_acts(act: &str) -> Vec<&'static str> {
 }
 
 /// Return events relevant to `sub_act`: sub-act-specific events, cross-sub-act
-/// events, and Shared (null-act) events that appear in every act.
+/// events, and Shared (null-act) events whose act preconditions permit this act.
 pub fn events_for_sub_act<'a>(sub_act: &str, events: &'a [SpireApiEvent]) -> Vec<&'a SpireApiEvent> {
+    let act_number = sub_act_to_act_number(sub_act);
     events
         .iter()
         .filter(|e| {
             // Ancient-type events only appear at act transitions, never in event rooms.
             if e.event_type.as_deref() == Some("Ancient") {
+                return false;
+            }
+            // Enforce act-based preconditions (e.g. "Act 2+", "Act 1 only").
+            // Non-act preconditions (gold, HP, etc.) are not checked here.
+            if !passes_act_preconditions(&e.preconditions, act_number) {
                 return false;
             }
             if e.event_type.as_deref() == Some("Shared") || e.act.is_none() {
@@ -594,6 +642,46 @@ mod tests {
 
         let hive = events_for_sub_act("hive", &events);
         assert_eq!(hive.len(), 1); // Shared only
+    }
+
+    #[test]
+    fn events_for_sub_act_excludes_act_gated_shared_events() {
+        use crate::data::api::SpireApiEvent;
+        fn make_shared(id: &str, preconditions: Vec<String>) -> SpireApiEvent {
+            SpireApiEvent {
+                id: id.into(),
+                name: id.into(),
+                event_type: Some("Shared".into()),
+                act: None,
+                description: None,
+                preconditions,
+                options: vec![],
+                pages: vec![],
+                relics: vec![],
+                epithet: None,
+                dialogue: None,
+                image_url: None,
+            }
+        }
+        let events = vec![
+            make_shared("ALL_ACTS",   vec![]),
+            make_shared("ACT2_PLUS",  vec!["Act 2+".into()]),
+            make_shared("ACT1_2",     vec!["Act 1\u{2013}2 only".into()]),
+            make_shared("ACT2_ONLY",  vec!["Act 2 only".into()]),
+            make_shared("ACT1_ONLY",  vec!["Act 1 only".into()]),
+        ];
+
+        // Act 1 (overgrowth): ALL_ACTS + ACT1_2 + ACT1_ONLY = 3
+        let og = events_for_sub_act("overgrowth", &events);
+        assert_eq!(og.len(), 3, "overgrowth got {:?}", og.iter().map(|e| &e.id).collect::<Vec<_>>());
+
+        // Act 2 (hive): ALL_ACTS + ACT2_PLUS + ACT1_2 + ACT2_ONLY = 4
+        let hive = events_for_sub_act("hive", &events);
+        assert_eq!(hive.len(), 4, "hive got {:?}", hive.iter().map(|e| &e.id).collect::<Vec<_>>());
+
+        // Act 3 (glory): ALL_ACTS + ACT2_PLUS = 2
+        let glory = events_for_sub_act("glory", &events);
+        assert_eq!(glory.len(), 2, "glory got {:?}", glory.iter().map(|e| &e.id).collect::<Vec<_>>());
     }
 
     #[test]
