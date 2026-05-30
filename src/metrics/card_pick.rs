@@ -270,7 +270,18 @@ pub fn score_single(card: &Card, deck: &[Card], _act: u8) -> f32 {
 
     let dilution_bonus = (1.0 / (deck.len() as f32 + 1.0)).min(0.15);
 
+    // Keyword modifiers that affect pick value
+    // Ethereal: might get exhausted before you use it — slight penalty to reliability
+    let ethereal_penalty = if card.ethereal { -0.08 } else { 0.0 };
+    // Exhaust: permanently removes itself from the deck — reduces card density over time
+    let exhaust_penalty = if card.exhausts { -0.05 } else { 0.0 };
+    // Innate: always in opening hand — slight bonus for reliability
+    let innate_bonus = if card.innate { 0.05 } else { 0.0 };
+    // Retain: available across turns — slight bonus for flexibility
+    let retain_bonus = if card.retain { 0.04 } else { 0.0 };
+
     rarity_weight + synergy_delta + efficiency + dilution_bonus
+        + ethereal_penalty + exhaust_penalty + innate_bonus + retain_bonus
 }
 
 /// Rank the offered cards best-first using heuristics only (no simulation).

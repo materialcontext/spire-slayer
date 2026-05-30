@@ -37,6 +37,8 @@ pub struct Card {
     pub exhausts: bool,
     pub ethereal: bool,
     pub innate: bool,
+    /// Card stays in hand at end of turn instead of being discarded.
+    pub retain: bool,
     /// Star cost (Regent's secondary resource). 0 means no star cost.
     pub star_cost: u8,
     /// Whether this card has been upgraded at a rest site.
@@ -62,6 +64,7 @@ impl Card {
             exhausts: false,
             ethereal: false,
             innate: false,
+            retain: false,
             star_cost: 0,
             upgraded: false,
         }
@@ -79,6 +82,11 @@ impl Card {
 
     pub fn with_innate(mut self) -> Self {
         self.innate = true;
+        self
+    }
+
+    pub fn with_retain(mut self) -> Self {
+        self.retain = true;
         self
     }
 

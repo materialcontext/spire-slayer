@@ -215,6 +215,7 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
             "exhaust" => card = card.with_exhausts(),
             "ethereal" => card = card.with_ethereal(),
             "innate" => card = card.with_innate(),
+            "retain" => card = card.with_retain(),
             _ => {}
         }
     }

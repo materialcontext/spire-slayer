@@ -132,6 +132,23 @@ fn damage_player(state: &mut CombatState, dmg: u32) {
 
 /// Draw `n` cards from the draw pile into hand.
 /// When the draw pile is empty, the discard pile is shuffled into it.
+/// Pull all Innate cards from the draw pile into hand (called before the regular draw).
+/// Innate cards are always in your opening hand; they don't count against hand_size.
+pub fn draw_innate_cards(state: &mut CombatState) {
+    let mut innate_indices: Vec<usize> = state.draw_pile
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.innate)
+        .map(|(i, _)| i)
+        .collect();
+    // Remove back-to-front to preserve indices
+    innate_indices.sort_unstable_by(|a, b| b.cmp(a));
+    for i in innate_indices {
+        let card = state.draw_pile.remove(i);
+        state.hand.push(card);
+    }
+}
+
 pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
     for _ in 0..n {
         if state.draw_pile.is_empty() {
@@ -792,11 +809,13 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // ── Discard hand ───────────────────────────────────────────────────────
+    // ── Discard hand (Retain cards stay; Ethereal cards exhaust) ──────────
     let drained: Vec<Card> = state.hand.drain(..).collect();
     for card in drained {
         if card.ethereal {
             state.exhaust_pile.push(card);
+        } else if card.retain {
+            state.hand.push(card); // kept for next turn
         } else {
             state.discard_pile.push(card);
         }
@@ -879,8 +898,11 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     state.energy = state.energy_max;
     state.turn += 1;
 
-    // Draw new hand
-    draw_cards(state, state.hand_size as usize, rng);
+    // Draw new hand: Innate cards first (always in opening hand), then regular draw
+    draw_innate_cards(state);
+    let innate_drawn = state.hand.len();
+    let regular_draw = (state.hand_size as usize).saturating_sub(innate_drawn);
+    draw_cards(state, regular_draw, rng);
 
     // ── Player start-of-turn relic effects (after drawing) ────────────────
     // BOUND_PHYLACTERY: Summon 1 per turn (≈ +1 Block)
@@ -1242,6 +1264,50 @@ mod tests {
         state.draw_pile = vec![];
         end_turn(&mut state, &mut rng());
         assert_eq!(state.exhaust_pile.len(), 1);
+    }
+
+    #[test]
+    fn retain_card_stays_in_hand_after_turn() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        let retained = Card::new(99, "Pummel", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_retain();
+        state.hand.push(retained);
+        state.draw_pile = vec![];
+        end_turn(&mut state, &mut rng());
+        assert!(state.hand.iter().any(|c| c.name == "Pummel"), "Retain card should stay in hand");
+        assert!(state.discard_pile.iter().all(|c| c.name != "Pummel"), "Retain card should not be discarded");
+    }
+
+    #[test]
+    fn innate_card_always_in_opening_hand() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        // Fill draw pile with non-innate cards + one innate card at the end
+        state.draw_pile = (0..10).map(|_| strike()).collect();
+        let innate = Card::new(99, "Warpath", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_innate();
+        state.draw_pile.push(innate);
+        state.hand.clear();
+        draw_innate_cards(&mut state);
+        assert!(state.hand.iter().any(|c| c.name == "Warpath"), "Innate card should be drawn first");
+        assert_eq!(state.hand.len(), 1, "Only the innate card should be pulled");
+    }
+
+    #[test]
+    fn innate_reduces_regular_draw_count() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        state.draw_pile = (0..10).map(|_| strike()).collect();
+        let innate = Card::new(99, "Warpath", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_innate();
+        state.draw_pile.push(innate);
+        // Simulate start_turn: innate drawn first, then hand_size - 1 more
+        draw_innate_cards(&mut state);
+        let innate_count = state.hand.len();
+        let regular_draw = (state.hand_size as usize).saturating_sub(innate_count);
+        draw_cards(&mut state, regular_draw, &mut rng());
+        assert_eq!(state.hand.len(), state.hand_size as usize, "Total hand should equal hand_size");
     }
 
     #[test]
