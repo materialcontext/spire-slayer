@@ -940,7 +940,11 @@ fn resolve_enemy_intent(state: &mut CombatState, enemy_idx: usize) {
         Intent::Block => {
             // Block is set from move data before this is called; nothing more to do.
         }
-        // Buff, DebuffPlayer, Escape, Unknown — handled by apply_move_powers
+        Intent::Escape => {
+            // Enemy flees — mark it dead so it no longer participates in combat.
+            state.enemies[enemy_idx].hp = 0;
+        }
+        // Buff, DebuffPlayer, Unknown — handled by apply_move_powers
         _ => {}
     }
 }

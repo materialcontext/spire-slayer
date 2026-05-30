@@ -53,6 +53,13 @@ pub enum PostPickAction {
     BossActTransition,
 }
 
+/// What to do after the treasure room is dismissed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AfterTreasure {
+    /// Load a boss card pick then begin act transition.
+    BossCardPick,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub combat: Option<CombatState>,
@@ -102,6 +109,10 @@ pub struct App {
     pub offered_relic: Option<SpireApiRelic>,
     /// Cursor in treasure room: 0 = Take, 1 = Skip.
     pub relic_cursor: usize,
+    /// Action to perform after the treasure room is dismissed.
+    pub after_treasure: Option<AfterTreasure>,
+    /// Boss card pool pending a card pick after the boss relic chest.
+    pub pending_boss_cards: Vec<Card>,
     /// Shop inventory.
     pub shop_cards: Vec<Card>,
     pub shop_card_advice: Vec<CardAdvice>,
@@ -192,6 +203,8 @@ impl App {
             relics,
             offered_relic: None,
             relic_cursor: 0,
+            after_treasure: None,
+            pending_boss_cards: Vec::new(),
             shop_cards: Vec::new(),
             shop_card_advice: Vec::new(),
             shop_card_prices: Vec::new(),
@@ -274,7 +287,7 @@ impl App {
             AppMode::MapView        => self.handle_key_map_view(key, rng),
             AppMode::RestSite       => self.handle_key_rest_site(key),
             AppMode::EventRoom      => self.handle_key_event_room(key),
-            AppMode::TreasureRoom   => self.handle_key_treasure_room(key),
+            AppMode::TreasureRoom   => self.handle_key_treasure_room(key, rng),
             AppMode::Shop           => self.handle_key_shop(key),
             AppMode::ManualInput    => self.handle_key_input(key),
             AppMode::CombatAdvice   => self.handle_key_combat(key, rng),
@@ -933,8 +946,8 @@ impl App {
                 };
                 self.apply_combat_hp_loss(RoomType::Boss, rng);
                 self.apply_post_combat_relics();
-                self.post_pick_action = Some(PostPickAction::BossActTransition);
-                self.load_pick(offered, rng, AppMode::MapView);
+                // Open boss relic chest first, then card pick, then act transition.
+                self.open_boss_relic_room(offered, rng);
             }
             Some(RoomType::Rest) => self.open_rest_site(),
             Some(RoomType::Event) => self.open_event_room(rng),
@@ -1066,7 +1079,25 @@ impl App {
         self.mode = AppMode::TreasureRoom;
     }
 
-    fn handle_key_treasure_room(&mut self, key: KeyEvent) {
+    /// Open a boss relic chest: offer one Rare Relic, then proceed to boss card pick.
+    fn open_boss_relic_room(&mut self, boss_cards: Vec<Card>, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool = self.run.as_ref()
+            .map(|r| char_color(&r.class))
+            .unwrap_or("ironclad");
+        let pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            rarity == "Rare Relic" && (p == "shared" || p == class_pool)
+        }).collect();
+        self.offered_relic = pool.choose(rng).map(|r| (*r).clone());
+        self.pending_boss_cards = boss_cards;
+        self.after_treasure = Some(AfterTreasure::BossCardPick);
+        self.relic_cursor = 0;
+        self.mode = AppMode::TreasureRoom;
+    }
+
+    fn handle_key_treasure_room(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => { self.relic_cursor = 1; }
             KeyCode::Char('k') | KeyCode::Up   => { self.relic_cursor = 0; }
@@ -1074,21 +1105,36 @@ impl App {
                 if self.relic_cursor == 0 {
                     if let (Some(relic), Some(run)) = (self.offered_relic.take(), self.run.as_mut()) {
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                         self.status_message = format!("Took {}", relic.name);
                     }
                 } else {
                     self.status_message = "Skipped relic".to_string();
                     self.offered_relic = None;
                 }
-                self.mode = AppMode::MapView;
+                self.finish_treasure_room(rng);
             }
             KeyCode::Esc => {
                 self.offered_relic = None;
+                self.after_treasure = None;
                 self.mode = AppMode::MapView;
             }
             KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
             _ => {}
+        }
+    }
+
+    fn finish_treasure_room(&mut self, rng: &mut impl rand::Rng) {
+        if let Some(after) = self.after_treasure.take() {
+            match after {
+                AfterTreasure::BossCardPick => {
+                    let cards = std::mem::take(&mut self.pending_boss_cards);
+                    self.post_pick_action = Some(PostPickAction::BossActTransition);
+                    self.load_pick(cards, rng, AppMode::MapView);
+                }
+            }
+        } else {
+            self.mode = AppMode::MapView;
         }
     }
 
@@ -1363,7 +1409,7 @@ impl App {
                         }
                         run.gold -= price;
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                         self.status_message = format!("Bought {} for {}g ({}g left)", relic.name, price, run.gold);
                         self.shop_relics.remove(relic_idx);
                         self.shop_relic_prices.remove(relic_idx);
@@ -1620,7 +1666,7 @@ impl App {
                         run.relics.retain(|r| r.name != old_name);
                         if let Some(upgraded) = self.relics.iter().find(|r| r.id == new_id) {
                             let desc = upgraded.description.clone().unwrap_or_default();
-                            run.relics.push(crate::domain::run::Relic::new(&upgraded.name, desc));
+                            run.relics.push(crate::domain::run::Relic::new(&upgraded.id, &upgraded.name, desc));
                             self.status_message = format!("Replaced {} with {}", old_name, upgraded.name);
                         }
                     }
@@ -1652,7 +1698,7 @@ impl App {
                 _ => {
                     if let Some(ref mut run) = self.run {
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                     }
                     self.status_message = format!("Took boon: {}", relic.name);
                 }
@@ -1980,7 +2026,7 @@ fn run_loop(
 fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
     run.map(|r| {
         r.relics.iter()
-            .map(|rel| rel.name.to_uppercase().replace(' ', "_"))
+            .map(|rel| rel.id.clone())
             .collect()
     }).unwrap_or_default()
 }

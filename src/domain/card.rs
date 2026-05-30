@@ -39,6 +39,8 @@ pub struct Card {
     pub innate: bool,
     /// Star cost (Regent's secondary resource). 0 means no star cost.
     pub star_cost: u8,
+    /// Whether this card has been upgraded at a rest site.
+    pub upgraded: bool,
 }
 
 impl Card {
@@ -61,6 +63,7 @@ impl Card {
             ethereal: false,
             innate: false,
             star_cost: 0,
+            upgraded: false,
         }
     }
 
@@ -88,6 +91,24 @@ impl Card {
             return energy > 0;
         }
         self.cost <= energy
+    }
+
+    /// Upgrade this card (rest site smith): boosts Damage/Block effects by 3.
+    /// No-op if already upgraded.
+    pub fn upgrade(&mut self) {
+        if self.upgraded { return; }
+        self.upgraded = true;
+        for effect in &mut self.effects {
+            match effect {
+                CardEffect::Damage(d) | CardEffect::DamageAll(d) | CardEffect::Block(d) => {
+                    *d += 3;
+                }
+                CardEffect::DamageMulti { base, .. } => {
+                    *base += 1;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Sum of direct damage effects (ignoring buffs/debuffs).
