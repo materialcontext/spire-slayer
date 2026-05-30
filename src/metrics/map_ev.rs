@@ -186,17 +186,19 @@ fn parse_option_hp_delta(plain: &str, removal_hp: f32, upgrade_hp: f32) -> f32 {
 /// Return a copy of `card` with its primary combat effect boosted (+2 dmg / +3 block).
 /// Returns `None` when the card has no boostable effect.
 fn upgrade_card_copy(card: &Card) -> Option<Card> {
-    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Damage(_))) {
-        let mut c = card.clone();
-        if let CardEffect::Damage(d) = &mut c.effects[i] { *d += 2; }
-        return Some(c);
-    }
-    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Block(_))) {
-        let mut c = card.clone();
-        if let CardEffect::Block(b) = &mut c.effects[i] { *b += 3; }
-        return Some(c);
-    }
-    None
+    if card.upgraded { return None; }
+    // Only return Some when there are effects that upgrade actually changes.
+    let upgradeable = card.effects.iter().any(|e| matches!(
+        e,
+        crate::domain::effect::CardEffect::Damage(_)
+            | crate::domain::effect::CardEffect::DamageAll(_)
+            | crate::domain::effect::CardEffect::Block(_)
+            | crate::domain::effect::CardEffect::DamageMulti { .. }
+    ));
+    if !upgradeable { return None; }
+    let mut c = card.clone();
+    c.upgrade();
+    Some(c)
 }
 
 /// Estimate the HP value of upgrading the best card in the deck over the remaining act.
@@ -666,7 +668,7 @@ mod tests {
             vec![CardEffect::Damage(6)],
         );
         let upgraded = upgrade_card_copy(&card).unwrap();
-        assert_eq!(upgraded.base_damage(), 8);
+        assert_eq!(upgraded.base_damage(), 9);
     }
 
     #[test]

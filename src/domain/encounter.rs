@@ -223,7 +223,7 @@ pub fn encounter_to_combat_with_deck(
     state.discard_pile.clear();
     state.energy = state.energy_max;
 
-    // A8+: enemies have more HP; A9+: enemies deal more damage
+    // A8+: enemies have more HP; A9+: enemies deal more damage; A10+: even more damage
     if ascension >= 8 {
         for (i, enc_monster) in enc.monsters.iter().enumerate() {
             if let Some(enemy) = state.enemies.get_mut(i) {
@@ -237,9 +237,10 @@ pub fn encounter_to_combat_with_deck(
             }
         }
     }
-    if ascension >= 9 {
+    let dmg_scale = if ascension >= 10 { 1.25 } else if ascension >= 9 { 1.15 } else { 0.0 };
+    if dmg_scale > 0.0 {
         for enemy in &mut state.enemies {
-            enemy.intent = scale_intent_damage(enemy.intent.clone(), 1.15);
+            enemy.intent = scale_intent_damage(enemy.intent.clone(), dmg_scale);
         }
     }
 

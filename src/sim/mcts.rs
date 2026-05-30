@@ -389,9 +389,12 @@ pub fn best_play_sequence(
             .collect();
 
         let pr = PARALLEL_ROLLOUTS as f32;
-        let avg_score   = results.iter().map(|(s, _)| *s).sum::<f32>() / pr;
-        let avg_hp_loss = results.iter().map(|(_, h)| *h).sum::<f32>() / pr;
-        hp_losses.push(avg_hp_loss);
+        let avg_score = results.iter().map(|(s, _)| *s).sum::<f32>() / pr;
+        // Push each individual rollout's hp_loss (not the average) so percentiles
+        // reflect the true distribution rather than smoothed means.
+        for (_, hp_loss) in &results {
+            hp_losses.push(*hp_loss);
+        }
 
         // ── Backpropagation ────────────────────────────────────────────────
         backprop(&mut arena, rollout_idx, avg_score);
