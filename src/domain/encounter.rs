@@ -264,14 +264,32 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
     // DIVINE_DESTINY: upgraded variant — gain 6 Stars
     if state.has_relic("DIVINE_DESTINY") { state.stars += 6; }
 
-    // ── Defect: channel orb at combat start ───────────────────────────────
-    // CRACKED_CORE: Channel 1 Lightning at the start of each combat
-    if state.has_relic("CRACKED_CORE") {
+    // ── Defect: channel orbs at combat start ──────────────────────────────
+    {
         use crate::domain::effect::OrbType;
-        if state.orbs.len() < state.orb_slots {
+        // CRACKED_CORE: Channel 1 Lightning
+        if state.has_relic("CRACKED_CORE") && state.orbs.len() < state.orb_slots {
             state.orbs.push(OrbType::Lightning);
         }
+        // INFUSED_CORE (upgraded): Channel 3 Lightning
+        if state.has_relic("INFUSED_CORE") {
+            for _ in 0..3 {
+                if state.orbs.len() < state.orb_slots {
+                    state.orbs.push(OrbType::Lightning);
+                }
+            }
+        }
+        // DATA_DISK: start with 1 Focus
+        if state.has_relic("DATA_DISK") {
+            *state.player.buffs.entry(BuffType::Focus).or_insert(0) += 1;
+        }
     }
+
+    // ── Necrobinder: Osty summons at combat start (treat Summon N ≈ Block N) ─
+    // BOUND_PHYLACTERY: Summon 1 per turn (first-turn summon = 1 block)
+    if state.has_relic("BOUND_PHYLACTERY") { state.player.block += 1; }
+    // PHYLACTERY_UNBOUND (upgraded): Summon 5 at combat start + Summon 2 per turn
+    if state.has_relic("PHYLACTERY_UNBOUND") { state.player.block += 5 + 2; }
 
     // ── Opening block ──────────────────────────────────────────────────────
     if state.has_relic("ANCHOR")      { state.player.block += 10; }
@@ -280,6 +298,8 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
     // ── Opening hand size bonuses ──────────────────────────────────────────
     if state.has_relic("BAG_OF_PREPARATION") { state.hand_size = (state.hand_size + 2).min(10); }
     if state.has_relic("RING_OF_THE_SNAKE")  { state.hand_size = (state.hand_size + 2).min(10); }
+    // RING_OF_THE_DRAKE (upgraded): +2 draw on turns 1-3; modeled as permanent for sim simplicity.
+    if state.has_relic("RING_OF_THE_DRAKE")  { state.hand_size = (state.hand_size + 2).min(10); }
     if state.has_relic("BIG_MUSHROOM")       { state.hand_size = (state.hand_size + 2).min(10); }
     if state.has_relic("BOOMING_CONCH") && state.is_elite {
         state.hand_size = (state.hand_size + 2).min(10);

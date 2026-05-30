@@ -1538,9 +1538,11 @@ impl App {
             match relic.name.as_str() {
                 "Burning Blood" => {
                     let healed = run.hp.saturating_add(6).min(run.max_hp);
-                    if healed > run.hp {
-                        run.hp = healed;
-                    }
+                    if healed > run.hp { run.hp = healed; }
+                }
+                "Black Blood" => {
+                    let healed = run.hp.saturating_add(12).min(run.max_hp);
+                    if healed > run.hp { run.hp = healed; }
                 }
                 _ => {}
             }
@@ -1609,13 +1611,52 @@ impl App {
     }
 
     fn confirm_ancient_boon(&mut self, rng: &mut impl rand::Rng) {
-        // Add the chosen relic to run
         if let Some(relic) = self.ancient_boons.get(self.ancient_cursor).cloned() {
-            if let Some(ref mut run) = self.run {
-                let desc = relic.description.clone().unwrap_or_default();
-                run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+            match relic.id.as_str() {
+                "TOUCH_OF_OROBAS" => {
+                    // Replace starter relic with the upgraded Ancient version.
+                    if let Some(ref mut run) = self.run {
+                        let (old_name, new_id) = starter_relic_upgrade(&run.class);
+                        run.relics.retain(|r| r.name != old_name);
+                        if let Some(upgraded) = self.relics.iter().find(|r| r.id == new_id) {
+                            let desc = upgraded.description.clone().unwrap_or_default();
+                            run.relics.push(crate::domain::run::Relic::new(&upgraded.name, desc));
+                            self.status_message = format!("Replaced {} with {}", old_name, upgraded.name);
+                        }
+                    }
+                }
+                "ARCHAIC_TOOTH" => {
+                    // Replace a random Basic-rarity card in the deck with a random Ancient card.
+                    use crate::domain::card::Rarity;
+                    use rand::seq::SliceRandom;
+                    if let Some(ref mut run) = self.run {
+                        let basic_idx = run.deck.iter().position(|c| c.rarity == Rarity::Basic);
+                        if let Some(idx) = basic_idx {
+                            let removed = run.deck.remove(idx);
+                            let ancient_cards: Vec<&crate::domain::card::Card> = self.class_cards.iter()
+                                .filter(|c| c.rarity == Rarity::Ancient)
+                                .collect();
+                            if let Some(card) = ancient_cards.choose(rng) {
+                                let added_name = card.name.clone();
+                                run.deck.push((*card).clone());
+                                self.status_message = format!("Transformed {} into {}", removed.name, added_name);
+                            } else {
+                                run.deck.insert(idx, removed);
+                                self.status_message = "No Ancient cards available".to_string();
+                            }
+                        } else {
+                            self.status_message = "No Basic cards to transform".to_string();
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(ref mut run) = self.run {
+                        let desc = relic.description.clone().unwrap_or_default();
+                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                    }
+                    self.status_message = format!("Took boon: {}", relic.name);
+                }
             }
-            self.status_message = format!("Took boon: {}", relic.name);
         }
         self.ancient_boons.clear();
 
@@ -1817,6 +1858,18 @@ fn relic_price(rarity: &str, rng: &mut impl rand::Rng) -> u32 {
         "Uncommon Relic" => rng.gen_range(191..=259),
         "Rare Relic"     => rng.gen_range(234..=316),
         _                => rng.gen_range(149..=201),
+    }
+}
+
+/// Map a character's starter relic name to the upgraded relic API ID.
+fn starter_relic_upgrade(class: &PlayerClass) -> (&'static str, &'static str) {
+    match class {
+        PlayerClass::Ironclad    => ("Burning Blood",    "BLACK_BLOOD"),
+        PlayerClass::Silent      => ("Ring of the Snake","RING_OF_THE_DRAKE"),
+        PlayerClass::Regent      => ("Divine Right",     "DIVINE_DESTINY"),
+        PlayerClass::Necrobinder => ("Bound Phylactery", "PHYLACTERY_UNBOUND"),
+        PlayerClass::Defect      => ("Cracked Core",     "INFUSED_CORE"),
+        PlayerClass::Watcher     => ("Pure Water",       "PURE_WATER"),
     }
 }
 

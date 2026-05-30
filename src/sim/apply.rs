@@ -807,6 +807,10 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     draw_cards(state, state.hand_size as usize, rng);
 
     // ── Player start-of-turn relic effects (after drawing) ────────────────
+    // BOUND_PHYLACTERY: Summon 1 per turn (≈ +1 Block)
+    if state.has_relic("BOUND_PHYLACTERY") { state.player.block += 1; }
+    // PHYLACTERY_UNBOUND (upgraded): Summon 2 per turn (≈ +2 Block)
+    if state.has_relic("PHYLACTERY_UNBOUND") { state.player.block += 2; }
     // MERCURY_HOURGLASS: 3 damage to all enemies each turn
     if state.has_relic("MERCURY_HOURGLASS") {
         for enemy in &mut state.enemies {
