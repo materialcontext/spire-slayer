@@ -11,6 +11,22 @@ use crate::metrics::deck_dash::dist_bar;
 use crate::tui::app::{App, AppMode};
 use crate::tui::widgets::{advice_spans, enemy_row, intent_label_owned};
 
+/// Truncate `s` to at most `max_chars` Unicode characters, appending `…` if truncated.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let mut out = String::with_capacity(max_chars + 3);
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(c) => out.push(c),
+            None => return out, // string was shorter than max_chars
+        }
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
@@ -665,15 +681,15 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
                     .replace("Act 3 - Glory", "Glory")
             };
             let opts = ev.option_titles.join(" / ");
-            let opts_trunc = if opts.len() > 34 {
-                format!("{}…", &opts[..33])
+            let opts_trunc = if opts.chars().count() > 34 {
+                truncate_chars(&opts, 33)
             } else {
                 opts
             };
             let row_text = format!(
                 "  {} {:<24} {:<14}  {}",
                 indicator,
-                if ev.name.len() > 23 { format!("{}…", &ev.name[..22]) } else { ev.name.clone() },
+                truncate_chars(&ev.name, 23),
                 act_tag,
                 opts_trunc,
             );
@@ -686,11 +702,7 @@ fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
 
             if selected && !ev.description.is_empty() {
                 let desc = &ev.description;
-                let truncated = if desc.len() > 100 {
-                    format!("{}…", &desc[..99])
-                } else {
-                    desc.clone()
-                };
+                let truncated = truncate_chars(desc, 100);
                 lines.push(Line::from(Span::styled(
                     format!("      {}", truncated),
                     Style::default().fg(Color::DarkGray),
