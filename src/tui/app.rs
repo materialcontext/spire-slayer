@@ -1860,12 +1860,12 @@ impl App {
     fn apply_post_combat_relics(&mut self) {
         let Some(ref mut run) = self.run else { return; };
         for relic in run.relics.clone() {
-            match relic.name.as_str() {
-                "Burning Blood" => {
+            match relic.id.as_str() {
+                "BURNING_BLOOD" => {
                     let healed = run.hp.saturating_add(6).min(run.max_hp);
                     if healed > run.hp { run.hp = healed; }
                 }
-                "Black Blood" => {
+                "BLACK_BLOOD" => {
                     let healed = run.hp.saturating_add(12).min(run.max_hp);
                     if healed > run.hp { run.hp = healed; }
                 }

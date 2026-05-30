@@ -192,7 +192,7 @@ fn render_enemies(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Color::Red
     };
-    let player_text = vec![
+    let mut player_text = vec![
         Line::from(vec![
             Span::raw("  HP: "),
             Span::styled(
@@ -213,6 +213,21 @@ fn render_enemies(frame: &mut Frame, app: &App, area: Rect) {
             combat.turn
         ))),
     ];
+    // Show relics from the run so they're visible during combat.
+    if let Some(ref run) = app.run {
+        if !run.relics.is_empty() {
+            player_text.push(Line::from(Span::styled(
+                "  Relics:",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            for relic in &run.relics {
+                player_text.push(Line::from(Span::styled(
+                    format!("    \u{2022} {}", relic.name),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+        }
+    }
     let player_block = Block::default().title(" PLAYER ").borders(Borders::ALL);
     frame.render_widget(
         Paragraph::new(Text::from(player_text)).block(player_block),
@@ -1207,6 +1222,11 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
                     .block(Block::default().borders(Borders::ALL)),
                 body[0],
             );
+            // Still render the deck column so relics/deck are visible even before a map
+            // is generated (e.g. during act transition ancient boon → map).
+            if let Some(ref run) = app.run {
+                render_map_deck_column(frame, app, body[2], run);
+            }
             render_statusbar(frame, app, outer[2]);
             return;
         }
