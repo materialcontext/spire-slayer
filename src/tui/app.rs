@@ -497,7 +497,7 @@ impl App {
             KeyCode::Char('p') => {
                 let pool = card_pool_for_run(self);
                 // Preview: use a throwaway offset so the real run's offset is unchanged.
-                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5.0);
                 let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
                 let offered = sample_offer(&pool, RewardKind::Monster, &mut preview_offset, asc, rng);
                 self.load_pick(offered, rng, AppMode::CombatAdvice);
@@ -2085,7 +2085,7 @@ mod tests {
 
     fn make_offer(app: &App, rng: &mut StdRng) -> Vec<Card> {
         let pool = card_pool_for_run(app);
-        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
+        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5.0);
         let asc = app.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         sample_offer(&pool, RewardKind::Monster, &mut offset, asc, rng)
     }

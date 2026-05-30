@@ -69,9 +69,9 @@ pub struct RunState {
     pub map_pos: Option<MapPos>,
     /// Current sub-act name, e.g. "overgrowth".
     pub sub_act: String,
-    /// Rare-card offset for card rewards (percentage points).
-    /// Starts at -5, increments +1 per non-rare card rolled (cap +40), resets to -5 on rare.
-    pub rare_offset: i32,
+    /// Rare-card offset for card rewards (percentage points, f32 for A7 half-increments).
+    /// Starts at -5.0, increments +1.0 per non-rare card rolled (+0.5 at A7+), cap +40, resets to -5 on rare.
+    pub rare_offset: f32,
     /// Number of card removals purchased at a shop this run (affects removal price).
     pub card_removals_bought: u32,
     /// Current ascension level (0 = normal mode).
@@ -101,7 +101,7 @@ impl RunState {
             map: None,
             map_pos: None,
             sub_act: "overgrowth".to_string(),
-            rare_offset: -5,
+            rare_offset: -5.0,
             card_removals_bought: 0,
             ascension: 0,
             had_darv_act2: false,
