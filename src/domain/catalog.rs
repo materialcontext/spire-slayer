@@ -389,18 +389,6 @@ pub mod colorless {
     }
 }
 
-/// Construct a Miracle card: 0-cost Skill that grants 1 energy, exhausts.
-/// Used by the Watcher's PURE_WATER starter relic.
-pub fn miracle_card() -> Card {
-    Card::new(
-        djb2("MIRACLE"),
-        "Miracle",
-        0,
-        CardType::Skill,
-        Rarity::Special,
-        vec![CardEffect::GainEnergy(1)],
-    ).with_exhausts()
-}
 
 
 #[cfg(test)]

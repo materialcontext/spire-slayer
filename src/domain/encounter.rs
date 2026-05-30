@@ -344,15 +344,6 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
         }
     }
 
-    // ── Watcher: add Miracle to opening hand ──────────────────────────────
-    if state.has_relic("PURE_WATER") {
-        state.hand.push(crate::domain::catalog::miracle_card());
-    }
-    // ENLIGHTENED_WATER (upgraded): add 2 Miracles
-    if state.has_relic("ENLIGHTENED_WATER") {
-        state.hand.push(crate::domain::catalog::miracle_card());
-        state.hand.push(crate::domain::catalog::miracle_card());
-    }
 }
 
 #[cfg(test)]

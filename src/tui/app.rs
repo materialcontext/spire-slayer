@@ -1915,7 +1915,6 @@ fn starter_relic_upgrade(class: &PlayerClass) -> (&'static str, &'static str) {
         PlayerClass::Regent      => ("Divine Right",     "DIVINE_DESTINY"),
         PlayerClass::Necrobinder => ("Bound Phylactery", "PHYLACTERY_UNBOUND"),
         PlayerClass::Defect      => ("Cracked Core",     "INFUSED_CORE"),
-        PlayerClass::Watcher     => ("Pure Water",       "PURE_WATER"),
     }
 }
 
@@ -1927,7 +1926,6 @@ fn char_color(class: &PlayerClass) -> &'static str {
         PlayerClass::Regent      => "regent",
         PlayerClass::Necrobinder => "necrobinder",
         PlayerClass::Defect      => "defect",
-        PlayerClass::Watcher     => "colorless",
     }
 }
 

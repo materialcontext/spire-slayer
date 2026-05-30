@@ -9,7 +9,6 @@ pub enum PlayerClass {
     Regent,
     Necrobinder,
     Defect,
-    Watcher,
 }
 
 impl std::fmt::Display for PlayerClass {
@@ -20,7 +19,6 @@ impl std::fmt::Display for PlayerClass {
             Self::Regent     => "Regent",
             Self::Necrobinder => "Necrobinder",
             Self::Defect     => "Defect",
-            Self::Watcher    => "Watcher",
         };
         write!(f, "{name}")
     }
@@ -182,10 +180,6 @@ pub mod starting_relics {
         Relic::new("CRACKED_CORE", "Cracked Core", "At the start of each combat, Channel 1 Lightning.")
     }
 
-    pub fn watcher() -> Relic {
-        Relic::new("PURE_WATER", "Pure Water", "At the start of each combat, add 1 Miracle to your hand.")
-    }
-
     pub fn for_class(class: &PlayerClass) -> Relic {
         match class {
             PlayerClass::Ironclad   => ironclad(),
@@ -193,7 +187,6 @@ pub mod starting_relics {
             PlayerClass::Regent     => regent(),
             PlayerClass::Necrobinder => necrobinder(),
             PlayerClass::Defect     => defect(),
-            PlayerClass::Watcher    => watcher(),
         }
     }
 }
@@ -268,6 +261,5 @@ mod tests {
         assert_eq!(starting_relics::ironclad().id, "BURNING_BLOOD");
         assert_eq!(starting_relics::silent().id, "RING_OF_THE_SNAKE");
         assert_eq!(starting_relics::defect().id, "CRACKED_CORE");
-        assert_eq!(starting_relics::watcher().id, "PURE_WATER");
     }
 }
