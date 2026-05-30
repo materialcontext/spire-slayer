@@ -289,16 +289,22 @@ fn trigger_orb_passives(state: &mut CombatState, rng: &mut impl Rng) {
 /// Apply a single card effect to the combat state.
 ///
 /// `Passive` effects are no-ops in the simulator; they are display-only.
+/// `osty_attack`: damage comes from Osty (the ally), so player Strength and
+/// Weak debuff are excluded — only enemy Vulnerable applies.
 pub(crate) fn apply_effect(
     state: &mut CombatState,
     effect: &CardEffect,
     target_idx: usize,
+    osty_attack: bool,
     rng: &mut impl Rng,
 ) {
+    let hit = |d, st: &CombatState, t| {
+        if osty_attack { compute_hit_no_strength(d, st, t) } else { compute_hit(d, st, t) }
+    };
     match effect {
         CardEffect::Damage(d) => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
-                let dmg = compute_hit(*d, state, target_idx);
+                let dmg = hit(*d, state, target_idx);
                 let thorns = damage_enemy(state, target_idx, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -308,10 +314,10 @@ pub(crate) fn apply_effect(
 
         CardEffect::DamageAll(d) => {
             // Collect (index, damage, thorns) before mutating.
-            let hits: Vec<(usize, u32, u32)> = (0..state.enemies.len())
+            let hit_list: Vec<(usize, u32, u32)> = (0..state.enemies.len())
                 .filter(|&i| state.enemies[i].is_alive())
                 .map(|i| {
-                    let dmg = compute_hit(*d, state, i);
+                    let dmg = hit(*d, state, i);
                     let thorns = state.enemies[i]
                         .buffs
                         .get(&BuffType::Thorns)
@@ -322,7 +328,7 @@ pub(crate) fn apply_effect(
                 })
                 .collect();
 
-            for (i, dmg, thorns) in hits {
+            for (i, dmg, thorns) in hit_list {
                 damage_enemy(state, i, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -344,7 +350,7 @@ pub(crate) fn apply_effect(
                     if !state.enemies[target_idx].is_alive() {
                         break;
                     }
-                    let dmg = compute_hit(*base, state, target_idx);
+                    let dmg = hit(*base, state, target_idx);
                     damage_enemy(state, target_idx, dmg);
                     if thorns > 0 {
                         damage_player(state, thorns);
@@ -356,8 +362,9 @@ pub(crate) fn apply_effect(
         CardEffect::DamageEqBlock => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
                 let base = state.player.block;
-                // Block-derived damage: Weak/Vulnerable apply but Strength does not
-                let dmg = compute_hit_no_strength(base, state, target_idx);
+                // Block value is the base; Strength, Weak, and Vulnerable all apply normally.
+                // Osty flag is ignored here — DamageEqBlock is always a player action.
+                let dmg = compute_hit(base, state, target_idx);
                 let thorns = damage_enemy(state, target_idx, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -383,6 +390,13 @@ pub(crate) fn apply_effect(
 
         CardEffect::LoseHp(h) => {
             state.player.hp = state.player.hp.saturating_sub(*h);
+        }
+
+        CardEffect::EnemyLoseHp(h) => {
+            // Direct HP loss: bypasses block, Strength, Weak, and Vulnerable.
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                state.enemies[target_idx].hp = state.enemies[target_idx].hp.saturating_sub(*h);
+            }
         }
 
         CardEffect::ApplyToEnemy { buff, stacks } => {
@@ -512,7 +526,7 @@ pub fn play_card(
         } else {
             effect.clone()
         };
-        apply_effect(state, &effective, target_idx, rng);
+        apply_effect(state, &effective, target_idx, card.osty_attack, rng);
     }
 
     // ── Post-play relic triggers ───────────────────────────────────────────
@@ -1460,14 +1474,14 @@ mod tests {
     }
 
     #[test]
-    fn damage_eq_block_ignores_strength() {
+    fn damage_eq_block_uses_strength() {
         let mut state = basic_state();
         state.player.block = 15;
         *state.player.buffs.entry(BuffType::Strength).or_insert(0) = 5;
         state.hand.push(body_slam());
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
-        // Strength must NOT add to block-derived damage: 50 - 15 = 35 (not 50 - 20)
-        assert_eq!(state.enemies[0].hp, 35);
+        // Body Slam: block (15) + Strength (5) = 20 damage → 50 - 20 = 30
+        assert_eq!(state.enemies[0].hp, 30);
     }
 
     // ── Relic: ANCHOR ─────────────────────────────────────────────────────────

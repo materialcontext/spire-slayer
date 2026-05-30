@@ -39,6 +39,9 @@ pub struct Card {
     pub innate: bool,
     /// Card stays in hand at end of turn instead of being discarded.
     pub retain: bool,
+    /// Damage is dealt by Osty (the companion), not the player.
+    /// Player's Strength and Weak debuff do not apply; enemy Vulnerable still does.
+    pub osty_attack: bool,
     /// Star cost (Regent's secondary resource). 0 means no star cost.
     pub star_cost: u8,
     /// Whether this card has been upgraded at a rest site.
@@ -65,6 +68,7 @@ impl Card {
             ethereal: false,
             innate: false,
             retain: false,
+            osty_attack: false,
             star_cost: 0,
             upgraded: false,
         }
@@ -87,6 +91,11 @@ impl Card {
 
     pub fn with_retain(mut self) -> Self {
         self.retain = true;
+        self
+    }
+
+    pub fn with_osty_attack(mut self) -> Self {
+        self.osty_attack = true;
         self
     }
 

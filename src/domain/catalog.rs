@@ -216,6 +216,7 @@ fn api_to_domain(api: &SpireApiCard) -> Card {
             "ethereal" => card = card.with_ethereal(),
             "innate" => card = card.with_innate(),
             "retain" => card = card.with_retain(),
+            "ostyattack" => card = card.with_osty_attack(),
             _ => {}
         }
     }
