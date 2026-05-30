@@ -740,6 +740,11 @@ impl App {
         run.sub_act  = sub_act.clone();
         run.act      = crate::metrics::run_ev::act_number(&sub_act);
 
+        // A4: Tight Belt — 1 less potion slot (2 instead of 3)
+        if self.ascension_cursor >= 4 {
+            run.potions.pop();
+        }
+
         // A5: Ascender's Bane — start with a curse card
         if self.ascension_cursor >= 5 {
             use crate::domain::card::{CardType, Rarity};
@@ -933,6 +938,7 @@ impl App {
                 };
                 self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
+                self.apply_combat_gold(rt);
                 self.load_pick(offered, rng, AppMode::MapView);
             }
             Some(RoomType::Boss) => {
@@ -1577,6 +1583,20 @@ impl App {
         }
     }
 
+    /// Award gold for defeating a Monster or Elite room.
+    /// A3+: gold rewards are reduced by 25%.
+    fn apply_combat_gold(&mut self, room_type: crate::domain::map::RoomType) {
+        use crate::domain::map::RoomType;
+        let Some(ref mut run) = self.run else { return };
+        let base_gold: u32 = match room_type {
+            RoomType::Monster => rng_gold(10, 20, &mut rand::thread_rng()),
+            RoomType::Elite   => rng_gold(25, 35, &mut rand::thread_rng()),
+            _ => return,
+        };
+        let gold = if run.ascension >= 3 { base_gold * 3 / 4 } else { base_gold };
+        run.gold += gold;
+    }
+
     /// Apply relics that trigger at the end of combat (e.g. Burning Blood).
     fn apply_post_combat_relics(&mut self) {
         let Some(ref mut run) = self.run else { return; };
@@ -2021,6 +2041,10 @@ fn run_loop(
 
 /// Convert human-readable relic names from RunState into SCREAMING_SNAKE_CASE IDs
 /// used by the combat relic system (e.g. "Burning Blood" → "BURNING_BLOOD").
+fn rng_gold(lo: u32, hi: u32, rng: &mut impl rand::Rng) -> u32 {
+    rng.gen_range(lo..=hi)
+}
+
 fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
     run.map(|r| {
         r.relics.iter()

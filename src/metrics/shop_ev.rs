@@ -44,7 +44,7 @@ pub fn score_shop_relic(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     current_relics: &[String],
-    baseline_mean_hp_loss: f32,
+    _baseline_mean_hp_loss: f32,
     has_encounter_data: bool,
     ascension: u8,
     rng: &mut impl Rng,
@@ -52,17 +52,20 @@ pub fn score_shop_relic(
     if has_encounter_data {
         let mut with_relic = current_relics.to_vec();
         with_relic.push(relic_id.to_string());
-        let stats = compute_deck_stats(
-            deck, hp, max_hp, sub_act, all_encounters, all_monsters, &with_relic, ascension, rng,
+        let n_fights = crate::metrics::map_ev::remaining_fights(sub_act) as u32;
+        let base_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+            deck, hp, max_hp, sub_act, all_encounters, all_monsters, current_relics, n_fights, 4, ascension, rng,
         );
-        let per_fight = baseline_mean_hp_loss - stats.mean_hp_loss;
-        let total = per_fight * crate::metrics::map_ev::remaining_fights(sub_act);
+        let with_relic_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+            deck, hp, max_hp, sub_act, all_encounters, all_monsters, &with_relic, n_fights, 4, ascension, rng,
+        );
+        let total = (base_chain - with_relic_chain).max(0.0);
         if total > 0.5 {
             return RelicAdvice {
                 relic_index,
                 hp_value: total,
                 simulated: true,
-                reason: format!("saves {:.1} HP/fight (sim)", per_fight),
+                reason: format!("saves {:.1} HP/fight (sim)", total / n_fights.max(1) as f32),
             };
         }
     }
@@ -79,9 +82,6 @@ pub fn score_shop_relic(
 // ── Removal scoring ────────────────────────────────────────────────────────────
 
 /// HP value of removing the deck's worst card over the remaining act.
-///
-/// When `has_encounter_data` is true and `baseline_mean_hp_loss > 0`, uses the
-/// caller-supplied baseline instead of re-running the full deck simulation.
 pub fn compute_removal_hp_value(
     deck: &[Card],
     hp: u32,
@@ -90,7 +90,7 @@ pub fn compute_removal_hp_value(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
-    baseline_mean_hp_loss: f32,
+    _baseline_mean_hp_loss: f32,
     has_encounter_data: bool,
     ascension: u8,
     rng: &mut impl Rng,
@@ -117,21 +117,27 @@ pub fn compute_removal_hp_value(
         .map(|(_, c)| c.clone())
         .collect();
 
-    let (base_loss, has_data) = if has_encounter_data && baseline_mean_hp_loss > 0.0 {
-        (baseline_mean_hp_loss, true)
+    // Check for encounter data: use caller's flag, or probe by running a quick stats pass.
+    let has_data = if has_encounter_data {
+        true
     } else {
-        let full = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
-        (full.mean_hp_loss, full.encounter_count > 0)
+        let probe = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
+        probe.encounter_count > 0
     };
 
     if !has_data {
         return if deck.iter().any(|c| c.cost == 255) { 12.0 } else { 3.0 };
     }
 
-    let reduced = compute_deck_stats(
-        &deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng,
+    // Chained simulation: carry HP forward across fights for accurate multi-fight delta.
+    let n_fights = crate::metrics::map_ev::remaining_fights(sub_act) as u32;
+    let base_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
     );
-    (base_loss - reduced.mean_hp_loss).max(0.0) * crate::metrics::map_ev::remaining_fights(sub_act)
+    let reduced_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        &deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
+    );
+    (base_chain - reduced_chain).max(0.0)
 }
 
 // ── Catalog-based card value simulation ───────────────────────────────────────

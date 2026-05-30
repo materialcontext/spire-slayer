@@ -237,10 +237,10 @@ pub fn encounter_to_combat_with_deck(
             }
         }
     }
-    let dmg_scale = if ascension >= 10 { 1.25 } else if ascension >= 9 { 1.15 } else { 0.0 };
-    if dmg_scale > 0.0 {
+    // A9: all enemies deal 15% more damage (A10 is Double Boss, not a damage buff)
+    if ascension >= 9 {
         for enemy in &mut state.enemies {
-            enemy.intent = scale_intent_damage(enemy.intent.clone(), dmg_scale);
+            enemy.intent = scale_intent_damage(enemy.intent.clone(), 1.15);
         }
     }
 

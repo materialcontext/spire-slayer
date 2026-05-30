@@ -659,6 +659,7 @@ fn eval_condition(cond: &AiCondition, hp: u32, max_hp: u32, slot_index: usize) -
         AiCondition::HpBelowHalf => hp * 2 < max_hp,
         AiCondition::SlotIndex(i) => slot_index == *i,
         AiCondition::AlwaysTrue => true,
+        AiCondition::AlwaysFalse => false,
     }
 }
 

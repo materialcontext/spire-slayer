@@ -220,6 +220,7 @@ fn best_upgrade_hp_value(
     rng: &mut impl Rng,
 ) -> f32 {
     const UPGRADE_HP_HEURISTIC: f32 = 5.0;
+    let _ = baseline_loss; // only used for the has_data guard; chain sim recomputes
     if deck.is_empty() || !has_data {
         return UPGRADE_HP_HEURISTIC;
     }
@@ -241,8 +242,14 @@ fn best_upgrade_hp_value(
     };
     let mut upgraded_deck = deck.to_vec();
     upgraded_deck[idx] = upgraded_card;
-    let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
-    ((baseline_loss - upgraded.mean_hp_loss) * remaining_fights(sub_act)).max(0.0)
+    let n_fights = remaining_fights(sub_act) as u32;
+    let base_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
+    );
+    let upgraded_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        &upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
+    );
+    (base_chain - upgraded_chain).max(0.0)
 }
 
 /// Compute the mean best-option HP delta across the act event pool.

@@ -28,6 +28,10 @@ pub enum AiCondition {
     HpBelowHalf,
     SlotIndex(usize),
     AlwaysTrue,
+    /// Unrecognised condition expression — branch is skipped unless it is the
+    /// only/last fallback (handled by the `.or_else(branches.first())` in
+    /// `resolve_to_move`).
+    AlwaysFalse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,9 +216,10 @@ fn parse_condition(s: &str) -> AiCondition {
         if s.contains("\"third\"") { return AiCondition::SlotIndex(2); }
         if s.contains("\"fourth\"") { return AiCondition::SlotIndex(3); }
     }
-    // Anything else (custom flags, ally counts, etc.) defaults to always-true
-    // so the first matching branch wins
-    AiCondition::AlwaysTrue
+    // Anything unrecognised (custom flags, ally counts, etc.) is treated as
+    // never-matching so that real conditions further down the list can still
+    // win. The `resolve_to_move` fallback ensures at least one branch fires.
+    AiCondition::AlwaysFalse
 }
 
 #[cfg(test)]
@@ -345,9 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_condition_unknown_defaults_to_always_true() {
-        assert_eq!(parse_condition("CanFabricate"), AiCondition::AlwaysTrue);
-        assert_eq!(parse_condition("HasBeetleCharged"), AiCondition::AlwaysTrue);
+    fn parse_condition_unknown_defaults_to_always_false() {
+        assert_eq!(parse_condition("CanFabricate"), AiCondition::AlwaysFalse);
+        assert_eq!(parse_condition("HasBeetleCharged"), AiCondition::AlwaysFalse);
     }
 
     #[test]
