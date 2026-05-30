@@ -40,13 +40,15 @@ impl Relic {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Potion {
+    /// Canonical SCREAMING_SNAKE_CASE potion ID (e.g. "FIRE_POTION").
+    pub id: String,
     pub name: String,
+    pub description: String,
 }
 
 impl Potion {
-    #[allow(dead_code)]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+    pub fn new(id: impl Into<String>, name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self { id: id.into(), name: name.into(), description: description.into() }
     }
 }
 

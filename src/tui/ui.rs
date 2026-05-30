@@ -60,6 +60,7 @@ fn render_combat(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(2),  // title
             Constraint::Min(8),     // main body
             Constraint::Length(4),  // recommendation
+            Constraint::Length(2),  // potion advice
             Constraint::Length(1),  // status bar
         ])
         .split(area);
@@ -94,8 +95,11 @@ fn render_combat(frame: &mut Frame, app: &App, area: Rect) {
     // Recommendation
     render_advice(frame, app, rows[2]);
 
+    // Potion advisory
+    render_potion_advice(frame, app, rows[3]);
+
     // Status bar
-    render_statusbar(frame, app, rows[3]);
+    render_statusbar(frame, app, rows[4]);
 }
 
 fn render_hand(frame: &mut Frame, app: &App, area: Rect) {
@@ -230,6 +234,42 @@ fn render_advice(frame: &mut Frame, app: &App, area: Rect) {
         _ => Text::raw("  Press [s] to simulate"),
     };
     frame.render_widget(Paragraph::new(content).block(block).wrap(Wrap { trim: false }), area);
+}
+
+fn render_potion_advice(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::metrics::potion_ev::advise_potion_use;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(ref run) = app.run {
+        let (hp, max_hp) = (run.hp, run.max_hp);
+        let is_boss  = app.is_boss;
+        let is_elite = app.is_elite;
+
+        for slot in &run.potions {
+            if let Some(potion) = slot {
+                if let Some(advice) = advise_potion_use(potion, hp, max_hp, is_boss, is_elite) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  \u{2697} {}", advice),
+                        Style::default().fg(Color::LightYellow),
+                    )));
+                }
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Potions: none to use now",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::TOP).title(" Potions ")),
+        area,
+    );
 }
 
 fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
@@ -1405,6 +1445,25 @@ fn render_map_deck_column(
     }
     lines.push(Line::from(Span::raw("")));
 
+    // ── Potions ────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        "  Potions",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    for slot in &run.potions {
+        match slot {
+            Some(p) => lines.push(Line::from(Span::styled(
+                format!("  [{}]", p.name),
+                Style::default().fg(Color::Cyan),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                "  [empty]",
+                Style::default().fg(Color::DarkGray),
+            ))),
+        }
+    }
+    lines.push(Line::from(Span::raw("")));
+
     // ── Deck cards ─────────────────────────────────────────────────────────────
     lines.push(Line::from(Span::styled(
         format!("  Deck  ({})", run.deck.len()),
@@ -1784,6 +1843,7 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(2),  // header
             Constraint::Min(8),     // cards
             Constraint::Length(6),  // relics
+            Constraint::Length(3),  // potions
             Constraint::Length(2),  // removal service
             Constraint::Length(1),  // hint
             Constraint::Length(1),  // status
@@ -1869,6 +1929,28 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
     frame.render_widget(relics_widget, rows[2]);
 
+    // Potions section
+    let potion_lines: Vec<Line> = app.shop_potions.iter().enumerate().map(|(i, (_, name, price))| {
+        let is_cursor = app.shop_potion_cursor == i;
+        let can_afford = gold >= *price;
+        let cursor_marker = if is_cursor { "▶ " } else { "  " };
+        let label = format!("{cursor_marker}[{name}]  {price}g");
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if !can_afford {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        Line::from(vec![Span::styled(label, style)])
+    }).collect();
+    let potions_widget = Paragraph::new(Text::from(if potion_lines.is_empty() {
+        vec![Line::from(Span::styled("  (none available)", Style::default().fg(Color::DarkGray)))]
+    } else {
+        potion_lines
+    })).block(Block::default().borders(Borders::ALL).title(" Potions ([p] cycle  [b] buy) "));
+    frame.render_widget(potions_widget, rows[3]);
+
     // Card Removal Service
     let removal_cursor  = n_cards + n_relics;
     let removal_is_cursor = app.shop_cursor == removal_cursor;
@@ -1897,16 +1979,16 @@ fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
     };
     let removal_widget = Paragraph::new(Text::from(vec![removal_line]))
         .block(Block::default().borders(Borders::ALL).title(" Services "));
-    frame.render_widget(removal_widget, rows[3]);
+    frame.render_widget(removal_widget, rows[4]);
 
-    let hint = Paragraph::new("  ↑↓ navigate  Enter buy  Esc leave")
+    let hint = Paragraph::new("  ↑↓ navigate  Enter buy  [p] cycle potions  [b] buy potion  Esc leave")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[4]);
+    frame.render_widget(hint, rows[5]);
 
     let (hp, max_hp) = app.run.as_ref().map(|r| (r.hp, r.max_hp)).unwrap_or((80, 80));
     let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(status, rows[5]);
+    frame.render_widget(status, rows[6]);
 }
 
 fn capitalize(s: &str) -> String {

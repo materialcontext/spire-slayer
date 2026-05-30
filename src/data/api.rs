@@ -18,6 +18,7 @@ const EVENTS_SEED_JSON: &str = include_str!("../../data/events_seed.json");
 const CHARACTERS_SEED_JSON: &str = include_str!("../../data/characters_seed.json");
 const RELICS_SEED_JSON: &str = include_str!("../../data/relics_seed.json");
 const ANCIENT_POOLS_SEED_JSON: &str = include_str!("../../data/ancient-pools_seed.json");
+const POTIONS_SEED_JSON: &str = include_str!("../../data/potions_seed.json");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApiPower {
@@ -384,4 +385,19 @@ pub struct SpireApiAncient {
 pub fn load_ancients() -> Vec<SpireApiAncient> {
     // Ancients data is seed-only (no live API endpoint)
     serde_json::from_str(ANCIENT_POOLS_SEED_JSON).unwrap_or_default()
+}
+
+// ── Potion API ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SpireApiPotion {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub rarity: Option<String>,
+    pub pool: Option<String>,
+}
+
+pub fn load_potions() -> Vec<SpireApiPotion> {
+    serde_json::from_str(POTIONS_SEED_JSON).unwrap_or_default()
 }
