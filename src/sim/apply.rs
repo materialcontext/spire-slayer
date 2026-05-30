@@ -26,19 +26,33 @@ pub enum SimError {
 
 /// Damage a single hit of `base` deals, accounting for Strength, Weak, Vulnerable.
 /// Also applies relic passive modifiers: RED_SKULL, PAPER_PHROG, PAPER_KRANE.
+/// Set `add_strength` to false for block-derived damage (e.g. DamageEqBlock) where
+/// Strength does not apply — only Weak/Vulnerable modifiers do.
 fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
-    let mut strength = state.player.buff(&BuffType::Strength);
-    // RED_SKULL: +3 Strength while HP ≤ 50%
-    if state.has_relic("RED_SKULL") && state.player.hp * 2 <= state.player.max_hp {
-        strength += 3;
-    }
+    compute_hit_inner(base, state, target_idx, true)
+}
+
+fn compute_hit_no_strength(base: u32, state: &CombatState, target_idx: usize) -> u32 {
+    compute_hit_inner(base, state, target_idx, false)
+}
+
+fn compute_hit_inner(base: u32, state: &CombatState, target_idx: usize, add_strength: bool) -> u32 {
     let weak = state.player.buff(&BuffType::Weak) > 0;
     let vulnerable = state.enemies[target_idx].buff(&BuffType::Vulnerable) > 0;
 
-    let raw = if strength >= 0 {
-        base + strength as u32
+    let raw = if add_strength {
+        let mut strength = state.player.buff(&BuffType::Strength);
+        // RED_SKULL: +3 Strength while HP ≤ 50%
+        if state.has_relic("RED_SKULL") && state.player.hp * 2 <= state.player.max_hp {
+            strength += 3;
+        }
+        if strength >= 0 {
+            base + strength as u32
+        } else {
+            base.saturating_sub((-strength) as u32)
+        }
     } else {
-        base.saturating_sub((-strength) as u32)
+        base
     };
     // PAPER_KRANE: Weak deals 40% less (3/5) instead of 25% less (3/4)
     let after_weak = if weak {
@@ -342,7 +356,8 @@ pub(crate) fn apply_effect(
         CardEffect::DamageEqBlock => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
                 let base = state.player.block;
-                let dmg = compute_hit(base, state, target_idx);
+                // Block-derived damage: Weak/Vulnerable apply but Strength does not
+                let dmg = compute_hit_no_strength(base, state, target_idx);
                 let thorns = damage_enemy(state, target_idx, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -1442,6 +1457,17 @@ mod tests {
         state.hand.push(body_slam());
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
         assert_eq!(state.enemies[0].hp, 50); // no damage
+    }
+
+    #[test]
+    fn damage_eq_block_ignores_strength() {
+        let mut state = basic_state();
+        state.player.block = 15;
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) = 5;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // Strength must NOT add to block-derived damage: 50 - 15 = 35 (not 50 - 20)
+        assert_eq!(state.enemies[0].hp, 35);
     }
 
     // ── Relic: ANCHOR ─────────────────────────────────────────────────────────

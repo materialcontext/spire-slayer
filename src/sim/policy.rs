@@ -163,8 +163,12 @@ pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
             CardEffect::Damage(d)                   => adj_dmg(*d),
             CardEffect::DamageAll(d)                => adj_dmg(*d) * n,
             CardEffect::DamageMulti { base, hits }  => adj_dmg(*base) * *hits as f32,
-            // Body Slam: damage = current block, still boosted by Strength/Vulnerable.
-            CardEffect::DamageEqBlock               => adj_dmg(state.player.block),
+            // Block-derived damage: Weak/Vulnerable apply but Strength does not.
+            CardEffect::DamageEqBlock => {
+                let block = state.player.block;
+                let w = if player_weak { block * 3 / 4 } else { block };
+                (if target_vuln { w * 3 / 2 } else { w }) as f32
+            }
             CardEffect::Block(b)                    => adj_blk(*b) * 0.85,
             // Each energy ≈ 1 extra card play ≈ 7 adj-damage on average.
             CardEffect::Draw(n)                     => *n as f32 * 4.0,
@@ -191,6 +195,13 @@ pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
             CardEffect::Passive(_) => 1.0,
         };
         score += delta;
+    }
+
+    // Retain cards won't be discarded at end of turn, so they're never wasted.
+    // Slightly deprioritize them so the greedy policy uses non-Retain cards first
+    // and saves Retain cards for turns where their value is actually needed.
+    if card.retain {
+        score *= 0.92;
     }
 
     score

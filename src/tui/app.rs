@@ -392,6 +392,12 @@ impl App {
             KeyCode::Char('?') => {
                 self.mode = AppMode::Statistics;
             }
+            KeyCode::Char('e') => {
+                let base = self.combat.clone().unwrap_or_else(default_combat_state);
+                self.input = Some(ManualInputState::new(base));
+                self.mode = AppMode::ManualInput;
+                self.status_message.clear();
+            }
             KeyCode::Char('j') | KeyCode::Right => {
                 let n = self.map_choices().len();
                 if n > 0 { self.map_cursor = (self.map_cursor + 1).min(n - 1); }

@@ -273,38 +273,40 @@ fn render_potion_advice(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
-    let threat_label = app
-        .combat
-        .as_ref()
-        .map(|c| {
-            let ts = threat_score(c);
-            if ts >= 0.6 {
-                ("HIGH", Color::Red)
-            } else if ts >= 0.3 {
-                ("MEDIUM", Color::Yellow)
-            } else {
-                ("LOW", Color::Green)
-            }
-        })
-        .unwrap_or(("—", Color::DarkGray));
-
     let status = if app.status_message.is_empty() {
         "".to_string()
     } else {
         format!("  {}", app.status_message)
     };
 
-    let hint = match app.mode {
-        AppMode::MapView => "  [v]ev  [d]eck  [?]stats  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
-        _                => "  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit",
+    let (hint, threat_spans) = match app.mode {
+        AppMode::MapView => (
+            "  [v]ev  [d]eck  [?]stats  [e]combat-advisor  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
+            vec![],
+        ),
+        _ => {
+            // Combat screen: show Threat indicator
+            let threat_label = app.combat.as_ref().map(|c| {
+                let ts = threat_score(c);
+                if ts >= 0.6 { ("HIGH", Color::Red) }
+                else if ts >= 0.3 { ("MEDIUM", Color::Yellow) }
+                else { ("LOW", Color::Green) }
+            });
+            let spans = if let Some((label, color)) = threat_label {
+                vec![
+                    Span::raw("          Threat: "),
+                    Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                ]
+            } else {
+                vec![]
+            };
+            ("  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit", spans)
+        }
     };
-    let line = Line::from(vec![
-        Span::raw(hint),
-        Span::raw(status),
-        Span::raw("          Threat: "),
-        Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+
+    let mut spans = vec![Span::raw(hint), Span::raw(status)];
+    spans.extend(threat_spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
