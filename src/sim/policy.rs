@@ -110,8 +110,10 @@ fn buff_enemy_value(buff: &BuffType, stacks: i32) -> f32 {
 fn buff_self_value(buff: &BuffType, stacks: i32, state: &CombatState) -> f32 {
     let s = stacks as f32;
     match buff {
-        BuffType::Strength    => s * 3.0,
-        BuffType::Dexterity   => s * 2.0,
+        // Each Strength stack adds 1 damage to every attack for the rest of the fight.
+        // Estimate ~4 attacks remaining → 4 HP per stack.
+        BuffType::Strength    => s * 4.0,
+        BuffType::Dexterity   => s * 2.5,
         BuffType::Intangible  => s * 8.0,
         BuffType::NoxiousFumes=> s * 5.0,
         BuffType::Focus       => s * 5.0,
@@ -124,24 +126,49 @@ fn buff_self_value(buff: &BuffType, stacks: i32, state: &CombatState) -> f32 {
 
 /// Approximate HP-equivalent value of playing a card in the current state.
 ///
-/// Each effect type is assigned a weight that reflects how much it contributes
-/// to winning the combat in expected-damage-dealt or damage-prevented units.
+/// Damage and block effects are adjusted for active player buffs (Strength,
+/// Weak, Vulnerable, Dexterity, Frail) so that, e.g., a Strike with 2
+/// Strength against a Vulnerable enemy scores as 12 rather than 6.
 pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
     let n = living_enemy_count(state) as f32;
+    let target_idx = select_target(state);
+
+    // ── Precompute damage/block modifiers ────────────────────────────────────
+    let strength = state.player.buff(&BuffType::Strength);
+    let player_weak = state.player.buff(&BuffType::Weak) > 0;
+    let target_vuln = state.enemies.get(target_idx)
+        .map(|e| e.buff(&BuffType::Vulnerable) > 0)
+        .unwrap_or(false);
+    let dex = state.player.buff(&BuffType::Dexterity).max(0) as u32;
+    let player_frail = state.player.buff(&BuffType::Frail) > 0;
+
+    let adj_dmg = |base: u32| -> f32 {
+        let s = if strength >= 0 {
+            base.saturating_add(strength as u32)
+        } else {
+            base.saturating_sub((-strength) as u32)
+        };
+        let w = if player_weak { s * 3 / 4 } else { s };
+        (if target_vuln { w * 3 / 2 } else { w }) as f32
+    };
+    let adj_blk = |base: u32| -> f32 {
+        let b = base + dex;
+        (if player_frail { b * 3 / 4 } else { b }) as f32
+    };
+
     let mut score = 0.0f32;
 
     for effect in &card.effects {
         let delta: f32 = match effect {
-            CardEffect::Damage(d)                   => *d as f32,
-            CardEffect::DamageAll(d)                => *d as f32 * n,
-            CardEffect::DamageMulti { base, hits }  => *base as f32 * *hits as f32,
-            CardEffect::DamageEqBlock               => state.player.block as f32,
-            // Block is slightly below equivalent damage in value
-            CardEffect::Block(b)                    => *b as f32 * 0.85,
-            // Draw and energy have high tempo value
+            CardEffect::Damage(d)                   => adj_dmg(*d),
+            CardEffect::DamageAll(d)                => adj_dmg(*d) * n,
+            CardEffect::DamageMulti { base, hits }  => adj_dmg(*base) * *hits as f32,
+            // Body Slam: damage = current block, still boosted by Strength/Vulnerable.
+            CardEffect::DamageEqBlock               => adj_dmg(state.player.block),
+            CardEffect::Block(b)                    => adj_blk(*b) * 0.85,
+            // Each energy ≈ 1 extra card play ≈ 7 adj-damage on average.
             CardEffect::Draw(n)                     => *n as f32 * 4.0,
-            CardEffect::GainEnergy(e)               => *e as f32 * 5.0,
-            // HP loss is a real cost
+            CardEffect::GainEnergy(e)               => *e as f32 * 7.0,
             CardEffect::LoseHp(h)                   => -(*h as f32),
             CardEffect::GainStars(n)                => *n as f32 * 2.0,
             CardEffect::ApplyToEnemy { buff, stacks }
@@ -302,13 +329,12 @@ mod tests {
 
     #[test]
     fn card_value_energy_gain_is_high() {
-        // Energy gain (5 per energy ≈ 10 for 2 energy) should score well
+        // GainEnergy(2) = 2 × 7.0 = 14.0; LoseHp(3) = −3.0 → net 11.0
         let energy_card = Card::new(5, "Offering", 0, crate::domain::card::CardType::Skill, Rarity::Uncommon,
             vec![CardEffect::GainEnergy(2), CardEffect::LoseHp(3)]);
         let state = state_with_hand(vec![energy_card.clone()]);
         let v = card_play_value(&energy_card, &state);
-        // GainEnergy(2)=10, LoseHp(3)=-3 → 7.0
-        assert!((v - 7.0).abs() < 0.01, "expected 7.0 got {v}");
+        assert!((v - 11.0).abs() < 0.01, "expected 11.0 got {v}");
     }
 
     #[test]

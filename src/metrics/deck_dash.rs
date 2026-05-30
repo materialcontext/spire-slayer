@@ -192,6 +192,53 @@ pub fn dist_bar(p10: f32, p50: f32, p90: f32) -> String {
     bar.into_iter().collect()
 }
 
+/// Simulate total HP loss across a chain of fights with HP carry-forward.
+///
+/// Unlike `compute_deck_stats` (which runs each encounter at the same starting HP),
+/// this carries the surviving HP forward into each subsequent fight, capturing
+/// compounding death risk as the player's HP depletes. `n_chains` independent
+/// chains are averaged to reduce variance.
+pub fn simulate_chained_hp_loss(
+    deck: &[Card],
+    starting_hp: u32,
+    max_hp: u32,
+    sub_act: &str,
+    all_encounters: &[SpireApiEncounter],
+    all_monsters: &[SpireApiMonster],
+    relics: &[String],
+    n_fights: u32,
+    n_chains: u32,
+    ascension: u8,
+    rng: &mut impl Rng,
+) -> f32 {
+    let pool: Vec<&SpireApiEncounter> = all_encounters
+        .iter()
+        .filter(|e| {
+            let a = e.act.as_deref().map(normalize_act).unwrap_or("other");
+            a == sub_act && e.room_type.as_deref().map(|rt| rt != "Boss").unwrap_or(true)
+        })
+        .collect();
+
+    if pool.is_empty() || deck.is_empty() || n_fights == 0 {
+        return 0.0;
+    }
+
+    let mut total = 0.0f32;
+    for _ in 0..n_chains {
+        let mut hp = starting_hp;
+        for _ in 0..n_fights {
+            if hp == 0 { break; }
+            let enc = pool.choose(rng).unwrap();
+            let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, relics, ascension, rng);
+            let r = run_combat(state, &GreedyDamagePolicy, rng);
+            let loss = (-r.player_hp_delta).max(0) as u32;
+            total += loss as f32;
+            hp = hp.saturating_sub(loss);
+        }
+    }
+    total / n_chains as f32
+}
+
 fn sorted_pct(sorted: &[f32], p: f32) -> f32 {
     if sorted.is_empty() {
         return 0.0;

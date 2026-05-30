@@ -9,7 +9,6 @@ pub enum PlayerClass {
     Regent,
     Necrobinder,
     Defect,
-    Watcher,
 }
 
 impl std::fmt::Display for PlayerClass {
@@ -20,7 +19,6 @@ impl std::fmt::Display for PlayerClass {
             Self::Regent     => "Regent",
             Self::Necrobinder => "Necrobinder",
             Self::Defect     => "Defect",
-            Self::Watcher    => "Watcher",
         };
         write!(f, "{name}")
     }
@@ -28,13 +26,15 @@ impl std::fmt::Display for PlayerClass {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relic {
+    /// Canonical SCREAMING_SNAKE_CASE relic ID (e.g. "BURNING_BLOOD").
+    pub id: String,
     pub name: String,
     pub description: String,
 }
 
 impl Relic {
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self { name: name.into(), description: description.into() }
+    pub fn new(id: impl Into<String>, name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self { id: id.into(), name: name.into(), description: description.into() }
     }
 }
 
@@ -121,10 +121,15 @@ impl RunState {
     }
 
     /// Smith at a rest site: upgrade the card at `deck_idx`.
-    /// Returns `false` if the index is out of range.
+    /// Returns `false` if the index is out of range or already upgraded.
     pub fn smith(&mut self, deck_idx: usize) -> bool {
-        if self.deck.get(deck_idx).is_none() { return false; }
-        true
+        if let Some(card) = self.deck.get_mut(deck_idx) {
+            if card.upgraded { return false; }
+            card.upgrade();
+            true
+        } else {
+            false
+        }
     }
 
     /// Move to a new node, returning `false` if the move is illegal.
@@ -156,27 +161,23 @@ pub mod starting_relics {
     use super::{PlayerClass, Relic};
 
     pub fn ironclad() -> Relic {
-        Relic::new("Burning Blood", "At the end of combat, heal 6 HP.")
+        Relic::new("BURNING_BLOOD", "Burning Blood", "At the end of combat, heal 6 HP.")
     }
 
     pub fn silent() -> Relic {
-        Relic::new("Ring of the Snake", "At the start of each combat, draw 2 additional cards.")
+        Relic::new("RING_OF_THE_SNAKE", "Ring of the Snake", "At the start of each combat, draw 2 additional cards.")
     }
 
     pub fn regent() -> Relic {
-        Relic::new("Divine Right", "At the start of each combat, gain 3 Stars.")
+        Relic::new("DIVINE_RIGHT", "Divine Right", "At the start of each combat, gain 3 Stars.")
     }
 
     pub fn necrobinder() -> Relic {
-        Relic::new("Bound Phylactery", "At the start of each combat, Summon 1.")
+        Relic::new("BOUND_PHYLACTERY", "Bound Phylactery", "At the start of each combat, Summon 1.")
     }
 
     pub fn defect() -> Relic {
-        Relic::new("Cracked Core", "At the start of each combat, Channel 1 Lightning.")
-    }
-
-    pub fn watcher() -> Relic {
-        Relic::new("Pure Water", "At the start of each combat, add 1 Miracle to your hand.")
+        Relic::new("CRACKED_CORE", "Cracked Core", "At the start of each combat, Channel 1 Lightning.")
     }
 
     pub fn for_class(class: &PlayerClass) -> Relic {
@@ -186,7 +187,6 @@ pub mod starting_relics {
             PlayerClass::Regent     => regent(),
             PlayerClass::Necrobinder => necrobinder(),
             PlayerClass::Defect     => defect(),
-            PlayerClass::Watcher    => watcher(),
         }
     }
 }
@@ -238,5 +238,28 @@ mod tests {
         let back: RunState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.class, PlayerClass::Ironclad);
         assert_eq!(back.deck.len(), 10);
+    }
+
+    #[test]
+    fn smith_upgrades_card_and_prevents_double_upgrade() {
+        let deck = ironclad::starter_deck();
+        let relic = starting_relics::ironclad();
+        let mut run = RunState::new(PlayerClass::Ironclad, 80, 80, deck, relic);
+
+        let original_damage = run.deck[0].base_damage();
+        assert!(!run.deck[0].upgraded);
+
+        assert!(run.smith(0), "first smith should succeed");
+        assert!(run.deck[0].upgraded);
+        assert!(run.deck[0].base_damage() > original_damage, "upgrade should increase damage");
+
+        assert!(!run.smith(0), "second smith on same card should fail");
+    }
+
+    #[test]
+    fn starting_relics_have_correct_ids() {
+        assert_eq!(starting_relics::ironclad().id, "BURNING_BLOOD");
+        assert_eq!(starting_relics::silent().id, "RING_OF_THE_SNAKE");
+        assert_eq!(starting_relics::defect().id, "CRACKED_CORE");
     }
 }

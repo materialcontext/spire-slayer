@@ -186,17 +186,19 @@ fn parse_option_hp_delta(plain: &str, removal_hp: f32, upgrade_hp: f32) -> f32 {
 /// Return a copy of `card` with its primary combat effect boosted (+2 dmg / +3 block).
 /// Returns `None` when the card has no boostable effect.
 fn upgrade_card_copy(card: &Card) -> Option<Card> {
-    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Damage(_))) {
-        let mut c = card.clone();
-        if let CardEffect::Damage(d) = &mut c.effects[i] { *d += 2; }
-        return Some(c);
-    }
-    if let Some(i) = card.effects.iter().position(|e| matches!(e, CardEffect::Block(_))) {
-        let mut c = card.clone();
-        if let CardEffect::Block(b) = &mut c.effects[i] { *b += 3; }
-        return Some(c);
-    }
-    None
+    if card.upgraded { return None; }
+    // Only return Some when there are effects that upgrade actually changes.
+    let upgradeable = card.effects.iter().any(|e| matches!(
+        e,
+        crate::domain::effect::CardEffect::Damage(_)
+            | crate::domain::effect::CardEffect::DamageAll(_)
+            | crate::domain::effect::CardEffect::Block(_)
+            | crate::domain::effect::CardEffect::DamageMulti { .. }
+    ));
+    if !upgradeable { return None; }
+    let mut c = card.clone();
+    c.upgrade();
+    Some(c)
 }
 
 /// Estimate the HP value of upgrading the best card in the deck over the remaining act.
@@ -218,6 +220,7 @@ fn best_upgrade_hp_value(
     rng: &mut impl Rng,
 ) -> f32 {
     const UPGRADE_HP_HEURISTIC: f32 = 5.0;
+    let _ = baseline_loss; // only used for the has_data guard; chain sim recomputes
     if deck.is_empty() || !has_data {
         return UPGRADE_HP_HEURISTIC;
     }
@@ -239,8 +242,14 @@ fn best_upgrade_hp_value(
     };
     let mut upgraded_deck = deck.to_vec();
     upgraded_deck[idx] = upgraded_card;
-    let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
-    ((baseline_loss - upgraded.mean_hp_loss) * remaining_fights(sub_act)).max(0.0)
+    let n_fights = remaining_fights(sub_act) as u32;
+    let base_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
+    );
+    let upgraded_chain = crate::metrics::deck_dash::simulate_chained_hp_loss(
+        &upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, n_fights, 4, ascension, rng,
+    );
+    (base_chain - upgraded_chain).max(0.0)
 }
 
 /// Compute the mean best-option HP delta across the act event pool.
@@ -666,7 +675,7 @@ mod tests {
             vec![CardEffect::Damage(6)],
         );
         let upgraded = upgrade_card_copy(&card).unwrap();
-        assert_eq!(upgraded.base_damage(), 8);
+        assert_eq!(upgraded.base_damage(), 9);
     }
 
     #[test]

@@ -53,6 +53,13 @@ pub enum PostPickAction {
     BossActTransition,
 }
 
+/// What to do after the treasure room is dismissed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AfterTreasure {
+    /// Load a boss card pick then begin act transition.
+    BossCardPick,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub combat: Option<CombatState>,
@@ -102,6 +109,10 @@ pub struct App {
     pub offered_relic: Option<SpireApiRelic>,
     /// Cursor in treasure room: 0 = Take, 1 = Skip.
     pub relic_cursor: usize,
+    /// Action to perform after the treasure room is dismissed.
+    pub after_treasure: Option<AfterTreasure>,
+    /// Boss card pool pending a card pick after the boss relic chest.
+    pub pending_boss_cards: Vec<Card>,
     /// Shop inventory.
     pub shop_cards: Vec<Card>,
     pub shop_card_advice: Vec<CardAdvice>,
@@ -147,6 +158,10 @@ pub struct App {
     pub hp_at_act_start: u32,
     /// Best-path HP delta predicted by the DP when the act map first opened.
     pub best_path_predicted_delta: f32,
+    /// True while the path projection simulation is running in a background thread.
+    pub sim_in_progress: bool,
+    /// Sender end of the background-task result channel; None in tests.
+    pub bg_sender: Option<std::sync::mpsc::Sender<AppEvent>>,
 }
 
 impl App {
@@ -192,6 +207,8 @@ impl App {
             relics,
             offered_relic: None,
             relic_cursor: 0,
+            after_treasure: None,
+            pending_boss_cards: Vec::new(),
             shop_cards: Vec::new(),
             shop_card_advice: Vec::new(),
             shop_card_prices: Vec::new(),
@@ -218,6 +235,8 @@ impl App {
             run_id: 0,
             hp_at_act_start: 0,
             best_path_predicted_delta: 0.0,
+            sim_in_progress: false,
+            bg_sender: None,
         };
         app.refresh_filter();
         app
@@ -253,6 +272,11 @@ impl App {
                 self.run_simulation(rng);
                 return true;
             }
+            AppEvent::PathSimResult(projections) => {
+                self.path_projections = projections;
+                self.sim_in_progress = false;
+                return true;
+            }
             AppEvent::StateUpdated(state) => {
                 self.load_combat(*state);
                 return true;
@@ -274,7 +298,7 @@ impl App {
             AppMode::MapView        => self.handle_key_map_view(key, rng),
             AppMode::RestSite       => self.handle_key_rest_site(key),
             AppMode::EventRoom      => self.handle_key_event_room(key),
-            AppMode::TreasureRoom   => self.handle_key_treasure_room(key),
+            AppMode::TreasureRoom   => self.handle_key_treasure_room(key, rng),
             AppMode::Shop           => self.handle_key_shop(key),
             AppMode::ManualInput    => self.handle_key_input(key),
             AppMode::CombatAdvice   => self.handle_key_combat(key, rng),
@@ -727,6 +751,11 @@ impl App {
         run.sub_act  = sub_act.clone();
         run.act      = crate::metrics::run_ev::act_number(&sub_act);
 
+        // A4: Tight Belt — 1 less potion slot (2 instead of 3)
+        if self.ascension_cursor >= 4 {
+            run.potions.pop();
+        }
+
         // A5: Ascender's Bane — start with a curse card
         if self.ascension_cursor >= 5 {
             use crate::domain::card::{CardType, Rarity};
@@ -842,11 +871,28 @@ impl App {
         let encounters  = self.encounters.clone();
         let monsters    = self.monsters.clone();
 
-        self.path_projections = simulate_path_choices(
-            &map_clone, &choices, next_floor,
-            hp, max_hp, &deck, &relics, gold, asc, &sub_act,
-            &encounters, &monsters, &class_cards, event_hp_delta, rng,
-        );
+        if let Some(ref tx) = self.bg_sender {
+            // Run asynchronously: mark in-progress, spawn thread, deliver via channel.
+            self.sim_in_progress = true;
+            self.path_projections.clear();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut rng = rand::rngs::StdRng::from_entropy();
+                let result = simulate_path_choices(
+                    &map_clone, &choices, next_floor,
+                    hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                    &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
+                );
+                let _ = tx.send(AppEvent::PathSimResult(result));
+            });
+        } else {
+            // Synchronous fallback used in tests (no channel wired up).
+            self.path_projections = simulate_path_choices(
+                &map_clone, &choices, next_floor,
+                hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                &encounters, &monsters, &class_cards, event_hp_delta, rng,
+            );
+        }
     }
 
     /// Columns available to move to from the current map position.
@@ -920,6 +966,7 @@ impl App {
                 };
                 self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
+                self.apply_combat_gold(rt);
                 self.load_pick(offered, rng, AppMode::MapView);
             }
             Some(RoomType::Boss) => {
@@ -933,8 +980,8 @@ impl App {
                 };
                 self.apply_combat_hp_loss(RoomType::Boss, rng);
                 self.apply_post_combat_relics();
-                self.post_pick_action = Some(PostPickAction::BossActTransition);
-                self.load_pick(offered, rng, AppMode::MapView);
+                // Open boss relic chest first, then card pick, then act transition.
+                self.open_boss_relic_room(offered, rng);
             }
             Some(RoomType::Rest) => self.open_rest_site(),
             Some(RoomType::Event) => self.open_event_room(rng),
@@ -1066,7 +1113,25 @@ impl App {
         self.mode = AppMode::TreasureRoom;
     }
 
-    fn handle_key_treasure_room(&mut self, key: KeyEvent) {
+    /// Open a boss relic chest: offer one Rare Relic, then proceed to boss card pick.
+    fn open_boss_relic_room(&mut self, boss_cards: Vec<Card>, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool = self.run.as_ref()
+            .map(|r| char_color(&r.class))
+            .unwrap_or("ironclad");
+        let pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            rarity == "Rare Relic" && (p == "shared" || p == class_pool)
+        }).collect();
+        self.offered_relic = pool.choose(rng).map(|r| (*r).clone());
+        self.pending_boss_cards = boss_cards;
+        self.after_treasure = Some(AfterTreasure::BossCardPick);
+        self.relic_cursor = 0;
+        self.mode = AppMode::TreasureRoom;
+    }
+
+    fn handle_key_treasure_room(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => { self.relic_cursor = 1; }
             KeyCode::Char('k') | KeyCode::Up   => { self.relic_cursor = 0; }
@@ -1074,21 +1139,36 @@ impl App {
                 if self.relic_cursor == 0 {
                     if let (Some(relic), Some(run)) = (self.offered_relic.take(), self.run.as_mut()) {
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                         self.status_message = format!("Took {}", relic.name);
                     }
                 } else {
                     self.status_message = "Skipped relic".to_string();
                     self.offered_relic = None;
                 }
-                self.mode = AppMode::MapView;
+                self.finish_treasure_room(rng);
             }
             KeyCode::Esc => {
                 self.offered_relic = None;
+                self.after_treasure = None;
                 self.mode = AppMode::MapView;
             }
             KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
             _ => {}
+        }
+    }
+
+    fn finish_treasure_room(&mut self, rng: &mut impl rand::Rng) {
+        if let Some(after) = self.after_treasure.take() {
+            match after {
+                AfterTreasure::BossCardPick => {
+                    let cards = std::mem::take(&mut self.pending_boss_cards);
+                    self.post_pick_action = Some(PostPickAction::BossActTransition);
+                    self.load_pick(cards, rng, AppMode::MapView);
+                }
+            }
+        } else {
+            self.mode = AppMode::MapView;
         }
     }
 
@@ -1363,7 +1443,7 @@ impl App {
                         }
                         run.gold -= price;
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                         self.status_message = format!("Bought {} for {}g ({}g left)", relic.name, price, run.gold);
                         self.shop_relics.remove(relic_idx);
                         self.shop_relic_prices.remove(relic_idx);
@@ -1531,6 +1611,20 @@ impl App {
         }
     }
 
+    /// Award gold for defeating a Monster or Elite room.
+    /// A3+: gold rewards are reduced by 25%.
+    fn apply_combat_gold(&mut self, room_type: crate::domain::map::RoomType) {
+        use crate::domain::map::RoomType;
+        let Some(ref mut run) = self.run else { return };
+        let base_gold: u32 = match room_type {
+            RoomType::Monster => rng_gold(10, 20, &mut rand::thread_rng()),
+            RoomType::Elite   => rng_gold(25, 35, &mut rand::thread_rng()),
+            _ => return,
+        };
+        let gold = if run.ascension >= 3 { base_gold * 3 / 4 } else { base_gold };
+        run.gold += gold;
+    }
+
     /// Apply relics that trigger at the end of combat (e.g. Burning Blood).
     fn apply_post_combat_relics(&mut self) {
         let Some(ref mut run) = self.run else { return; };
@@ -1620,7 +1714,7 @@ impl App {
                         run.relics.retain(|r| r.name != old_name);
                         if let Some(upgraded) = self.relics.iter().find(|r| r.id == new_id) {
                             let desc = upgraded.description.clone().unwrap_or_default();
-                            run.relics.push(crate::domain::run::Relic::new(&upgraded.name, desc));
+                            run.relics.push(crate::domain::run::Relic::new(&upgraded.id, &upgraded.name, desc));
                             self.status_message = format!("Replaced {} with {}", old_name, upgraded.name);
                         }
                     }
@@ -1652,7 +1746,7 @@ impl App {
                 _ => {
                     if let Some(ref mut run) = self.run {
                         let desc = relic.description.clone().unwrap_or_default();
-                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                        run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                     }
                     self.status_message = format!("Took boon: {}", relic.name);
                 }
@@ -1869,7 +1963,6 @@ fn starter_relic_upgrade(class: &PlayerClass) -> (&'static str, &'static str) {
         PlayerClass::Regent      => ("Divine Right",     "DIVINE_DESTINY"),
         PlayerClass::Necrobinder => ("Bound Phylactery", "PHYLACTERY_UNBOUND"),
         PlayerClass::Defect      => ("Cracked Core",     "INFUSED_CORE"),
-        PlayerClass::Watcher     => ("Pure Water",       "PURE_WATER"),
     }
 }
 
@@ -1881,7 +1974,6 @@ fn char_color(class: &PlayerClass) -> &'static str {
         PlayerClass::Regent      => "regent",
         PlayerClass::Necrobinder => "necrobinder",
         PlayerClass::Defect      => "defect",
-        PlayerClass::Watcher     => "colorless",
     }
 }
 
@@ -1942,7 +2034,11 @@ pub fn run_app() -> anyhow::Result<()> {
     let mut rng = StdRng::from_entropy();
     let events = spawn_event_loop(200);
 
-    let result = run_loop(&mut terminal, &mut app, &mut rng, events);
+    // Channel for background thread results (path simulation, etc.).
+    let (bg_tx, bg_rx) = std::sync::mpsc::channel::<AppEvent>();
+    app.bg_sender = Some(bg_tx);
+
+    let result = run_loop(&mut terminal, &mut app, &mut rng, events, bg_rx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -1956,6 +2052,7 @@ fn run_loop(
     app: &mut App,
     rng: &mut impl rand::Rng,
     events: std::sync::mpsc::Receiver<AppEvent>,
+    bg_rx: std::sync::mpsc::Receiver<AppEvent>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -1971,16 +2068,27 @@ fn run_loop(
             }
             Err(_) => break,
         }
+
+        // Drain any results that arrived from background threads.
+        while let Ok(bg_event) = bg_rx.try_recv() {
+            if !app.handle_event(bg_event, rng) {
+                break;
+            }
+        }
     }
     Ok(())
 }
 
 /// Convert human-readable relic names from RunState into SCREAMING_SNAKE_CASE IDs
 /// used by the combat relic system (e.g. "Burning Blood" → "BURNING_BLOOD").
+fn rng_gold(lo: u32, hi: u32, rng: &mut impl rand::Rng) -> u32 {
+    rng.gen_range(lo..=hi)
+}
+
 fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
     run.map(|r| {
         r.relics.iter()
-            .map(|rel| rel.name.to_uppercase().replace(' ', "_"))
+            .map(|rel| rel.id.clone())
             .collect()
     }).unwrap_or_default()
 }

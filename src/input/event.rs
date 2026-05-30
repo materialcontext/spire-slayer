@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::domain::combat::CombatState;
+use crate::metrics::path_sim::PathProjection;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -13,6 +14,8 @@ pub enum AppEvent {
     Quit,
     RunSim,
     Tick,
+    /// Background path simulation finished; deliver results to the app.
+    PathSimResult(Vec<PathProjection>),
 }
 
 /// Spawn a background thread that reads crossterm events and sends them to the returned channel.
