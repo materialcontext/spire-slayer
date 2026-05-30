@@ -1749,7 +1749,31 @@ impl App {
 /// Return 3 random cards from the current character's pool as a simulated reward.
 fn card_pool_for_run(app: &App) -> Vec<Card> {
     let color = app.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
-    catalog::cards_for_character(color)
+    let mut pool = catalog::cards_for_character(color);
+
+    let has_relic = |name: &str| {
+        app.run.as_ref().map(|r| r.relics.iter().any(|rel| rel.name == name)).unwrap_or(false)
+    };
+
+    // Dingy Rug: card rewards can contain Colorless cards.
+    if has_relic("Dingy Rug") {
+        pool.extend(catalog::colorless::all_cards());
+    }
+
+    // Prismatic Gem: card rewards contain cards from all other classes.
+    if has_relic("Prismatic Gem") {
+        for other_color in &["ironclad", "silent", "regent", "necrobinder", "defect"] {
+            if *other_color != color {
+                pool.extend(catalog::cards_for_character(other_color));
+            }
+        }
+        // Prismatic Gem also implicitly enables colorless (if not already added).
+        if !has_relic("Dingy Rug") {
+            pool.extend(catalog::colorless::all_cards());
+        }
+    }
+
+    pool
 }
 
 /// Pick a rarity for a shop card: 54% Common, 37% Uncommon, 9% Rare.
