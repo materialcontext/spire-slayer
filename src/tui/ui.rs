@@ -40,12 +40,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::MapEv   => render_map_ev(frame, app, area),
         AppMode::MapView  => render_map_view(frame, app, area),
         AppMode::RestSite     => render_rest_site(frame, app, area),
+        AppMode::SmithPick    => render_smith_pick(frame, app, area),
         AppMode::EventRoom    => render_event_room(frame, app, area),
         AppMode::TreasureRoom => render_treasure_room(frame, app, area),
         AppMode::Shop         => render_shop(frame, app, area),
         AppMode::AncientBoon  => render_ancient_boon(frame, app, area),
         AppMode::Victory      => render_victory(frame, app, area),
         AppMode::Calibration  => render_calibration(frame, app, area),
+        AppMode::Statistics   => render_statistics(frame, app, area),
         AppMode::Exiting      => {}
     }
 }
@@ -253,7 +255,7 @@ fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let hint = match app.mode {
-        AppMode::MapView => "  [v]ev  [d]eck  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
+        AppMode::MapView => "  [v]ev  [d]eck  [?]stats  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
         _                => "  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit",
     };
     let line = Line::from(vec![
@@ -440,11 +442,11 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::default()
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // title
-            Constraint::Min(12),   // stats body
+            Constraint::Min(12),   // body
             Constraint::Length(1), // hint
         ])
         .split(area);
@@ -452,161 +454,177 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
     let title = Paragraph::new(" DECK DASHBOARD")
         .block(Block::default().borders(Borders::BOTTOM))
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-    frame.render_widget(title, rows[0]);
+    frame.render_widget(title, outer[0]);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Two-column body: stats left, relics + cards right (always visible)
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(outer[1]);
+
+    // ── Left column: combat stats ─────────────────────────────────────────────
+    let mut stats: Vec<Line<'static>> = Vec::new();
 
     if let Some(ref s) = app.deck_stats {
-        // ── Deck properties ────────────────────────────────────────────────
-        lines.push(Line::from(Span::styled(
+        stats.push(Line::from(Span::styled(
             format!(
-                "  Deck: {} cards   Cycle: {:.1}t   Cost: {:.1}/e   Attacks: {:.0}%   Block cards: {}",
-                s.deck_size,
-                s.cycle_turns,
-                s.mean_energy_cost,
-                s.attack_fraction * 100.0,
-                s.block_card_count,
+                "  Deck: {} cards   Cycle: {:.1}t   Cost: {:.1}/e",
+                s.deck_size, s.cycle_turns, s.mean_energy_cost,
             ),
             Style::default().fg(Color::White),
         )));
-        lines.push(Line::from(Span::styled(
+        stats.push(Line::from(Span::styled(
             format!(
-                "  Synergy axes: {}   Quality score: {:.2}",
-                s.synergy_axes, s.heuristic_score
+                "  Attacks: {:.0}%   Block cards: {}   Synergy: {}   Score: {:.2}",
+                s.attack_fraction * 100.0, s.block_card_count, s.synergy_axes, s.heuristic_score
             ),
             Style::default().fg(Color::DarkGray),
         )));
-        lines.push(Line::from(Span::raw("")));
+        stats.push(Line::from(Span::raw("")));
 
         if s.encounter_count > 0 {
-            let panel_label = format!(
-                "  {} panel ({} encounters × {} sims = {} samples):",
-                s.sub_act,
-                s.encounter_count,
-                s.playout_count / s.encounter_count as u32,
-                s.playout_count,
-            );
-            lines.push(Line::from(Span::styled(
-                panel_label,
+            stats.push(Line::from(Span::styled(
+                format!(
+                    "  {} — {} enc × {} sims",
+                    s.sub_act,
+                    s.encounter_count,
+                    s.playout_count / s.encounter_count as u32,
+                ),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── DPT ───────────────────────────────────────────────────────
-            lines.push(Line::from(Span::styled(
-                "  Damage Per Turn:",
+            // DPT
+            stats.push(Line::from(Span::styled(
+                "  Damage Per Turn",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )));
             let dbar = dist_bar(s.dpt_p10, s.dpt_p50, s.dpt_p90);
-            let dpt_color = if s.dpt_p50 >= 10.0 {
-                Color::Green
-            } else if s.dpt_p50 >= 6.0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
-                    s.dpt_p10, s.dpt_p50, s.dpt_p90, s.mean_dpt
-                ),
+            let dpt_color = if s.dpt_p50 >= 10.0 { Color::Green }
+                else if s.dpt_p50 >= 6.0 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
+                format!("    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}", s.dpt_p10, s.dpt_p50, s.dpt_p90, s.mean_dpt),
                 Style::default().fg(dpt_color),
             )));
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 format!("    [{}]  0──────────{:.0}", dbar, s.dpt_p90),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── BPT ───────────────────────────────────────────────────────
-            lines.push(Line::from(Span::styled(
-                "  Block Per Turn:",
+            // BPT
+            stats.push(Line::from(Span::styled(
+                "  Block Per Turn",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
             let bbar = dist_bar(s.bpt_p10, s.bpt_p50, s.bpt_p90);
-            let bpt_color = if s.bpt_p50 >= 8.0 {
-                Color::Green
-            } else if s.bpt_p50 >= 4.0 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}",
-                    s.bpt_p10, s.bpt_p50, s.bpt_p90, s.mean_bpt
-                ),
+            let bpt_color = if s.bpt_p50 >= 8.0 { Color::Green }
+                else if s.bpt_p50 >= 4.0 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
+                format!("    p10={:.0}  p50={:.0}  p90={:.0}  mean={:.1}", s.bpt_p10, s.bpt_p50, s.bpt_p90, s.mean_bpt),
                 Style::default().fg(bpt_color),
             )));
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 format!("    [{}]  0──────────{:.0}", bbar, s.bpt_p90),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(Span::raw("")));
+            stats.push(Line::from(Span::raw("")));
 
-            // ── Outcomes ──────────────────────────────────────────────────
-            let outcome_color = if s.kill_rate >= 0.7 {
-                Color::Green
-            } else if s.kill_rate >= 0.4 {
-                Color::Yellow
-            } else {
-                Color::Red
-            };
-            lines.push(Line::from(Span::styled(
+            // Outcomes
+            let outcome_color = if s.kill_rate >= 0.7 { Color::Green }
+                else if s.kill_rate >= 0.4 { Color::Yellow } else { Color::Red };
+            stats.push(Line::from(Span::styled(
                 format!(
-                    "  Kill rate: {:.0}%   Survival: {:.0}%   Avg HP loss: {:.0}",
-                    s.kill_rate * 100.0,
-                    s.survival_rate * 100.0,
-                    s.mean_hp_loss
+                    "  Win rate: {:.0}%   Survive rate: {:.0}%   Avg HP loss: {:.0}",
+                    s.kill_rate * 100.0, s.survival_rate * 100.0, s.mean_hp_loss
                 ),
                 Style::default().fg(outcome_color),
             )));
         } else {
-            lines.push(Line::from(Span::styled(
+            stats.push(Line::from(Span::styled(
                 "  (No encounter data — load seed files to enable sim stats)",
                 Style::default().fg(Color::DarkGray),
             )));
         }
     } else {
-        lines.push(Line::from(Span::raw("  No deck stats computed yet.")));
+        stats.push(Line::from(Span::raw("  No deck stats computed yet.")));
     }
 
-    // ── Relics ────────────────────────────────────────────────────────────────
-    lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled(
-        "  Relics:",
+    frame.render_widget(
+        Paragraph::new(Text::from(stats))
+            .block(Block::default().borders(Borders::ALL).title(" Stats ")),
+        cols[0],
+    );
+
+    // ── Right column: relics + deck cards ─────────────────────────────────────
+    let mut right: Vec<Line<'static>> = Vec::new();
+
+    // Relics
+    right.push(Line::from(Span::styled(
+        "  Relics",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )));
     if let Some(ref run) = app.run {
         if run.relics.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "    (none)",
-                Style::default().fg(Color::DarkGray),
-            )));
+            right.push(Line::from(Span::styled("    (none)", Style::default().fg(Color::DarkGray))));
         } else {
             for relic in &run.relics {
-                lines.push(Line::from(Span::styled(
-                    format!("    \u{2022} {}", relic.name),
+                right.push(Line::from(Span::styled(
+                    format!("  \u{2022} {}", relic.name),
                     Style::default().fg(Color::Cyan),
                 )));
+                if !relic.description.is_empty() {
+                    right.push(Line::from(Span::styled(
+                        format!("    {}", truncate_chars(&relic.description, 38)),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
             }
         }
     } else {
-        lines.push(Line::from(Span::styled(
-            "    (no run loaded)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        right.push(Line::from(Span::styled("    (no run)", Style::default().fg(Color::DarkGray))));
+    }
+
+    right.push(Line::from(Span::raw("")));
+
+    // Deck cards
+    let deck_count = app.run.as_ref().map(|r| r.deck.len()).unwrap_or(0);
+    right.push(Line::from(Span::styled(
+        format!("  Deck  ({})", deck_count),
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(ref run) = app.run {
+        if run.deck.is_empty() {
+            right.push(Line::from(Span::styled("    (empty)", Style::default().fg(Color::DarkGray))));
+        } else {
+            let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for card in &run.deck {
+                let key = if card.upgraded { format!("{}+", card.name) } else { card.name.clone() };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+            for (name, count) in &counts {
+                let label = if *count > 1 {
+                    format!("  \u{2022} {} \u{00d7}{}", name, count)
+                } else {
+                    format!("  \u{2022} {}", name)
+                };
+                right.push(Line::from(Span::styled(label, Style::default().fg(Color::Green))));
+            }
+        }
+    } else {
+        right.push(Line::from(Span::styled("    (no run)", Style::default().fg(Color::DarkGray))));
     }
 
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL)),
-        rows[1],
+        Paragraph::new(Text::from(right))
+            .block(Block::default().borders(Borders::ALL).title(" Relics & Deck "))
+            .wrap(Wrap { trim: false }),
+        cols[1],
     );
 
     let hint = Paragraph::new("  [d/q] close dashboard")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[2]);
+    frame.render_widget(hint, outer[2]);
 }
 
 fn render_map_ev(frame: &mut Frame, app: &App, area: Rect) {
@@ -1123,7 +1141,7 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
         outer[0],
     );
 
-    // ── Body: map column (fixed width) | sidebar (fills rest) ─────────────────
+    // ── Body: map (fixed) | run sidebar | deck column ─────────────────────────
     const LABEL_W: usize = 4;
     const COL_W:   usize = 5; // " [X] "
     // content width + 2 border chars = minimum panel width
@@ -1133,7 +1151,8 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(MAP_PANEL_W),
-            Constraint::Min(0),
+            Constraint::Min(35),  // run sidebar: choices + sim status
+            Constraint::Min(28),  // deck column: class, relics, cards
         ])
         .split(outer[1]);
 
@@ -1210,6 +1229,9 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
     // ── Sidebar ───────────────────────────────────────────────────────────────
     render_map_sidebar(frame, app, body[1], run, map, &choices, choices_floor);
 
+    // ── Deck column ───────────────────────────────────────────────────────────
+    render_map_deck_column(frame, app, body[2], run);
+
     render_statusbar(frame, app, outer[2]);
 }
 
@@ -1229,6 +1251,12 @@ fn render_map_sidebar(
         format!("  HP {}/{}   Gold {}", run.hp, run.max_hp, run.gold),
         Style::default().fg(Color::White),
     )));
+    if let Some(ref boss_name) = run.boss_name {
+        lines.push(Line::from(Span::styled(
+            format!("  Boss: {}", boss_name),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    }
     lines.push(Line::from(Span::raw("")));
 
     // ── Choices ───────────────────────────────────────────────────────────────
@@ -1245,9 +1273,23 @@ fn render_map_sidebar(
 
         let cf = choices_floor.unwrap_or(0);
         for (i, &col) in choices.iter().enumerate() {
-            let rt_label = map.room_type(cf, col as usize).map(|r| r.label()).unwrap_or("?");
             let is_cursor = i == app.map_cursor;
             let cursor_ch = if is_cursor { "▶" } else { " " };
+
+            // Boss sentinel: show boss fight option
+            if col == u8::MAX {
+                let boss_label = run.boss_name.as_deref().unwrap_or("Act Boss");
+                let t = format!("  {} [BOSS] \u{2192} {}", cursor_ch, boss_label);
+                let s = if is_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(Span::styled(t, s)));
+                continue;
+            }
+
+            let rt_label = map.room_type(cf, col as usize).map(|r| r.label()).unwrap_or("?");
 
             let proj = app.path_projections.iter().find(|p| p.col == col);
             let (text, style) = if let Some(p) = proj {
@@ -1326,6 +1368,74 @@ fn render_map_sidebar(
 
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Run ")),
+        area,
+    );
+}
+
+/// Third column of the map view: class, relics, and deck card list.
+fn render_map_deck_column(
+    frame: &mut Frame,
+    _app: &App,
+    area: Rect,
+    run: &crate::domain::run::RunState,
+) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Class ──────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        format!("  {}", run.class),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::raw("")));
+
+    // ── Relics ─────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        "  Relics",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    if run.relics.is_empty() {
+        lines.push(Line::from(Span::styled("    (none)", Style::default().fg(Color::DarkGray))));
+    } else {
+        for relic in &run.relics {
+            lines.push(Line::from(Span::styled(
+                format!("  \u{2022} {}", relic.name),
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+    }
+    lines.push(Line::from(Span::raw("")));
+
+    // ── Deck cards ─────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        format!("  Deck  ({})", run.deck.len()),
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+    )));
+    if run.deck.is_empty() {
+        lines.push(Line::from(Span::styled("    (empty)", Style::default().fg(Color::DarkGray))));
+    } else {
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for card in &run.deck {
+            let key = if card.upgraded {
+                format!("{}+", card.name)
+            } else {
+                card.name.clone()
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        for (name, count) in &counts {
+            let label = if *count > 1 {
+                format!("  \u{2022} {} \u{00d7}{}", name, count)
+            } else {
+                format!("  \u{2022} {}", name)
+            };
+            lines.push(Line::from(Span::styled(label, Style::default().fg(Color::Green))));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Deck "))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -1514,6 +1624,92 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(format!("  HP: {hp}/{max_hp}   {}", app.status_message))
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, rows[2]);
+}
+
+fn render_smith_pick(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(8), Constraint::Length(1)])
+        .split(area);
+
+    let header = Paragraph::new(" SMITH   Choose a card to upgrade   j/k navigate  Enter confirm  Esc back")
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, rows[0]);
+
+    let run = match &app.run {
+        Some(r) => r,
+        None => return,
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (list_pos, &deck_idx) in app.smith_candidates.iter().enumerate() {
+        let Some(card) = run.deck.get(deck_idx) else { continue };
+
+        let dmg_before = card.base_damage();
+        let blk_before = card.base_block();
+        let mut upgraded = card.clone();
+        upgraded.upgrade();
+        let dmg_after = upgraded.base_damage();
+        let blk_after = upgraded.base_block();
+
+        let is_cursor = list_pos == app.smith_cursor;
+        let is_best   = list_pos == 0;
+
+        let type_label = match card.card_type {
+            crate::domain::card::CardType::Attack => "Atk",
+            crate::domain::card::CardType::Skill  => "Skl",
+            crate::domain::card::CardType::Power  => "Pwr",
+            _ => "   ",
+        };
+
+        let mut delta_parts: Vec<String> = Vec::new();
+        if dmg_before > 0 || dmg_after > 0 {
+            if dmg_after != dmg_before {
+                delta_parts.push(format!("dmg {}→{}", dmg_before, dmg_after));
+            } else {
+                delta_parts.push(format!("dmg {}", dmg_before));
+            }
+        }
+        if blk_before > 0 || blk_after > 0 {
+            if blk_after != blk_before {
+                delta_parts.push(format!("blk {}→{}", blk_before, blk_after));
+            } else {
+                delta_parts.push(format!("blk {}", blk_before));
+            }
+        }
+        if delta_parts.is_empty() {
+            delta_parts.push("no stat change".to_string());
+        }
+        let delta_str = delta_parts.join("  ");
+
+        let rec_marker = if is_best { " ★" } else { "  " };
+        let prefix = if is_cursor { "▶ " } else { "  " };
+        let label = format!("{prefix}{:<22} [{type_label}]  {delta_str}{rec_marker}", card.name);
+
+        let style = if is_cursor {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if is_best {
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("  No upgradeable cards", Style::default().fg(Color::DarkGray))));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL).title(" Choose Card to Upgrade ")),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("  {}", app.status_message))
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
 }
 
 fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
@@ -1872,6 +2068,136 @@ fn render_calibration(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn render_statistics(frame: &mut Frame, app: &App, area: Rect) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),  // title
+            Constraint::Min(0),     // body (two columns)
+            Constraint::Length(1),  // hint
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(" STATISTICS")
+            .block(Block::default().borders(Borders::BOTTOM))
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        outer[0],
+    );
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(outer[1]);
+
+    // ── Left column: run summary + node EV ────────────────────────────────────
+    let mut left: Vec<Line<'static>> = Vec::new();
+    left.push(Line::from(Span::styled("  Current Run", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+    left.push(Line::from(Span::raw("")));
+
+    if let Some(ref run) = app.run {
+        left.push(Line::from(Span::styled(format!("  Class:    {}", run.class), Style::default().fg(Color::Yellow))));
+        let hp_color = if run.hp as f32 / run.max_hp as f32 > 0.6 { Color::Green }
+                       else if run.hp as f32 / run.max_hp as f32 > 0.35 { Color::Yellow }
+                       else { Color::Red };
+        left.push(Line::from(Span::styled(
+            format!("  HP:       {}/{}", run.hp, run.max_hp),
+            Style::default().fg(hp_color),
+        )));
+        left.push(Line::from(Span::styled(format!("  Gold:     {}", run.gold), Style::default().fg(Color::White))));
+        left.push(Line::from(Span::styled(format!("  Act:      {}", capitalize(&run.sub_act)), Style::default().fg(Color::White))));
+        left.push(Line::from(Span::styled(format!("  Deck:     {} cards", run.deck.len()), Style::default().fg(Color::White))));
+        left.push(Line::from(Span::styled(format!("  Relics:   {}", run.relics.len()), Style::default().fg(Color::Cyan))));
+        if let Some(ref boss) = run.boss_name {
+            left.push(Line::from(Span::styled(format!("  Boss:     {}", boss), Style::default().fg(Color::Red))));
+        }
+        left.push(Line::from(Span::raw("")));
+        left.push(Line::from(Span::styled(format!("  Ascension: {}", run.ascension), Style::default().fg(Color::DarkGray))));
+    } else {
+        left.push(Line::from(Span::styled("  No active run.", Style::default().fg(Color::DarkGray))));
+    }
+
+    left.push(Line::from(Span::raw("")));
+
+    // Node EV breakdown from most recent simulation
+    if let Some(ref me) = app.map_ev {
+        left.push(Line::from(Span::styled("  Node EV — Act Risks", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+        left.push(Line::from(Span::raw("")));
+        for node in [&me.normal, &me.elite, &me.boss, &me.treasure, &me.rest, &me.shop] {
+            let hp_str = if node.encounter_count > 0 {
+                format!("-{:.0} HP", node.mean_hp_loss)
+            } else {
+                "—     ".to_string()
+            };
+            let surv_str = if node.encounter_count > 0 {
+                format!("{:.0}%", node.survival_rate * 100.0)
+            } else {
+                "  — ".to_string()
+            };
+            let stars: String = "\u{2605}".repeat(node.stars as usize)
+                + &"\u{2606}".repeat(3 - node.stars as usize);
+            left.push(Line::from(Span::styled(
+                format!("  {:<10}  {:>7}  {:>5}  {}", node.label, hp_str, surv_str, stars),
+                Style::default().fg(Color::White),
+            )));
+        }
+    } else {
+        left.push(Line::from(Span::styled(
+            "  Open Map Planner [v] to compute node risks.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(left).block(Block::default().borders(Borders::ALL).title(" Run & Map ")),
+        cols[0],
+    );
+
+    // ── Right column: metric glossary + prediction accuracy ───────────────────
+    let mut right: Vec<Line<'static>> = Vec::new();
+    right.push(Line::from(Span::styled("  Metric Glossary", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+    right.push(Line::from(Span::raw("")));
+
+    let glossary = [
+        ("Win rate", "% of simulated combats where the player defeats all enemies before dying."),
+        ("Survive rate", "% of simulated combats where the player ends with HP > 0 (includes pyrrhic wins with very low HP)."),
+        ("Avg HP loss", "Mean HP lost per simulated combat at the current deck/HP state."),
+        ("DPT", "Damage Per Turn: average damage dealt per turn. Higher is better for killing enemies quickly."),
+        ("BPT", "Block Per Turn: average block generated per turn. Higher means better durability."),
+        ("p10/p50/p90", "10th, 50th (median), and 90th percentile across simulated runs — shows best/typical/worst case spread."),
+        ("HP delta", "Expected HP change from a path or event. Positive = net gain, negative = net loss."),
+        ("Stars ★", "1-3 star rating for a map node: how worthwhile it is given current HP and deck strength."),
+        ("Sim [sim]", "Path costs computed by full combat simulation. More accurate than estimates."),
+        ("Est [est]", "Path costs estimated by heuristic (no encounter data loaded). Less accurate."),
+        ("[v] Planner", "Map Planner screen: simulates each node type for the current act to give risk/reward data."),
+    ];
+
+    for (term, desc) in &glossary {
+        right.push(Line::from(Span::styled(
+            format!("  {}", term),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        right.push(Line::from(Span::styled(
+            format!("    {}", desc),
+            Style::default().fg(Color::Gray),
+        )));
+        right.push(Line::from(Span::raw("")));
+    }
+
+    frame.render_widget(
+        Paragraph::new(right)
+            .block(Block::default().borders(Borders::ALL).title(" Glossary "))
+            .wrap(Wrap { trim: false }),
+        cols[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("  [?/Esc/q] Back to map")
+            .style(Style::default().fg(Color::DarkGray)),
+        outer[2],
+    );
+}
+
 fn render_ancient_boon(frame: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -2205,6 +2531,14 @@ mod tests {
             actual_delta: -35.0,
         });
         app.mode = crate::tui::app::AppMode::Calibration;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+
+    #[test]
+    fn render_statistics_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        app.mode = crate::tui::app::AppMode::Statistics;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
 }

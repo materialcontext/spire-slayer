@@ -15,7 +15,8 @@ pub enum AppEvent {
     RunSim,
     Tick,
     /// Background path simulation finished; deliver results to the app.
-    PathSimResult(Vec<PathProjection>),
+    /// The u64 is the generation counter: stale results from a previous floor are discarded.
+    PathSimResult(u64, Vec<PathProjection>),
 }
 
 /// Spawn a background thread that reads crossterm events and sends them to the returned channel.

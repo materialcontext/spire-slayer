@@ -78,6 +78,8 @@ pub struct RunState {
     pub ascension: u8,
     /// Whether Darv appeared as this run's Act 2 ancient (affects Act 3 pool).
     pub had_darv_act2: bool,
+    /// Boss name for the current act, determined at map generation time (shown on map view).
+    pub boss_name: Option<String>,
 }
 
 impl RunState {
@@ -105,6 +107,7 @@ impl RunState {
             card_removals_bought: 0,
             ascension: 0,
             had_darv_act2: false,
+            boss_name: None,
         }
     }
 

@@ -32,6 +32,7 @@ pub enum AppMode {
     EncounterPick,
     MapView,
     RestSite,
+    SmithPick,
     EventRoom,
     TreasureRoom,
     Shop,
@@ -44,6 +45,7 @@ pub enum AppMode {
     ManualInput,
     Simulating,
     Calibration,
+    Statistics,
     Exiting,
 }
 
@@ -58,6 +60,8 @@ pub enum PostPickAction {
 pub enum AfterTreasure {
     /// Load a boss card pick then begin act transition.
     BossCardPick,
+    /// Load a normal/elite card pick and return to the map.
+    CombatCardPick(Vec<Card>),
 }
 
 pub struct App {
@@ -91,6 +95,9 @@ pub struct App {
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
+    /// Deck indices of upgradeable cards sorted best→worst for SmithPick mode.
+    pub smith_candidates: Vec<usize>,
+    pub smith_cursor: usize,
     /// Active event and scored options for EventRoom mode.
     pub active_event: Option<SpireApiEvent>,
     pub event_advice: Vec<EventOptionAdvice>,
@@ -160,6 +167,9 @@ pub struct App {
     pub best_path_predicted_delta: f32,
     /// True while the path projection simulation is running in a background thread.
     pub sim_in_progress: bool,
+    /// Monotonically increasing counter; each new sim invocation increments this so stale
+    /// PathSimResult messages from previous floors are ignored.
+    pub sim_generation: u64,
     /// Sender end of the background-task result channel; None in tests.
     pub bg_sender: Option<std::sync::mpsc::Sender<AppEvent>>,
 }
@@ -197,6 +207,8 @@ impl App {
             class_cards: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
+            smith_candidates: Vec::new(),
+            smith_cursor: 0,
             active_event: None,
             event_advice: Vec::new(),
             event_cursor: 0,
@@ -236,6 +248,7 @@ impl App {
             hp_at_act_start: 0,
             best_path_predicted_delta: 0.0,
             sim_in_progress: false,
+            sim_generation: 0,
             bg_sender: None,
         };
         app.refresh_filter();
@@ -272,9 +285,11 @@ impl App {
                 self.run_simulation(rng);
                 return true;
             }
-            AppEvent::PathSimResult(projections) => {
-                self.path_projections = projections;
-                self.sim_in_progress = false;
+            AppEvent::PathSimResult(generation, projections) => {
+                if generation == self.sim_generation {
+                    self.path_projections = projections;
+                    self.sim_in_progress = false;
+                }
                 return true;
             }
             AppEvent::StateUpdated(state) => {
@@ -297,6 +312,7 @@ impl App {
             AppMode::EncounterPick  => self.handle_key_encounter(key, rng),
             AppMode::MapView        => self.handle_key_map_view(key, rng),
             AppMode::RestSite       => self.handle_key_rest_site(key),
+            AppMode::SmithPick      => self.handle_key_smith_pick(key),
             AppMode::EventRoom      => self.handle_key_event_room(key),
             AppMode::TreasureRoom   => self.handle_key_treasure_room(key, rng),
             AppMode::Shop           => self.handle_key_shop(key),
@@ -308,6 +324,7 @@ impl App {
             AppMode::AncientBoon    => self.handle_key_ancient_boon(key, rng),
             AppMode::Victory        => self.handle_key_victory(key),
             AppMode::Calibration    => self.handle_key_calibration(key),
+            AppMode::Statistics     => self.handle_key_statistics(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -356,6 +373,9 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.mode = AppMode::Calibration;
+            }
+            KeyCode::Char('?') => {
+                self.mode = AppMode::Statistics;
             }
             KeyCode::Char('j') | KeyCode::Right => {
                 let n = self.map_choices().len();
@@ -787,6 +807,27 @@ impl App {
 
     /// Generate the map (if not already present) and switch to MapView.
     pub fn open_map_view(&mut self, rng: &mut impl rand::Rng) {
+        // Determine act boss before generating the map (once per act).
+        let needs_boss = self.run.as_ref()
+            .map(|r| r.boss_name.is_none() && r.map.is_none())
+            .unwrap_or(false);
+        if needs_boss {
+            use rand::seq::SliceRandom;
+            let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+            let chosen = self.encounters.iter()
+                .filter(|e| e.room_type.as_deref() == Some("Boss")
+                    && e.act.as_deref()
+                        .map(crate::domain::encounter::normalize_act)
+                        .unwrap_or("") == sub_act)
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+                .choose(rng)
+                .cloned();
+            if let Some(ref mut run) = self.run {
+                run.boss_name = chosen;
+            }
+        }
+
         if let Some(ref mut run) = self.run {
             if run.map.is_none() {
                 let seed: u64 = rng.r#gen();
@@ -842,8 +883,16 @@ impl App {
     /// Compute full 3-act forward-simulated run projections for each selectable node.
     pub fn compute_path_projections(&mut self, rng: &mut impl rand::Rng) {
         use crate::domain::map::ROWS;
-        let Some(ref run) = self.run else { self.path_projections.clear(); return; };
-        let Some(ref map) = run.map else { self.path_projections.clear(); return; };
+        let Some(ref run) = self.run else {
+            self.path_projections.clear();
+            self.sim_in_progress = false;
+            return;
+        };
+        let Some(ref map) = run.map else {
+            self.path_projections.clear();
+            self.sim_in_progress = false;
+            return;
+        };
 
         let (choices, next_floor) = match run.map_pos {
             None => (map.entry_nodes(), 0usize),
@@ -855,6 +904,7 @@ impl App {
 
         if next_floor >= ROWS || choices.is_empty() {
             self.path_projections.clear();
+            self.sim_in_progress = false;
             return;
         }
 
@@ -873,17 +923,22 @@ impl App {
 
         if let Some(ref tx) = self.bg_sender {
             // Run asynchronously: mark in-progress, spawn thread, deliver via channel.
+            self.sim_generation += 1;
+            let generation = self.sim_generation;
             self.sim_in_progress = true;
             self.path_projections.clear();
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let mut rng = rand::rngs::StdRng::from_entropy();
-                let result = simulate_path_choices(
-                    &map_clone, &choices, next_floor,
-                    hp, max_hp, &deck, &relics, gold, asc, &sub_act,
-                    &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
-                );
-                let _ = tx.send(AppEvent::PathSimResult(result));
+                // catch_unwind ensures sim_in_progress is never stuck on thread panic
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    simulate_path_choices(
+                        &map_clone, &choices, next_floor,
+                        hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+                        &encounters, &monsters, &class_cards, event_hp_delta, &mut rng,
+                    )
+                })).unwrap_or_default();
+                let _ = tx.send(AppEvent::PathSimResult(generation, result));
             });
         } else {
             // Synchronous fallback used in tests (no channel wired up).
@@ -896,12 +951,21 @@ impl App {
     }
 
     /// Columns available to move to from the current map position.
+    /// Returns `[u8::MAX]` as a sentinel when the player has cleared all floors and must
+    /// proceed to the act boss.
     pub fn map_choices(&self) -> Vec<u8> {
+        use crate::domain::map::ROWS;
         let Some(ref run) = self.run else { return vec![]; };
         let Some(ref map) = run.map else { return vec![]; };
         match run.map_pos {
             None      => map.entry_nodes(),
-            Some(pos) => map.choices_from(pos).to_vec(),
+            Some(pos) => {
+                if pos.floor + 1 >= ROWS {
+                    vec![u8::MAX] // boss sentinel: no further map nodes, proceed to boss
+                } else {
+                    map.choices_from(pos).to_vec()
+                }
+            }
         }
     }
 
@@ -910,6 +974,23 @@ impl App {
         use crate::domain::map::RoomType;
         let choices = self.map_choices();
         let Some(&col) = choices.get(self.map_cursor) else { return; };
+
+        // Boss sentinel: player has completed all floors and must fight the act boss.
+        if col == u8::MAX {
+            self.map_cursor = 0;
+            let pool = card_pool_for_run(self);
+            let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+            let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
+            let offered = if let Some(off) = offset {
+                sample_offer(&pool, RewardKind::Boss, off, asc, rng)
+            } else {
+                pool.into_iter().take(3).collect()
+            };
+            self.apply_combat_hp_loss(RoomType::Boss, rng);
+            self.apply_post_combat_relics();
+            self.open_boss_relic_room(offered, rng);
+            return;
+        }
 
         // Snapshot telemetry data before mutating state.
         let tel_choices: Vec<ScoredChoice> = self.path_choices.iter()
@@ -967,7 +1048,12 @@ impl App {
                 self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
                 self.apply_combat_gold(rt);
-                self.load_pick(offered, rng, AppMode::MapView);
+                if rt == RoomType::Elite {
+                    // Elite fights award a relic (Uncommon/Common tier) before the card pick.
+                    self.open_elite_relic_room(offered, rng);
+                } else {
+                    self.load_pick(offered, rng, AppMode::MapView);
+                }
             }
             Some(RoomType::Boss) => {
                 let pool = card_pool_for_run(self);
@@ -1020,33 +1106,59 @@ impl App {
     }
 
     fn confirm_rest(&mut self) {
-        let Some(ref run) = self.run else { return; };
-        let smith_idx = match self.rest_advice.as_ref().and_then(|a| {
-            if let RestAction::Smith(i) = a.action { Some(i) } else { None }
-        }) {
-            Some(i) => i,
-            None => {
-                // No smith candidate — treat as heal regardless of cursor.
-                let run = self.run.as_mut().unwrap();
-                run.heal();
-                self.status_message = format!("Healed to {} HP", run.hp);
-                self.mode = AppMode::MapView;
-                return;
-            }
-        };
-        let _ = run; // drop shared borrow before mut
+        let Some(ref _run) = self.run else { return; };
+        let _ = _run;
         let run = self.run.as_mut().unwrap();
         if self.rest_cursor == 0 {
             run.heal();
             self.status_message = format!("Healed to {} HP", run.hp);
+            self.rest_advice = None;
+            self.mode = AppMode::MapView;
         } else {
-            if run.smith(smith_idx) {
-                let name = run.deck[smith_idx].name.clone();
-                self.status_message = format!("Upgraded {}", name);
+            use crate::metrics::rest::smith_candidates;
+            let candidates: Vec<usize> = smith_candidates(&run.deck)
+                .into_iter().map(|(i, _)| i).collect();
+            if candidates.is_empty() {
+                run.heal();
+                self.status_message = format!("Healed to {} HP", run.hp);
+                self.rest_advice = None;
+                self.mode = AppMode::MapView;
+            } else {
+                self.smith_candidates = candidates;
+                self.smith_cursor = 0;
+                self.rest_advice = None;
+                self.mode = AppMode::SmithPick;
             }
         }
-        self.rest_advice = None;
-        self.mode = AppMode::MapView;
+    }
+
+    fn handle_key_smith_pick(&mut self, key: KeyEvent) {
+        let n = self.smith_candidates.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 { self.smith_cursor = (self.smith_cursor + 1) % n; }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if n > 0 { self.smith_cursor = (self.smith_cursor + n - 1) % n; }
+            }
+            KeyCode::Enter => {
+                if let Some(&deck_idx) = self.smith_candidates.get(self.smith_cursor) {
+                    let run = self.run.as_mut().unwrap();
+                    if run.smith(deck_idx) {
+                        let name = run.deck[deck_idx].name.clone();
+                        self.status_message = format!("Upgraded {}", name);
+                    }
+                }
+                self.smith_candidates.clear();
+                self.mode = AppMode::MapView;
+            }
+            KeyCode::Esc => {
+                self.smith_candidates.clear();
+                self.mode = AppMode::RestSite;
+            }
+            KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
+            _ => {}
+        }
     }
 
     fn open_event_room(&mut self, rng: &mut impl rand::Rng) {
@@ -1166,10 +1278,31 @@ impl App {
                     self.post_pick_action = Some(PostPickAction::BossActTransition);
                     self.load_pick(cards, rng, AppMode::MapView);
                 }
+                AfterTreasure::CombatCardPick(cards) => {
+                    self.load_pick(cards, rng, AppMode::MapView);
+                }
             }
         } else {
             self.mode = AppMode::MapView;
         }
+    }
+
+    /// Open a relic offer for an elite fight (Uncommon/Common tier), then proceed to card pick.
+    fn open_elite_relic_room(&mut self, elite_cards: Vec<Card>, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool = self.run.as_ref()
+            .map(|r| char_color(&r.class))
+            .unwrap_or("ironclad");
+        let pool: Vec<&SpireApiRelic> = self.relics.iter().filter(|r| {
+            let rarity = r.rarity.as_deref().unwrap_or("");
+            let p = r.pool.as_deref().unwrap_or("shared");
+            matches!(rarity, "Common Relic" | "Uncommon Relic")
+                && (p == "shared" || p == class_pool)
+        }).collect();
+        self.offered_relic = pool.choose(rng).map(|r| (*r).clone());
+        self.after_treasure = Some(AfterTreasure::CombatCardPick(elite_cards));
+        self.relic_cursor = 0;
+        self.mode = AppMode::TreasureRoom;
     }
 
     fn open_shop(&mut self, rng: &mut impl rand::Rng) {
@@ -1814,10 +1947,11 @@ impl App {
             // Update act
             run.sub_act = next_sub_act.to_string();
             run.act = crate::metrics::run_ev::act_number(next_sub_act);
-            // Reset map
+            // Reset map and boss for the new act
             run.map = None;
             run.map_pos = None;
             run.floor = 0;
+            run.boss_name = None;
         }
 
         self.act_filter = next_sub_act.to_string();
@@ -1874,6 +2008,15 @@ impl App {
     fn handle_key_calibration(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => {
+                self.mode = AppMode::MapView;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_key_statistics(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
                 self.mode = AppMode::MapView;
             }
             _ => {}
