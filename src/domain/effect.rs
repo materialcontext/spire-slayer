@@ -8,6 +8,8 @@ pub enum BuffType {
     Thorns,
     Plating,
     Ritual,
+    /// Defect's Focus: adds to all orb passive and evoke values.
+    Focus,
     // Player-only persistent power buffs
     /// Block is not cleared at the start of your turn.
     Barricade,
@@ -20,6 +22,18 @@ pub enum BuffType {
     Weak,
     Frail,
     Poison,
+}
+
+/// Defect orb types. Dark tracks accumulated damage value; Glass tracks passive value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrbType {
+    Lightning,
+    Frost,
+    /// Accumulated damage (starts at 6, grows by 6+focus per passive trigger).
+    Dark(u32),
+    Plasma,
+    /// Current passive damage per turn (evoke = 2×this; decrements by 1 per trigger).
+    Glass(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +62,12 @@ pub enum CardEffect {
     ApplyToSelf { buff: BuffType, stacks: i32 },
     /// Placeholder for passive/triggered effects not yet simulated.
     Passive(String),
+    /// Add Stars (Regent's secondary resource). Tracked in CombatState.stars.
+    GainStars(u32),
+    /// Channel an orb into the Defect's orb queue (evokes leftmost if slots full).
+    ChannelOrb(OrbType),
+    /// Evoke the rightmost orb N times (u32::MAX = evoke all).
+    EvokeOrb(u32),
 }
 
 impl CardEffect {

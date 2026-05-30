@@ -8,11 +8,12 @@ use crate::domain::catalog;
 use crate::domain::combat::CombatState;
 use crate::domain::reward::{sample_offer, RewardKind};
 use crate::domain::encounter::{encounter_to_combat, encounters_for_act};
-use crate::domain::run::{PlayerClass, Relic, RunState, starting_relics};
+use crate::domain::run::{PlayerClass, RunState, starting_relics};
 use crate::input::event::{spawn_event_loop, AppEvent};
 use crate::input::manual::{default_combat_state, ManualInputState};
 use crate::metrics::card_pick::{sim_pick_score, CardAdvice};
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts, PathChoice};
+use crate::metrics::path_sim::{simulate_path_choices, PathProjection};
 use crate::metrics::run_ev::{compute_run_ev, RunEv};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::event::{advise_event, EventOptionAdvice};
@@ -76,6 +77,10 @@ pub struct App {
     pub map_cursor: usize,
     /// HP-cost estimates for each available map choice (recomputed on position change).
     pub path_choices: Vec<PathChoice>,
+    /// Full 3-act sequential run projections for each selectable node.
+    pub path_projections: Vec<PathProjection>,
+    /// All cards available for this character class (used by path simulation).
+    pub class_cards: Vec<Card>,
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
@@ -127,6 +132,8 @@ pub struct App {
     pub ancient_is_act_transition: bool,
     /// Whether Darv appeared in Act 2 of this run (affects Act 3 pool).
     pub ancient_had_darv_act2: bool,
+    /// Ascension level selected in the character picker (0–10).
+    pub ascension_cursor: usize,
     /// Action to take after the current card pick is confirmed.
     pub post_pick_action: Option<PostPickAction>,
     // ── Telemetry ──────────────────────────────────────────────────────────
@@ -171,6 +178,8 @@ impl App {
             filtered_indices: Vec::new(),
             map_cursor: 0,
             path_choices: Vec::new(),
+            path_projections: Vec::new(),
+            class_cards: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
             active_event: None,
@@ -202,6 +211,7 @@ impl App {
             ancient_cursor: 0,
             ancient_is_act_transition: false,
             ancient_had_darv_act2: false,
+            ascension_cursor: 10,
             post_pick_action: None,
             run_logger: None,
             residuals: ResidualStore::new(),
@@ -292,6 +302,12 @@ impl App {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
                 }
+            }
+            KeyCode::Char('a') | KeyCode::Left => {
+                if self.ascension_cursor > 0 { self.ascension_cursor -= 1; }
+            }
+            KeyCode::Char('d') | KeyCode::Right => {
+                if self.ascension_cursor < 10 { self.ascension_cursor += 1; }
             }
             KeyCode::Enter => {
                 self.select_character(rng);
@@ -481,8 +497,9 @@ impl App {
             KeyCode::Char('p') => {
                 let pool = card_pool_for_run(self);
                 // Preview: use a throwaway offset so the real run's offset is unchanged.
-                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
-                let offered = sample_offer(&pool, RewardKind::Monster, &mut preview_offset, rng);
+                let mut preview_offset = self.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5.0);
+                let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+                let offered = sample_offer(&pool, RewardKind::Monster, &mut preview_offset, asc, rng);
                 self.load_pick(offered, rng, AppMode::CombatAdvice);
             }
             KeyCode::Char('v') => {
@@ -594,6 +611,7 @@ impl App {
         let max_hp = self.combat.as_ref().map(|c| c.player.max_hp).unwrap_or(80);
         let sub_act = self.act_filter.clone();
         let relics = relic_ids_from_run(self.run.as_ref());
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         let stats = compute_deck_stats(
             &deck,
             hp,
@@ -602,6 +620,7 @@ impl App {
             &self.encounters,
             &self.monsters,
             &relics,
+            ascension,
             rng,
         );
         self.status_message = if stats.encounter_count == 0 {
@@ -708,6 +727,20 @@ impl App {
         run.sub_act  = sub_act.clone();
         run.act      = crate::metrics::run_ev::act_number(&sub_act);
 
+        // A5: Ascender's Bane — start with a curse card
+        if self.ascension_cursor >= 5 {
+            use crate::domain::card::{CardType, Rarity};
+            use crate::domain::effect::CardEffect;
+            let bane = crate::domain::card::Card::new(
+                9999, "Ascender's Bane", 255,
+                CardType::Curse, Rarity::Special,
+                vec![CardEffect::Passive("Unplayable. Ethereal. Cannot be removed from your deck.".into())],
+            ).with_ethereal();
+            run.deck.push(bane);
+        }
+
+        run.ascension = self.ascension_cursor as u8;
+
         self.status_message = format!(
             "Playing as {} — HP {}, {} starting cards — choose your path",
             char_name, hp, run.deck.len(),
@@ -716,6 +749,7 @@ impl App {
         self.run_id = now_secs();
         self.hp_at_act_start = 0;
         self.best_path_predicted_delta = 0.0;
+        self.class_cards = catalog::cards_for_character(&color);
         self.act_filter = sub_act.clone();
         self.refresh_filter();
         self.selected_row = 0;
@@ -732,6 +766,7 @@ impl App {
         }
         self.map_cursor = 0;
         self.recompute_path_choices();
+        self.compute_path_projections(rng);
         // Capture act-start HP and the best predicted delta (only on first open per act).
         if self.hp_at_act_start == 0 {
             if let Some(ref run) = self.run {
@@ -775,6 +810,45 @@ impl App {
         };
     }
 
+    /// Compute full 3-act forward-simulated run projections for each selectable node.
+    pub fn compute_path_projections(&mut self, rng: &mut impl rand::Rng) {
+        use crate::domain::map::ROWS;
+        let Some(ref run) = self.run else { self.path_projections.clear(); return; };
+        let Some(ref map) = run.map else { self.path_projections.clear(); return; };
+
+        let (choices, next_floor) = match run.map_pos {
+            None => (map.entry_nodes(), 0usize),
+            Some(pos) => {
+                let nf = pos.floor + 1;
+                (map.choices_from(pos).to_vec(), nf)
+            }
+        };
+
+        if next_floor >= ROWS || choices.is_empty() {
+            self.path_projections.clear();
+            return;
+        }
+
+        let hp      = run.hp;
+        let max_hp  = run.max_hp;
+        let deck    = run.deck.clone();
+        let relics  = relic_ids_from_run(Some(run));
+        let gold    = run.gold;
+        let asc     = run.ascension;
+        let sub_act = run.sub_act.clone();
+        let event_hp_delta = self.map_ev.as_ref().map(|me| me.event_hp_delta).unwrap_or(-2.0);
+        let map_clone = map.clone();
+        let class_cards = self.class_cards.clone();
+        let encounters  = self.encounters.clone();
+        let monsters    = self.monsters.clone();
+
+        self.path_projections = simulate_path_choices(
+            &map_clone, &choices, next_floor,
+            hp, max_hp, &deck, &relics, gold, asc, &sub_act,
+            &encounters, &monsters, &class_cards, event_hp_delta, rng,
+        );
+    }
+
     /// Columns available to move to from the current map position.
     pub fn map_choices(&self) -> Vec<u8> {
         let Some(ref run) = self.run else { return vec![]; };
@@ -816,8 +890,8 @@ impl App {
             run.map.as_ref().and_then(|m| m.room_type(pos.floor, pos.col))
         });
         let tel_room_type = room.map(|rt| format!("{:?}", rt)).unwrap_or_default();
-        drop(run);
         self.recompute_path_choices();
+        self.compute_path_projections(rng);
 
         // Emit map decision event.
         self.log_event(RunEvent::MapDecision {
@@ -837,9 +911,10 @@ impl App {
             Some(rt @ RoomType::Monster) | Some(rt @ RoomType::Elite) => {
                 let kind = if rt == RoomType::Elite { RewardKind::Elite } else { RewardKind::Monster };
                 let pool = card_pool_for_run(self);
+                let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
                 let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
                 let offered = if let Some(off) = offset {
-                    sample_offer(&pool, kind, off, rng)
+                    sample_offer(&pool, kind, off, asc, rng)
                 } else {
                     pool.into_iter().take(3).collect()
                 };
@@ -849,9 +924,10 @@ impl App {
             }
             Some(RoomType::Boss) => {
                 let pool = card_pool_for_run(self);
+                let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
                 let offset = self.run.as_mut().map(|r| &mut r.rare_offset);
                 let offered = if let Some(off) = offset {
-                    sample_offer(&pool, RewardKind::Boss, off, rng)
+                    sample_offer(&pool, RewardKind::Boss, off, asc, rng)
                 } else {
                     pool.into_iter().take(3).collect()
                 };
@@ -864,9 +940,6 @@ impl App {
             Some(RoomType::Event) => self.open_event_room(rng),
             Some(RoomType::Treasure) => self.open_treasure_room(rng),
             Some(RoomType::Shop) => self.open_shop(rng),
-            Some(rt) => {
-                self.status_message = format!("Floor {} — {}", self.run.as_ref().map(|r| r.floor).unwrap_or(0), rt.label());
-            }
             None => {}
         }
     }
@@ -1126,7 +1199,9 @@ impl App {
 
         // ── Removal service ────────────────────────────────────────────────
         let removals = self.run.as_ref().map(|r| r.card_removals_bought).unwrap_or(0);
-        let removal_price = 75 + 25 * removals;
+        let run_ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+        let removal_base = if run_ascension >= 6 { 100 } else { 75 };
+        let removal_price = removal_base + 25 * removals;
 
         // ── Sim context ────────────────────────────────────────────────────
         let deck = self.run.as_ref().map(|r| r.deck.clone())
@@ -1139,14 +1214,15 @@ impl App {
         let current_relics = relic_ids_from_run(self.run.as_ref());
 
         // ── Score cards (sim-backed when encounter data is present) ────────
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         let card_advice = crate::metrics::card_pick::sim_pick_score(
             &shop_cards, &deck, hp, max_hp, &sub_act,
-            &self.encounters, &self.monsters, &current_relics, rng,
+            &self.encounters, &self.monsters, &current_relics, ascension, rng,
         );
 
         // ── Baseline combat sim (shared across relic scoring + removal) ────
         let baseline = crate::metrics::deck_dash::compute_deck_stats(
-            &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters, &current_relics, rng,
+            &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters, &current_relics, ascension, rng,
         );
         let has_data = baseline.encounter_count > 0;
         let baseline_hp_loss = baseline.mean_hp_loss;
@@ -1165,6 +1241,7 @@ impl App {
                     &current_relics,
                     baseline_hp_loss,
                     has_data,
+                    ascension,
                     rng,
                 )
             })
@@ -1174,7 +1251,7 @@ impl App {
         let removal_hp = if gold >= removal_price {
             crate::metrics::shop_ev::compute_removal_hp_value(
                 &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters,
-                &current_relics, baseline_hp_loss, has_data, rng,
+                &current_relics, baseline_hp_loss, has_data, ascension, rng,
             )
         } else {
             0.0
@@ -1304,7 +1381,8 @@ impl App {
                         }
                         run.gold -= price;
                         run.card_removals_bought += 1;
-                        self.shop_removal_price = 75 + 25 * run.card_removals_bought;
+                        let r_base = if run.ascension >= 6 { 100 } else { 75 };
+                        self.shop_removal_price = r_base + 25 * run.card_removals_bought;
                         self.shop_has_removal = false;
                         self.status_message = format!("Card removal purchased for {}g ({}g left)", price, run.gold);
                         if self.shop_cursor > 0 { self.shop_cursor -= 1; }
@@ -1343,6 +1421,7 @@ impl App {
             .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
             .unwrap_or(80);
         let relics = relic_ids_from_run(self.run.as_ref());
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -1352,6 +1431,7 @@ impl App {
             &self.encounters,
             &self.monsters,
             &relics,
+            ascension,
             rng,
         );
         self.offered_cards = offered;
@@ -1432,6 +1512,7 @@ impl App {
             .cloned()
             .collect();
 
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         let loss = if pool.is_empty() {
             match room_type {
                 RoomType::Monster => 7,
@@ -1440,7 +1521,7 @@ impl App {
                 _                 => 0,
             }
         } else {
-            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, rng);
+            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, ascension, rng);
             stats.mean_hp_loss.round() as u32
         };
 
@@ -1457,9 +1538,11 @@ impl App {
             match relic.name.as_str() {
                 "Burning Blood" => {
                     let healed = run.hp.saturating_add(6).min(run.max_hp);
-                    if healed > run.hp {
-                        run.hp = healed;
-                    }
+                    if healed > run.hp { run.hp = healed; }
+                }
+                "Black Blood" => {
+                    let healed = run.hp.saturating_add(12).min(run.max_hp);
+                    if healed > run.hp { run.hp = healed; }
                 }
                 _ => {}
             }
@@ -1494,9 +1577,14 @@ impl App {
         self.ancient_cursor = 0;
         self.ancient_is_act_transition = is_act_transition;
 
-        // Ancient heals player to full HP
+        // Ancient heals player (full below A2, 80% of missing at A2+)
         if let Some(ref mut run) = self.run {
-            run.hp = run.max_hp;
+            if run.ascension < 2 {
+                run.hp = run.max_hp;
+            } else {
+                let missing = run.max_hp.saturating_sub(run.hp) as f32;
+                run.hp = (run.hp as f32 + (missing * 0.80).floor()) as u32;
+            }
         }
 
         self.status_message = format!("You meet {}. Choose a boon.", self.ancient_name);
@@ -1523,13 +1611,52 @@ impl App {
     }
 
     fn confirm_ancient_boon(&mut self, rng: &mut impl rand::Rng) {
-        // Add the chosen relic to run
         if let Some(relic) = self.ancient_boons.get(self.ancient_cursor).cloned() {
-            if let Some(ref mut run) = self.run {
-                let desc = relic.description.clone().unwrap_or_default();
-                run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+            match relic.id.as_str() {
+                "TOUCH_OF_OROBAS" => {
+                    // Replace starter relic with the upgraded Ancient version.
+                    if let Some(ref mut run) = self.run {
+                        let (old_name, new_id) = starter_relic_upgrade(&run.class);
+                        run.relics.retain(|r| r.name != old_name);
+                        if let Some(upgraded) = self.relics.iter().find(|r| r.id == new_id) {
+                            let desc = upgraded.description.clone().unwrap_or_default();
+                            run.relics.push(crate::domain::run::Relic::new(&upgraded.name, desc));
+                            self.status_message = format!("Replaced {} with {}", old_name, upgraded.name);
+                        }
+                    }
+                }
+                "ARCHAIC_TOOTH" => {
+                    // Replace a random Basic-rarity card in the deck with a random Ancient card.
+                    use crate::domain::card::Rarity;
+                    use rand::seq::SliceRandom;
+                    if let Some(ref mut run) = self.run {
+                        let basic_idx = run.deck.iter().position(|c| c.rarity == Rarity::Basic);
+                        if let Some(idx) = basic_idx {
+                            let removed = run.deck.remove(idx);
+                            let ancient_cards: Vec<&crate::domain::card::Card> = self.class_cards.iter()
+                                .filter(|c| c.rarity == Rarity::Ancient)
+                                .collect();
+                            if let Some(card) = ancient_cards.choose(rng) {
+                                let added_name = card.name.clone();
+                                run.deck.push((*card).clone());
+                                self.status_message = format!("Transformed {} into {}", removed.name, added_name);
+                            } else {
+                                run.deck.insert(idx, removed);
+                                self.status_message = "No Ancient cards available".to_string();
+                            }
+                        } else {
+                            self.status_message = "No Basic cards to transform".to_string();
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(ref mut run) = self.run {
+                        let desc = relic.description.clone().unwrap_or_default();
+                        run.relics.push(crate::domain::run::Relic::new(&relic.name, desc));
+                    }
+                    self.status_message = format!("Took boon: {}", relic.name);
+                }
             }
-            self.status_message = format!("Took boon: {}", relic.name);
         }
         self.ancient_boons.clear();
 
@@ -1604,6 +1731,7 @@ impl App {
         self.map_ev = None;
         self.run_ev = None;
         self.path_choices.clear();
+        self.path_projections.clear();
         self.open_ancient_boon(next_sub_act, true, rng);
     }
 
@@ -1635,6 +1763,7 @@ impl App {
                 self.map_ev = None;
                 self.run_ev = None;
                 self.path_choices.clear();
+                self.path_projections.clear();
                 self.ancient_had_darv_act2 = false;
                 self.selected_row = 0;
                 self.mode = if self.characters.is_empty() {
@@ -1661,7 +1790,31 @@ impl App {
 /// Return 3 random cards from the current character's pool as a simulated reward.
 fn card_pool_for_run(app: &App) -> Vec<Card> {
     let color = app.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
-    catalog::cards_for_character(color)
+    let mut pool = catalog::cards_for_character(color);
+
+    let has_relic = |name: &str| {
+        app.run.as_ref().map(|r| r.relics.iter().any(|rel| rel.name == name)).unwrap_or(false)
+    };
+
+    // Dingy Rug: card rewards can contain Colorless cards.
+    if has_relic("Dingy Rug") {
+        pool.extend(catalog::colorless::all_cards());
+    }
+
+    // Prismatic Gem: card rewards contain cards from all other classes.
+    if has_relic("Prismatic Gem") {
+        for other_color in &["ironclad", "silent", "regent", "necrobinder", "defect"] {
+            if *other_color != color {
+                pool.extend(catalog::cards_for_character(other_color));
+            }
+        }
+        // Prismatic Gem also implicitly enables colorless (if not already added).
+        if !has_relic("Dingy Rug") {
+            pool.extend(catalog::colorless::all_cards());
+        }
+    }
+
+    pool
 }
 
 /// Pick a rarity for a shop card: 54% Common, 37% Uncommon, 9% Rare.
@@ -1705,6 +1858,18 @@ fn relic_price(rarity: &str, rng: &mut impl rand::Rng) -> u32 {
         "Uncommon Relic" => rng.gen_range(191..=259),
         "Rare Relic"     => rng.gen_range(234..=316),
         _                => rng.gen_range(149..=201),
+    }
+}
+
+/// Map a character's starter relic name to the upgraded relic API ID.
+fn starter_relic_upgrade(class: &PlayerClass) -> (&'static str, &'static str) {
+    match class {
+        PlayerClass::Ironclad    => ("Burning Blood",    "BLACK_BLOOD"),
+        PlayerClass::Silent      => ("Ring of the Snake","RING_OF_THE_DRAKE"),
+        PlayerClass::Regent      => ("Divine Right",     "DIVINE_DESTINY"),
+        PlayerClass::Necrobinder => ("Bound Phylactery", "PHYLACTERY_UNBOUND"),
+        PlayerClass::Defect      => ("Cracked Core",     "INFUSED_CORE"),
+        PlayerClass::Watcher     => ("Pure Water",       "PURE_WATER"),
     }
 }
 
@@ -1951,7 +2116,7 @@ mod tests {
 
     #[test]
     fn j_k_navigation_in_encounter_list() {
-        use crate::data::api::{ApiEncounterMonster, SpireApiEncounter};
+        use crate::data::api::SpireApiEncounter;
         let make_enc = |id: &str| SpireApiEncounter {
             id: id.into(),
             name: id.into(),
@@ -1997,8 +2162,9 @@ mod tests {
 
     fn make_offer(app: &App, rng: &mut StdRng) -> Vec<Card> {
         let pool = card_pool_for_run(app);
-        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
-        sample_offer(&pool, RewardKind::Monster, &mut offset, rng)
+        let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5.0);
+        let asc = app.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+        sample_offer(&pool, RewardKind::Monster, &mut offset, asc, rng)
     }
 
     #[test]

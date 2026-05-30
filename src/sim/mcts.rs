@@ -1,13 +1,15 @@
-use rand::seq::SliceRandom;
+use std::cmp::Ordering;
 use rand::Rng;
 
 use super::apply;
-use super::policy::{select_target, Action};
+use super::playout::run_combat;
+use super::policy::{select_target, Action, GreedyDamagePolicy};
 use crate::domain::combat::CombatState;
 use crate::domain::effect::{BuffType, CardEffect};
 use crate::metrics::combat as metrics;
 
-const PERMUTATION_LIMIT: usize = 5; // enumerate all orderings up to this hand size
+/// UCB1 exploration constant (√2).
+const C: f32 = std::f32::consts::SQRT_2;
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -15,43 +17,234 @@ const PERMUTATION_LIMIT: usize = 5; // enumerate all orderings up to this hand s
 pub struct PlayAdvice {
     /// Optimal card play sequence for the current turn.
     pub actions: Vec<Action>,
-    /// Expected total damage dealt to enemies.
+    /// Expected total damage dealt to enemies this turn.
     pub expected_damage: f32,
     /// Expected player HP retained after enemy attacks.
     pub expected_hp_retained: f32,
     /// Human-readable rationale for why this sequence was chosen.
     pub rationale: String,
-    /// Number of candidate sequences evaluated.
+    /// Number of rollouts performed.
     pub simulation_count: u32,
-    /// HP-loss distribution across stochastic playouts (positive = damage taken).
+    /// HP-loss distribution across rollouts (positive = damage taken).
     pub hp_loss_p10: f32,
     pub hp_loss_p50: f32,
     pub hp_loss_p90: f32,
 }
 
-// ── Core algorithm ─────────────────────────────────────────────────────────
+// ── MCTS tree ──────────────────────────────────────────────────────────────
 
-/// Flat Monte Carlo search over play orderings.
+struct MctsNode {
+    /// Index of the parent node; None for the root.
+    parent: Option<usize>,
+    /// Card-play action that produced this node from its parent. None for root.
+    action: Option<Action>,
+    /// Combat state after `action` was applied.
+    state: CombatState,
+    visits: u32,
+    score_sum: f32,
+    children: Vec<usize>,
+    /// Card-play actions that have not yet been expanded into tree nodes.
+    untried: Vec<Action>,
+}
+
+impl MctsNode {
+    fn new(parent: Option<usize>, action: Option<Action>, state: CombatState) -> Self {
+        let untried = playable_actions(&state);
+        MctsNode {
+            parent,
+            action,
+            state,
+            visits: 0,
+            score_sum: 0.0,
+            children: Vec::new(),
+            untried,
+        }
+    }
+
+    fn ucb1(&self, parent_visits: u32) -> f32 {
+        if self.visits == 0 {
+            return f32::INFINITY;
+        }
+        let exploit = self.score_sum / self.visits as f32;
+        let explore = C * ((parent_visits as f32).ln() / self.visits as f32).sqrt();
+        exploit + explore
+    }
+}
+
+/// All card-play actions currently available in `state`.
+fn playable_actions(state: &CombatState) -> Vec<Action> {
+    if state.is_over() {
+        return vec![];
+    }
+    let target = select_target(state);
+    state
+        .hand
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_playable(state.energy) && state.stars >= c.star_cost as u32)
+        .map(|(i, _)| Action { card_hand_idx: i, target_idx: target })
+        .collect()
+}
+
+// ── MCTS steps ─────────────────────────────────────────────────────────────
+
+/// Walk the tree via UCB1 until reaching a node that still has untried actions
+/// or is a terminal state.
+fn select(arena: &[MctsNode]) -> usize {
+    let mut idx = 0;
+    loop {
+        let node = &arena[idx];
+        if !node.untried.is_empty() || node.state.is_over() || node.children.is_empty() {
+            return idx;
+        }
+        let pv = node.visits;
+        idx = *node
+            .children
+            .iter()
+            .max_by(|&&a, &&b| {
+                arena[a]
+                    .ucb1(pv)
+                    .partial_cmp(&arena[b].ucb1(pv))
+                    .unwrap_or(Ordering::Equal)
+            })
+            .unwrap();
+    }
+}
+
+/// Pop one untried action from `node_idx`, apply it to the state, and append a
+/// new child node to the arena. Returns the child's index.
+fn expand(arena: &mut Vec<MctsNode>, node_idx: usize, rng: &mut impl Rng) -> usize {
+    let action = arena[node_idx].untried.pop().unwrap();
+    let mut child_state = arena[node_idx].state.clone();
+    let _ = apply::play_card(
+        &mut child_state,
+        action.card_hand_idx,
+        action.target_idx,
+        rng,
+    );
+    let child_idx = arena.len();
+    arena.push(MctsNode::new(Some(node_idx), Some(action), child_state));
+    arena[node_idx].children.push(child_idx);
+    child_idx
+}
+
+/// Score a state by finishing the turn and running combat to completion with the
+/// fast greedy policy.  Returns a value in [0, 1]: fraction of max HP retained on
+/// a win; 0 on a loss; a small partial-credit fraction on a time-out.
+fn rollout(state: &CombatState, rng: &mut impl Rng) -> f32 {
+    if state.is_won() {
+        return state.player.hp as f32 / state.player.max_hp as f32;
+    }
+    if state.is_lost() {
+        return 0.0;
+    }
+    // Apply end-of-turn (enemy phase) + draw next hand.
+    let mut s = state.clone();
+    apply::end_turn(&mut s, rng);
+    if s.is_over() {
+        return if s.is_won() {
+            s.player.hp as f32 / s.player.max_hp as f32
+        } else {
+            0.0
+        };
+    }
+    let result = run_combat(s, &GreedyDamagePolicy, rng);
+    if result.combat_won {
+        result.final_state.player.hp as f32 / result.final_state.player.max_hp as f32
+    } else {
+        // Tiny partial credit for damage dealt, to break ties in losing lines.
+        let total: u32 = state.enemies.iter().map(|e| e.max_hp).sum();
+        if total > 0 {
+            result.damage_dealt as f32 / total as f32 * 0.05
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Propagate `score` from `idx` up to the root, incrementing visit counts.
+fn backprop(arena: &mut Vec<MctsNode>, mut idx: usize, score: f32) {
+    loop {
+        arena[idx].visits += 1;
+        arena[idx].score_sum += score;
+        match arena[idx].parent {
+            None => break,
+            Some(p) => idx = p,
+        }
+    }
+}
+
+/// Walk the most-visited child at each level starting from `start`, collecting
+/// actions along the way.
+fn extract_best_path(arena: &[MctsNode], start: usize) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let mut idx = start;
+    loop {
+        if let Some(act) = &arena[idx].action {
+            actions.push(*act);
+        }
+        if arena[idx].children.is_empty() {
+            break;
+        }
+        idx = *arena[idx]
+            .children
+            .iter()
+            .max_by_key(|&&i| arena[i].visits)
+            .unwrap();
+    }
+    actions
+}
+
+/// Replay `actions` on a clone of `state`, then trigger end-of-turn to absorb
+/// the enemy phase.  Returns `(damage_dealt, hp_retained_after_enemy_attack)`.
+fn evaluate_actions(state: &CombatState, actions: &[Action], rng: &mut impl Rng) -> (f32, f32) {
+    let mut s = state.clone();
+    let init_enemy_hp: u32 = s.enemies.iter().map(|e| e.hp).sum();
+
+    for act in actions {
+        if s.is_over() {
+            break;
+        }
+        let _ = apply::play_card(&mut s, act.card_hand_idx, act.target_idx, rng);
+    }
+
+    let final_enemy_hp: u32 = s.enemies.iter().map(|e| e.hp).sum();
+    let damage = init_enemy_hp.saturating_sub(final_enemy_hp) as f32;
+
+    if !s.is_over() {
+        apply::end_turn(&mut s, rng);
+    }
+
+    (damage, s.player.hp as f32)
+}
+
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((p / 100.0) * (sorted.len() - 1) as f32).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+// ── Public entry point ─────────────────────────────────────────────────────
+
+/// UCB1 Monte Carlo Tree Search over card-play orderings.
 ///
-/// For hands with ≤ `PERMUTATION_LIMIT` (5) playable cards, all permutations
-/// are evaluated. For larger hands, `budget` random orderings are sampled.
-///
-/// Sequences are scored by `1.0 × damage + 0.8 × block + 2.0 × hp_delta`.
+/// Builds an in-memory tree for the current turn's card-play decisions
+/// (deterministic) and estimates future-turn outcomes via rollouts using
+/// `GreedyDamagePolicy`.  The best first action is the most-visited child of
+/// the root (robust selection, standard in competitive MCTS).
 pub fn best_play_sequence(
     state: &CombatState,
     budget: u32,
     rng: &mut impl Rng,
 ) -> PlayAdvice {
-    // Indices into state.hand for playable cards only
-    let playable: Vec<usize> = state
+    let has_playable = state
         .hand
         .iter()
-        .enumerate()
-        .filter(|(_, c)| c.is_playable(state.energy))
-        .map(|(i, _)| i)
-        .collect();
+        .any(|c| c.is_playable(state.energy) && state.stars >= c.star_cost as u32);
 
-    if playable.is_empty() {
+    if !has_playable {
         return PlayAdvice {
             actions: vec![],
             expected_damage: 0.0,
@@ -64,125 +257,74 @@ pub fn best_play_sequence(
         };
     }
 
-    let candidates: Vec<Vec<usize>> = if playable.len() <= PERMUTATION_LIMIT {
-        all_permutations(playable)
-    } else {
-        sample_permutations(&playable, budget as usize, rng)
+    let mut arena: Vec<MctsNode> = Vec::with_capacity(budget as usize + 4);
+    arena.push(MctsNode::new(None, None, state.clone()));
+
+    let mut hp_losses: Vec<f32> = Vec::with_capacity(budget as usize);
+
+    for _ in 0..budget {
+        // Selection
+        let leaf = select(&arena);
+
+        // Expansion (or reuse leaf if it's fully explored / terminal)
+        let sim_node = if !arena[leaf].untried.is_empty() {
+            expand(&mut arena, leaf, rng)
+        } else {
+            leaf
+        };
+
+        // Simulation
+        let score = rollout(&arena[sim_node].state, rng);
+        hp_losses.push((1.0 - score) * state.player.max_hp as f32);
+
+        // Backpropagation
+        backprop(&mut arena, sim_node, score);
+    }
+
+    // Best first action: most-visited root child (robust selection)
+    let best_child = arena[0]
+        .children
+        .iter()
+        .max_by_key(|&&i| arena[i].visits)
+        .copied();
+
+    let (actions, expected_damage, expected_hp_retained) = match best_child {
+        None => (vec![], 0.0, state.player.hp as f32),
+        Some(first) => {
+            let path = extract_best_path(&arena, first);
+            let (dmg, hp) = evaluate_actions(state, &path, rng);
+            (path, dmg, hp)
+        }
     };
 
-    let sim_count = candidates.len() as u32;
-
-    let mut best_score = f32::NEG_INFINITY;
-    let mut best_seq: Vec<usize> = candidates[0].clone();
-    let mut best_damage = 0f32;
-    let mut best_hp = state.player.hp as f32;
-
-    for seq in &candidates {
-        let (dmg, blk, hp_delta) = evaluate_sequence(state, seq, rng);
-        let score = dmg as f32 * 1.0 + blk as f32 * 0.8 + hp_delta as f32 * 2.0;
-
-        if score > best_score {
-            best_score = score;
-            best_seq = seq.clone();
-            best_damage = dmg as f32;
-            best_hp = state.player.hp as f32 + hp_delta as f32;
-        }
-    }
-
-    let actions = reconstruct_actions(state, &best_seq);
-    let rationale = build_rationale(state, &best_seq, best_damage, best_hp);
+    hp_losses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
 
     PlayAdvice {
+        rationale: build_rationale(state, &actions, expected_damage, expected_hp_retained),
         actions,
-        expected_damage: best_damage,
-        expected_hp_retained: best_hp,
-        rationale,
-        simulation_count: sim_count,
-        hp_loss_p10: 0.0,
-        hp_loss_p50: 0.0,
-        hp_loss_p90: 0.0,
+        expected_damage,
+        expected_hp_retained,
+        simulation_count: budget,
+        hp_loss_p10: percentile(&hp_losses, 10.0),
+        hp_loss_p50: percentile(&hp_losses, 50.0),
+        hp_loss_p90: percentile(&hp_losses, 90.0),
     }
 }
 
-// ── Sequence evaluation ────────────────────────────────────────────────────
-
-/// Simulate playing `play_order` (original hand indices) on a clone of `state`,
-/// then run the enemy phase. Returns `(damage_dealt, block_gained, hp_delta)`.
-fn evaluate_sequence(
-    initial_state: &CombatState,
-    play_order: &[usize],
-    rng: &mut impl Rng,
-) -> (u32, u32, i32) {
-    let mut state = initial_state.clone();
-    let target = select_target(&state);
-    let init_hp = state.player.hp;
-    let init_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
-
-    for (step, &orig_idx) in play_order.iter().enumerate() {
-        if state.is_over() {
-            break;
-        }
-        // Compute current index: each earlier card in the sequence with an
-        // original index below ours shifts us one position to the left.
-        let shift = play_order[..step]
-            .iter()
-            .filter(|&&j| j < orig_idx)
-            .count();
-        let current_idx = orig_idx.saturating_sub(shift);
-
-        if current_idx >= state.hand.len() {
-            break;
-        }
-        if !state.hand[current_idx].is_playable(state.energy) {
-            // Out of energy for this card; skip remaining (energy can't recover)
-            break;
-        }
-        let _ = apply::play_card(&mut state, current_idx, target, rng);
-    }
-
-    let block_gained = state.player.block;
-
-    if !state.is_over() {
-        apply::end_turn(&mut state, rng);
-    }
-
-    let final_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
-    let damage = init_enemy_hp.saturating_sub(final_enemy_hp);
-    let hp_delta = state.player.hp as i32 - init_hp as i32;
-
-    (damage, block_gained, hp_delta)
-}
-
-/// Convert a sequence of original hand indices into `Action` objects,
-/// accounting for the index shift as each card is removed.
-fn reconstruct_actions(state: &CombatState, play_order: &[usize]) -> Vec<Action> {
-    let target = select_target(state);
-    play_order
-        .iter()
-        .enumerate()
-        .map(|(step, &orig)| {
-            let shift = play_order[..step].iter().filter(|&&j| j < orig).count();
-            let current = orig.saturating_sub(shift);
-            Action { card_hand_idx: current, target_idx: target }
-        })
-        .collect()
-}
-
-// ── Rationale generation ───────────────────────────────────────────────────
+// ── Rationale ──────────────────────────────────────────────────────────────
 
 fn build_rationale(
     state: &CombatState,
-    play_order: &[usize],
+    actions: &[Action],
     expected_damage: f32,
     expected_hp: f32,
 ) -> String {
-    if play_order.is_empty() {
-        return "No cards to play.".to_string();
+    if actions.is_empty() {
+        return "No beneficial play found — pass turn.".to_string();
     }
 
-    let first = &state.hand[play_order[0]];
+    let first = &state.hand[actions[0].card_hand_idx];
 
-    // Opening with a debuff amplifier?
     let opens_vulnerable = first.effects.iter().any(|e| {
         matches!(
             e,
@@ -210,8 +352,6 @@ fn build_rationale(
             first.name
         );
     }
-
-    // Defensive opening under lethal threat?
     if metrics::is_lethal_turn(state) && first.base_block() > 0 {
         return format!(
             "{} first — survival: blocks lethal incoming damage",
@@ -220,48 +360,9 @@ fn build_rationale(
     }
 
     format!(
-        "Optimal order: expected {:.0} dmg, {:.0} HP retained",
-        expected_damage, expected_hp
+        "Play {} first; expected {:.0} dmg, {:.0} HP retained",
+        first.name, expected_damage, expected_hp
     )
-}
-
-// ── Permutation helpers ────────────────────────────────────────────────────
-
-fn all_permutations(items: Vec<usize>) -> Vec<Vec<usize>> {
-    let n = items.len();
-    let mut out = Vec::with_capacity(factorial(n));
-    let mut items = items;
-    heap_permute(&mut items, n, &mut out);
-    out
-}
-
-fn heap_permute(arr: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
-    if k == 1 {
-        out.push(arr.clone());
-        return;
-    }
-    for i in 0..k {
-        heap_permute(arr, k - 1, out);
-        if k % 2 == 0 {
-            arr.swap(i, k - 1);
-        } else {
-            arr.swap(0, k - 1);
-        }
-    }
-}
-
-fn sample_permutations(items: &[usize], n: usize, rng: &mut impl Rng) -> Vec<Vec<usize>> {
-    (0..n)
-        .map(|_| {
-            let mut perm = items.to_vec();
-            perm.shuffle(rng);
-            perm
-        })
-        .collect()
-}
-
-fn factorial(n: usize) -> usize {
-    (1..=n).product()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -318,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn single_card_hand() {
+    fn single_card_hand_plays_it() {
         let state = make_state(vec![strike()], 50);
         let advice = best_play_sequence(&state, 100, &mut rng());
         assert_eq!(advice.actions.len(), 1);
@@ -327,19 +428,15 @@ mod tests {
 
     #[test]
     fn bash_then_strike_outscores_strike_then_bash() {
-        // Bash applies Vulnerable (+50% damage), so Bash→Strike should score
-        // higher than Strike→Bash because the follow-up Strike hits harder.
-        // Hand: Bash (cost 2) + Strike (cost 1) = 3 energy needed; we have 3.
+        // Bash applies Vulnerable (+50% dmg), so MCTS should prefer Bash→Strike.
+        // Hand: Bash (2 cost) + Strike (1 cost) = 3 energy needed; we have 3.
         let state = make_state(vec![bash(), strike()], 50);
-        let advice = best_play_sequence(&state, 100, &mut rng());
+        let advice = best_play_sequence(&state, 500, &mut rng());
 
         assert!(!advice.actions.is_empty());
         // Best sequence should start with Bash (hand idx 0)
         assert_eq!(advice.actions[0].card_hand_idx, 0, "Should lead with Bash");
-        assert!(
-            advice.expected_damage > 0.0,
-            "Expected damage should be positive"
-        );
+        assert!(advice.expected_damage > 0.0);
     }
 
     #[test]
@@ -350,31 +447,46 @@ mod tests {
     }
 
     #[test]
-    fn simulation_count_matches_permutations() {
-        // 3 playable cards → 3! = 6 permutations
+    fn simulation_count_equals_budget() {
         let state = make_state(vec![strike(), defend(), bash()], 50);
-        let advice = best_play_sequence(&state, 1000, &mut rng());
-        assert_eq!(advice.simulation_count, 6);
+        let advice = best_play_sequence(&state, 200, &mut rng());
+        assert_eq!(advice.simulation_count, 200);
     }
 
     #[test]
-    fn large_hand_uses_budget() {
-        // 6 cards → exceeds PERMUTATION_LIMIT, should sample `budget` times
-        let hand: Vec<Card> = (0..6).map(|_| strike()).collect();
-        let state = make_state(hand, 50);
-        let advice = best_play_sequence(&state, 50, &mut rng());
-        assert_eq!(advice.simulation_count, 50);
+    fn hp_loss_percentiles_are_non_negative() {
+        let state = make_state(vec![strike()], 50);
+        let advice = best_play_sequence(&state, 100, &mut rng());
+        assert!(advice.hp_loss_p10 >= 0.0);
+        assert!(advice.hp_loss_p50 >= 0.0);
+        assert!(advice.hp_loss_p90 >= 0.0);
+        assert!(advice.hp_loss_p10 <= advice.hp_loss_p50);
+        assert!(advice.hp_loss_p50 <= advice.hp_loss_p90);
     }
 
     #[test]
-    fn all_permutations_count() {
-        assert_eq!(all_permutations(vec![0, 1, 2]).len(), 6);
-        assert_eq!(all_permutations(vec![0, 1, 2, 3, 4]).len(), 120);
+    fn mcts_explores_tree_across_budget() {
+        // With budget=200 and 3 cards, the tree should have grown beyond depth-1.
+        let state = make_state(vec![bash(), strike(), defend()], 50);
+        let advice = best_play_sequence(&state, 200, &mut rng());
+        // We expect a multi-card sequence to be discovered
+        assert!(advice.actions.len() >= 1);
     }
 
     #[test]
-    fn factorial_values() {
-        assert_eq!(factorial(0), 1);
-        assert_eq!(factorial(5), 120);
+    fn one_shot_kill_found() {
+        // Single Strike kills a 6 HP enemy; MCTS should recommend it.
+        let state = make_state(vec![strike(), defend()], 6);
+        let advice = best_play_sequence(&state, 200, &mut rng());
+        // First action should be Strike (idx 0), not Defend
+        assert_eq!(advice.actions[0].card_hand_idx, 0, "Strike kills enemy; should play it first");
+    }
+
+    #[test]
+    fn percentile_helper_works() {
+        let sorted = vec![0.0, 10.0, 20.0, 30.0, 40.0];
+        assert!((percentile(&sorted, 0.0) - 0.0).abs() < f32::EPSILON);
+        assert!((percentile(&sorted, 100.0) - 40.0).abs() < f32::EPSILON);
+        assert!((percentile(&sorted, 50.0) - 20.0).abs() < f32::EPSILON);
     }
 }

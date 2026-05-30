@@ -36,6 +36,7 @@ impl ResidualStore {
     }
 
     /// All recorded residuals.
+    #[allow(dead_code)]
     pub fn records(&self) -> &[ActResidual] { &self.records }
 
     /// Calibration summary for one sub-act: (mean_error, sample_count).

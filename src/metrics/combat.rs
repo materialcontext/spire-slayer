@@ -4,6 +4,7 @@ use crate::domain::effect::{BuffType, CardEffect};
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn strength_adjusted(base: u32, strength: i32) -> u32 {
     if strength >= 0 {
         base + strength as u32
@@ -12,6 +13,7 @@ fn strength_adjusted(base: u32, strength: i32) -> u32 {
     }
 }
 
+#[allow(dead_code)]
 fn apply_modifiers(raw: u32, weak: bool, vulnerable: bool) -> u32 {
     let after_weak = if weak { raw * 3 / 4 } else { raw };
     if vulnerable { after_weak * 3 / 2 } else { after_weak }
@@ -20,6 +22,7 @@ fn apply_modifiers(raw: u32, weak: bool, vulnerable: bool) -> u32 {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Damage a card deals to a single target, accounting for Strength, Weak, and Vulnerable.
+#[allow(dead_code)]
 pub fn effective_damage(card: &Card, player: &PlayerState, target: &EnemyState) -> u32 {
     let strength = player.buff(&BuffType::Strength);
     let weak = player.buff(&BuffType::Weak) > 0;
@@ -43,6 +46,7 @@ pub fn effective_damage(card: &Card, player: &PlayerState, target: &EnemyState) 
 }
 
 /// Block a card provides, accounting for Dexterity and Frail.
+#[allow(dead_code)]
 pub fn effective_block(card: &Card, player: &PlayerState) -> u32 {
     let dex = player.buff(&BuffType::Dexterity).max(0) as u32;
     let frail = player.buff(&BuffType::Frail) > 0;
@@ -92,6 +96,7 @@ pub fn is_lethal_turn(state: &CombatState) -> bool {
 }
 
 /// Fraction of max HP the player currently has (0.0–1.0).
+#[allow(dead_code)]
 pub fn survivability(state: &CombatState) -> f32 {
     if state.player.max_hp == 0 {
         return 0.0;
@@ -100,6 +105,7 @@ pub fn survivability(state: &CombatState) -> f32 {
 }
 
 /// Total damage available from cards in hand against the primary living enemy.
+#[allow(dead_code)]
 pub fn kill_potential(state: &CombatState) -> u32 {
     let Some(target) = state.enemies.iter().find(|e| e.is_alive()) else {
         return 0;

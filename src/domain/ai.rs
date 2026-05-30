@@ -363,7 +363,6 @@ mod tests {
 
     #[test]
     fn move_block_is_captured() {
-        use crate::data::api::ApiMonsterMove;
         let mut m = api_move("DEFEND_MOVE", 0);
         m.intent = Some("Defend".into());
         m.block = Some(8);

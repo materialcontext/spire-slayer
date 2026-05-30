@@ -5,7 +5,7 @@ use crate::domain::card::Card;
 use crate::domain::encounter::normalize_act;
 use crate::domain::map::ActMap;
 use crate::metrics::deck_dash::compute_deck_stats;
-use crate::metrics::map_ev::{post_act_heal_hp, POST_ACT_HEAL_ASCENSION_THRESHOLD};
+use crate::metrics::map_ev::post_act_heal_hp;
 use crate::metrics::path_ev::{compute_path_choices, NodeCosts};
 
 // ── Act structure ──────────────────────────────────────────────────────────
@@ -46,6 +46,7 @@ pub fn acts_after(current_sub_act: &str) -> Vec<(&'static str, u8)> {
 // ── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FutureActEv {
     pub sub_act: String,
     pub act_number: u8,
@@ -112,9 +113,9 @@ fn act_node_costs(
     let boss_enc   = filter("Boss");
     let has_data   = !normal_enc.is_empty() || !boss_enc.is_empty();
 
-    let ns = compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, rng);
-    let es = compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc,  all_monsters, relics, rng);
-    let bs = compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc,   all_monsters, relics, rng);
+    let ns = compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, ascension, rng);
+    let es = compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc,  all_monsters, relics, ascension, rng);
+    let bs = compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc,   all_monsters, relics, ascension, rng);
 
     let mut costs = NodeCosts::defaults(max_hp, ascension);
     if has_data {
@@ -124,10 +125,10 @@ fn act_node_costs(
     }
 
     let event_hp = crate::metrics::map_ev::compute_event_hp_delta(
-        all_events, sub_act, deck, hp, max_hp, all_encounters, all_monsters, relics, rng,
+        all_events, sub_act, deck, hp, max_hp, all_encounters, all_monsters, relics, ascension, rng,
     );
     let shop_hp = crate::metrics::shop_ev::compute_shop_total_value(
-        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, rng,
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, ascension, rng,
     );
     costs.event_hp_delta = event_hp;
     costs.treasure_hp    = 6.0;
@@ -203,14 +204,16 @@ pub fn compute_run_ev(
         };
     }
 
-    let heal_target = post_act_heal_hp(max_hp, ascension);
-
     // Acts that follow the current one, in run order.
     let future = acts_after(current_sub_act);
     let is_final_act = future.is_empty();
 
     // If this is the last act, there's no post-act heal after the boss.
-    let hp_after_current_heal = if is_final_act { hp_after_current_boss } else { heal_target };
+    let hp_after_current_heal = if is_final_act {
+        hp_after_current_boss
+    } else {
+        post_act_heal_hp(hp_after_current_boss.max(0.0) as u32, max_hp, ascension)
+    };
 
     let mut entry_hp = hp_after_current_heal;
     let mut future_acts: Vec<FutureActEv> = Vec::new();
@@ -231,7 +234,7 @@ pub fn compute_run_ev(
         let expected_delta = estimate_act_delta(&costs, ascension, rng);
         let exit_hp = (entry_hp + expected_delta).max(0.0);
         // No post-act heal after the final boss.
-        let post_heal = if is_last { exit_hp } else { heal_target };
+        let post_heal = if is_last { exit_hp } else { post_act_heal_hp(exit_hp.max(0.0) as u32, max_hp, ascension) };
 
         future_acts.push(FutureActEv {
             sub_act: sub_act.to_string(),
@@ -269,6 +272,7 @@ pub fn compute_run_ev(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::map_ev::POST_ACT_HEAL_ASCENSION_THRESHOLD;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -282,10 +286,15 @@ mod tests {
 
     #[test]
     fn post_act_heal_ascension_thresholds() {
-        assert_eq!(post_act_heal_hp(80, 0), 80.0);
-        assert_eq!(post_act_heal_hp(80, 5), 80.0);
-        assert_eq!(post_act_heal_hp(80, POST_ACT_HEAL_ASCENSION_THRESHOLD), 64.0);
-        assert_eq!(post_act_heal_hp(80, 10), 64.0);
+        // Below A2: full heal regardless of current HP
+        assert_eq!(post_act_heal_hp(40, 80, 0), 80.0);
+        assert_eq!(post_act_heal_hp(40, 80, 1), 80.0);
+        // At A2+: 80% of missing HP
+        assert_eq!(post_act_heal_hp(40, 80, 2), 40.0 + (40.0f32 * 0.80).floor());  // = 72.0
+        assert_eq!(post_act_heal_hp(40, 80, POST_ACT_HEAL_ASCENSION_THRESHOLD), 72.0);
+        assert_eq!(post_act_heal_hp(40, 80, 10), 72.0);
+        // Full HP: missing = 0, no healing
+        assert_eq!(post_act_heal_hp(80, 80, 10), 80.0);
     }
 
     #[test]

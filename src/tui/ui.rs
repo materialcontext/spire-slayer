@@ -796,6 +796,7 @@ fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(2),  // title
             Constraint::Min(6),     // character list + detail
+            Constraint::Length(2),  // ascension bar
             Constraint::Length(1),  // hint
         ])
         .split(area);
@@ -886,9 +887,19 @@ fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
         rows[1],
     );
 
-    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [q] quit")
+    // Ascension bar
+    let asc_n = app.ascension_cursor;
+    let asc_label = if asc_n == 0 { "Normal".to_string() } else { format!("A{}", asc_n) };
+    let asc_bar = Paragraph::new(Line::from(vec![
+        Span::raw("  Ascension "),
+        Span::styled(asc_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("  [a/d to change]"),
+    ]));
+    frame.render_widget(asc_bar, rows[2]);
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [a/d] ascension  [q] quit")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[2]);
+    frame.render_widget(hint, rows[3]);
 }
 
 /// Summarize a starting deck as "Strike ×5  Defend ×4  Bash ×1".
@@ -1047,7 +1058,7 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::domain::map::{ActMap, MapPos, RoomType, COLS, ROWS};
+    use crate::domain::map::{MapPos, COLS, ROWS};
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1184,28 +1195,74 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             let rt_label = map.room_type(cf, col as usize)
                 .map(|r| r.label())
                 .unwrap_or("?");
-            // Annotate with path HP cost if available
-            let path_info = app.path_choices.iter().find(|pc| pc.col == col);
-            let path_str = path_info.map(|pc| {
-                let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
-                format!("{sign}{:.0}hp +{:.0}g", pc.total_hp_delta, pc.expected_gold)
-            }).unwrap_or_default();
-            let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
-            let label = if path_str.is_empty() {
-                format!(" col{}[{}] ", col, rt_label)
-            } else if best_marker {
-                format!(" col{}[{}] {} ▲ ", col, rt_label, path_str)
-            } else {
-                format!(" col{}[{}] {} ", col, rt_label, path_str)
-            };
             let is_cursor = i == app.map_cursor;
-            let style = if is_cursor {
-                Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
-            } else if best_marker {
-                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+
+            // Prefer full-run projection data; fall back to simple delta.
+            let proj = app.path_projections.iter().find(|p| p.col == col);
+            let label: String;
+            let style: Style;
+
+            if let Some(p) = proj {
+                let outcome = if p.likely_win {
+                    "WIN".to_string()
+                } else if let Some(ref dl) = p.death_label {
+                    format!("☠{dl}")
+                } else {
+                    "?".to_string()
+                };
+                // Boss HP summary: only show acts where boss was reached.
+                let boss_parts: Vec<String> = p.boss_entry_hp.iter().enumerate()
+                    .filter(|&(_, &hp)| hp > 0)
+                    .map(|(ai, &hp)| {
+                        let beat = p.boss_defeated[ai];
+                        if beat { format!("A{}:{hp}✓", ai + 1) }
+                        else    { format!("A{}:{hp}✗", ai + 1) }
+                    })
+                    .collect();
+                let boss_str = if boss_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", boss_parts.join(" "))
+                };
+                let gold_str = format!(" +{}g", p.gold_earned);
+                label = if is_cursor {
+                    format!(" col{}[{}] {}{}{} ", col, rt_label, outcome, boss_str, gold_str)
+                } else {
+                    format!(" col{}[{}] {}{}{} ", col, rt_label, outcome, boss_str, gold_str)
+                };
+                style = if is_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+                } else if p.likely_win {
+                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                } else if p.boss_defeated[0] {
+                    Style::default().fg(Color::LightYellow)
+                } else {
+                    Style::default().fg(Color::LightRed)
+                };
             } else {
-                Style::default().fg(Color::LightGreen)
-            };
+                // Fall back to simple path_choices delta display.
+                let path_info = app.path_choices.iter().find(|pc| pc.col == col);
+                let path_str = path_info.map(|pc| {
+                    let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
+                    format!("{sign}{:.0}hp +{:.0}g", pc.total_hp_delta, pc.expected_gold)
+                }).unwrap_or_default();
+                let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
+                label = if path_str.is_empty() {
+                    format!(" col{}[{}] ", col, rt_label)
+                } else if best_marker {
+                    format!(" col{}[{}] {} ▲ ", col, rt_label, path_str)
+                } else {
+                    format!(" col{}[{}] {} ", col, rt_label, path_str)
+                };
+                style = if is_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+                } else if best_marker {
+                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::LightGreen)
+                };
+            }
+
             choice_spans.push(Span::styled(label, style));
         }
         // Show whether costs are from simulation or defaults
@@ -1474,8 +1531,6 @@ fn render_treasure_room(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_shop(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::metrics::map_ev::strip_tags;
-
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

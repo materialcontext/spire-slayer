@@ -37,6 +37,8 @@ pub struct Card {
     pub exhausts: bool,
     pub ethereal: bool,
     pub innate: bool,
+    /// Star cost (Regent's secondary resource). 0 means no star cost.
+    pub star_cost: u8,
 }
 
 impl Card {
@@ -58,6 +60,7 @@ impl Card {
             exhausts: false,
             ethereal: false,
             innate: false,
+            star_cost: 0,
         }
     }
 
