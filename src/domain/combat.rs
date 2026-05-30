@@ -106,6 +106,8 @@ pub struct CombatState {
     pub hp_lost_this_combat: bool,
     pub hp_lost_this_turn: u32,
     pub lizard_tail_triggered: bool,
+    /// Tracks if Fairy in a Bottle has already auto-triggered this combat.
+    pub fairy_triggered: bool,
 }
 
 impl CombatState {
@@ -132,6 +134,7 @@ impl CombatState {
             hp_lost_this_combat: false,
             hp_lost_this_turn: 0,
             lizard_tail_triggered: false,
+            fairy_triggered: false,
         }
     }
 

@@ -2351,9 +2351,13 @@ fn rng_gold(lo: u32, hi: u32, rng: &mut impl rand::Rng) -> u32 {
 
 fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String> {
     run.map(|r| {
-        r.relics.iter()
-            .map(|rel| rel.id.clone())
-            .collect()
+        let mut ids: Vec<String> = r.relics.iter().map(|rel| rel.id.clone()).collect();
+        // Fairy in a Bottle is a potion but acts like a death-trigger; include it so the sim
+        // can model the correct trigger order (Fairy fires before Lizard Tail).
+        if r.potions.iter().any(|s| s.as_ref().map(|p| p.id == "FAIRY_IN_A_BOTTLE").unwrap_or(false)) {
+            ids.push("FAIRY_IN_A_BOTTLE".to_string());
+        }
+        ids
     }).unwrap_or_default()
 }
 
