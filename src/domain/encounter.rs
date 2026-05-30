@@ -181,6 +181,17 @@ pub fn encounter_to_combat(
 ///
 /// Shuffles the deck and deals a starting hand (size adjusted by relics).
 /// Applies start-of-combat relic effects before returning.
+fn scale_intent_damage(intent: Intent, factor: f32) -> Intent {
+    match intent {
+        Intent::Attack(d) => Intent::Attack(((d as f32 * factor).round() as u32).max(d)),
+        Intent::AttackMulti { damage, hits } => Intent::AttackMulti {
+            damage: ((damage as f32 * factor).round() as u32).max(damage),
+            hits,
+        },
+        other => other,
+    }
+}
+
 pub fn encounter_to_combat_with_deck(
     enc: &SpireApiEncounter,
     all_monsters: &[SpireApiMonster],
@@ -188,6 +199,7 @@ pub fn encounter_to_combat_with_deck(
     hp: u32,
     max_hp: u32,
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> CombatState {
     let mut state = encounter_to_combat(enc, all_monsters);
@@ -210,6 +222,27 @@ pub fn encounter_to_combat_with_deck(
     state.draw_pile = draw;
     state.discard_pile.clear();
     state.energy = state.energy_max;
+
+    // A8+: enemies have more HP; A9+: enemies deal more damage
+    if ascension >= 8 {
+        for (i, enc_monster) in enc.monsters.iter().enumerate() {
+            if let Some(enemy) = state.enemies.get_mut(i) {
+                let monster_data = all_monsters.iter().find(|m| m.id == enc_monster.id);
+                let asc_hp = monster_data
+                    .and_then(|m| m.max_hp_ascension)
+                    .map(|h| h.max(1) as u32)
+                    .unwrap_or_else(|| ((enemy.max_hp as f32 * 1.2).round() as u32).max(1));
+                enemy.hp = asc_hp.min(enemy.hp * 2); // cap at 2× to avoid absurd values
+                enemy.max_hp = asc_hp;
+            }
+        }
+    }
+    if ascension >= 9 {
+        for enemy in &mut state.enemies {
+            enemy.intent = scale_intent_damage(enemy.intent.clone(), 1.15);
+        }
+    }
+
     state
 }
 

@@ -53,6 +53,7 @@ pub fn compute_deck_stats(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> DeckStats {
     let pool: Vec<&SpireApiEncounter> = all_encounters
@@ -63,7 +64,7 @@ pub fn compute_deck_stats(
                 && e.room_type.as_deref().map(|rt| rt != "Boss").unwrap_or(true)
         })
         .collect();
-    compute_deck_stats_vs_pool(deck, hp, max_hp, sub_act, &pool, 5, 5, all_monsters, relics, rng)
+    compute_deck_stats_vs_pool(deck, hp, max_hp, sub_act, &pool, 5, 5, all_monsters, relics, ascension, rng)
 }
 
 /// Compute deck statistics against a caller-supplied, pre-filtered encounter pool.
@@ -82,6 +83,7 @@ pub fn compute_deck_stats_vs_pool(
     combats_per_enc: u32,
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> DeckStats {
     let deck_size = deck.len();
@@ -130,7 +132,7 @@ pub fn compute_deck_stats_vs_pool(
 
     for enc in &sampled {
         for _ in 0..combats_per_enc {
-            let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, relics, rng);
+            let state = encounter_to_combat_with_deck(enc, all_monsters, deck, hp, max_hp, relics, ascension, rng);
             let r = run_combat(state, &GreedyDamagePolicy, rng);
             damages.push(r.damage_dealt as f32 / r.turns.max(1) as f32);
             blocks.push(r.block_absorbed as f32 / r.turns.max(1) as f32);
@@ -211,7 +213,7 @@ mod tests {
     fn intrinsics_no_encounters() {
         let mut rng = StdRng::seed_from_u64(7);
         let deck = ironclad::starter_deck();
-        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], 0, &mut rng);
         assert_eq!(stats.deck_size, 10);
         assert!((stats.cycle_turns - 2.0).abs() < 0.01);
         assert_eq!(stats.encounter_count, 0);
@@ -234,7 +236,7 @@ mod tests {
     fn block_card_count_correct() {
         let mut rng = StdRng::seed_from_u64(8);
         let deck = ironclad::starter_deck(); // 4× Defend
-        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let stats = compute_deck_stats(&deck, 80, 80, "overgrowth", &[], &[], &[], 0, &mut rng);
         assert_eq!(stats.block_card_count, 4);
     }
 }

@@ -214,6 +214,7 @@ fn best_upgrade_hp_value(
     relics: &[String],
     baseline_loss: f32,
     has_data: bool,
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> f32 {
     const UPGRADE_HP_HEURISTIC: f32 = 5.0;
@@ -238,7 +239,7 @@ fn best_upgrade_hp_value(
     };
     let mut upgraded_deck = deck.to_vec();
     upgraded_deck[idx] = upgraded_card;
-    let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    let upgraded = compute_deck_stats(&upgraded_deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
     ((baseline_loss - upgraded.mean_hp_loss) * remaining_fights(sub_act)).max(0.0)
 }
 
@@ -259,6 +260,7 @@ pub fn compute_event_hp_delta(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> f32 {
     let pool = events_for_sub_act(sub_act, events);
@@ -267,12 +269,12 @@ pub fn compute_event_hp_delta(
     }
 
     // Pre-compute deck-dependent values once, shared across all options.
-    let baseline = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+    let baseline = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
     let has_data = baseline.encounter_count > 0;
 
     let removal_hp = crate::metrics::shop_ev::compute_removal_hp_value(
         deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
-        baseline.mean_hp_loss, has_data, rng,
+        baseline.mean_hp_loss, has_data, ascension, rng,
     );
 
     // Only simulate upgrade value when at least one event in the pool mentions it.
@@ -283,7 +285,7 @@ pub fn compute_event_hp_delta(
     });
     let upgrade_hp = if pool_text_mentions_upgrade {
         best_upgrade_hp_value(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
-            baseline.mean_hp_loss, has_data, rng)
+            baseline.mean_hp_loss, has_data, ascension, rng)
     } else {
         5.0 // heuristic fallback; never used unless an option mentions "upgrade"
     };
@@ -348,14 +350,16 @@ fn combat_node_ev(
 }
 
 /// Post-act heal target HP.
-/// Below this ascension level the ancient heals to full; at or above it heals to 80 %.
-pub const POST_ACT_HEAL_ASCENSION_THRESHOLD: u8 = 6;
+/// Below this ascension level the ancient heals to full; at or above it heals 80% of missing HP.
+pub const POST_ACT_HEAL_ASCENSION_THRESHOLD: u8 = 2;
 
-pub fn post_act_heal_hp(max_hp: u32, ascension: u8) -> f32 {
+pub fn post_act_heal_hp(current_hp: u32, max_hp: u32, ascension: u8) -> f32 {
     if ascension < POST_ACT_HEAL_ASCENSION_THRESHOLD {
-        max_hp as f32
+        max_hp as f32  // full heal
     } else {
-        (max_hp as f32 * 0.80).floor()
+        // A2+: Ancients heal 80% of missing HP
+        let missing = max_hp.saturating_sub(current_hp) as f32;
+        (current_hp as f32 + (missing * 0.80).floor()).min(max_hp as f32)
     }
 }
 
@@ -363,7 +367,7 @@ pub fn compute_map_ev(
     deck: &[Card],
     hp: u32,
     max_hp: u32,
-    _ascension: u8,
+    ascension: u8,
     sub_act: &str,
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
@@ -389,18 +393,18 @@ pub fn compute_map_ev(
     // Simulate vs. normal (Monster) encounters for this sub-act.
     let normal_enc = by_room("Monster");
     let normal_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &normal_enc, all_monsters, relics, ascension, rng);
 
     // Simulate vs. elite encounters — elites give a guaranteed relic so the
     // star bonus reflects the relic reward even at moderate HP risk.
     let elite_enc = by_room("Elite");
     let elite_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, relics, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &elite_enc, all_monsters, relics, ascension, rng);
 
     // Simulate vs. boss encounters for this sub-act.
     let boss_enc = by_room("Boss");
     let boss_stats =
-        compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, relics, rng);
+        compute_deck_stats(deck, hp, max_hp, sub_act, &boss_enc, all_monsters, relics, ascension, rng);
 
     let normal = combat_node_ev("Normal", "gold + card", &normal_stats, 0);
     let elite_star_bonus: i8 = if elite_stats.survival_rate >= 0.70 { 1 } else { 0 };
@@ -470,11 +474,11 @@ pub fn compute_map_ev(
     };
 
     let event_hp_delta = compute_event_hp_delta(
-        all_events, sub_act, deck, hp, max_hp, all_encounters, all_monsters, relics, rng,
+        all_events, sub_act, deck, hp, max_hp, all_encounters, all_monsters, relics, ascension, rng,
     );
     let treasure_hp = 6.0_f32;
     let shop_hp_value = crate::metrics::shop_ev::compute_shop_total_value(
-        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, rng,
+        deck, hp, max_hp, sub_act, all_encounters, all_monsters, gold, relics, class_cards, ascension, rng,
     );
 
     MapEvData {

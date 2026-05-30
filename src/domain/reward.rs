@@ -26,19 +26,20 @@ pub fn sample_offer(
     pool: &[Card],
     kind: RewardKind,
     rare_offset: &mut i32,
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> Vec<Card> {
     let by_rarity = ByRarity::new(pool);
     (0..3)
         .filter_map(|_| {
-            let rarity = roll_rarity(kind, rare_offset, rng);
+            let rarity = roll_rarity(kind, rare_offset, ascension, rng);
             by_rarity.pick(rarity, rng).cloned()
         })
         .collect()
 }
 
 /// Roll the rarity of a single card, updating the offset.
-fn roll_rarity(kind: RewardKind, rare_offset: &mut i32, rng: &mut impl Rng) -> Rarity {
+fn roll_rarity(kind: RewardKind, rare_offset: &mut i32, ascension: u8, rng: &mut impl Rng) -> Rarity {
     if kind == RewardKind::Boss {
         // Boss rewards are always Rare; offset resets.
         *rare_offset = INITIAL_RARE_OFFSET;
@@ -46,6 +47,8 @@ fn roll_rarity(kind: RewardKind, rare_offset: &mut i32, rng: &mut impl Rng) -> R
     }
 
     let (base_rare, base_uncommon) = base_weights(kind);
+    // A7+: rare cards are less common (halve rare chance)
+    let base_rare = if ascension >= 7 { base_rare / 2 } else { base_rare };
     let effective_rare = (base_rare + *rare_offset).max(0);
     // Roll 0..100 (integer percentages); use gen_range for determinism.
     let roll: i32 = rng.gen_range(0..100);
@@ -121,7 +124,7 @@ mod tests {
     fn sample_offer_returns_three_cards() {
         let pool = ironclad::all_cards();
         let mut offset = INITIAL_RARE_OFFSET;
-        let offer = sample_offer(&pool, RewardKind::Monster, &mut offset, &mut rng());
+        let offer = sample_offer(&pool, RewardKind::Monster, &mut offset, 0, &mut rng());
         assert_eq!(offer.len(), 3);
     }
 
@@ -131,7 +134,7 @@ mod tests {
         let mut offset = INITIAL_RARE_OFFSET;
         let mut rng = rng();
         for _ in 0..20 {
-            let offer = sample_offer(&pool, RewardKind::Boss, &mut offset, &mut rng);
+            let offer = sample_offer(&pool, RewardKind::Boss, &mut offset, 0, &mut rng);
             assert!(offer.iter().all(|c| c.rarity == Rarity::Rare));
         }
     }
@@ -141,7 +144,7 @@ mod tests {
         // Force a rare: offset >= 97 makes effective_rare >= 100, guaranteeing rare.
         let mut offset = 97_i32;
         let mut rng = rng();
-        let result = roll_rarity(RewardKind::Monster, &mut offset, &mut rng);
+        let result = roll_rarity(RewardKind::Monster, &mut offset, 0, &mut rng);
         // effective_rare = 3 + 97 = 100, so any roll < 100 hits rare.
         assert_eq!(result, Rarity::Rare);
         assert_eq!(offset, INITIAL_RARE_OFFSET);
@@ -152,7 +155,7 @@ mod tests {
         // Force a common: effective_rare = 3 + (-3) = 0, so rare impossible.
         let mut offset = -3_i32;
         let mut rng = rng();
-        let result = roll_rarity(RewardKind::Monster, &mut offset, &mut rng);
+        let result = roll_rarity(RewardKind::Monster, &mut offset, 0, &mut rng);
         // roll is in [0,100); effective_rare=0 means nothing hits rare.
         // Uncommon threshold = 0 + 37 = 37.
         match result {
@@ -168,7 +171,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         // Run many offers to push offset past the cap.
         for _ in 0..30 {
-            sample_offer(&pool, RewardKind::Monster, &mut offset, &mut rng);
+            sample_offer(&pool, RewardKind::Monster, &mut offset, 0, &mut rng);
             assert!(offset <= MAX_RARE_OFFSET);
         }
     }
@@ -180,7 +183,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99);
         for _ in 0..100 {
             let mut offset = INITIAL_RARE_OFFSET;
-            let offer = sample_offer(&pool, RewardKind::Monster, &mut offset, &mut rng);
+            let offer = sample_offer(&pool, RewardKind::Monster, &mut offset, 0, &mut rng);
             assert!(
                 offer.iter().all(|c| c.rarity != Rarity::Rare),
                 "first monster offer should never contain a rare (offset starts at -5)"
@@ -199,9 +202,9 @@ mod tests {
 
         for _ in 0..n {
             let mut offset = 10_i32; // same starting offset for both
-            let elite_offer = sample_offer(&pool, RewardKind::Elite, &mut offset, &mut rng);
+            let elite_offer = sample_offer(&pool, RewardKind::Elite, &mut offset, 0, &mut rng);
             let mut offset2 = 10_i32;
-            let monster_offer = sample_offer(&pool, RewardKind::Monster, &mut offset2, &mut rng);
+            let monster_offer = sample_offer(&pool, RewardKind::Monster, &mut offset2, 0, &mut rng);
             elite_rares   += elite_offer.iter().filter(|c| c.rarity == Rarity::Rare).count() as u32;
             monster_rares += monster_offer.iter().filter(|c| c.rarity == Rarity::Rare).count() as u32;
         }

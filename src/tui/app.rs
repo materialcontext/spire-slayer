@@ -1241,6 +1241,7 @@ impl App {
                     &current_relics,
                     baseline_hp_loss,
                     has_data,
+                    ascension,
                     rng,
                 )
             })
@@ -1250,7 +1251,7 @@ impl App {
         let removal_hp = if gold >= removal_price {
             crate::metrics::shop_ev::compute_removal_hp_value(
                 &deck, hp, max_hp, &sub_act, &self.encounters, &self.monsters,
-                &current_relics, baseline_hp_loss, has_data, rng,
+                &current_relics, baseline_hp_loss, has_data, ascension, rng,
             )
         } else {
             0.0
@@ -1420,6 +1421,7 @@ impl App {
             .or_else(|| self.combat.as_ref().map(|c| c.player.max_hp))
             .unwrap_or(80);
         let relics = relic_ids_from_run(self.run.as_ref());
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         self.card_advice = sim_pick_score(
             &offered,
             &deck,
@@ -1429,6 +1431,7 @@ impl App {
             &self.encounters,
             &self.monsters,
             &relics,
+            ascension,
             rng,
         );
         self.offered_cards = offered;
@@ -1509,6 +1512,7 @@ impl App {
             .cloned()
             .collect();
 
+        let ascension = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
         let loss = if pool.is_empty() {
             match room_type {
                 RoomType::Monster => 7,
@@ -1517,7 +1521,7 @@ impl App {
                 _                 => 0,
             }
         } else {
-            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, rng);
+            let stats = compute_deck_stats(&deck, hp, max_hp, &sub_act, &pool, &self.monsters, &relics, ascension, rng);
             stats.mean_hp_loss.round() as u32
         };
 
@@ -2082,7 +2086,8 @@ mod tests {
     fn make_offer(app: &App, rng: &mut StdRng) -> Vec<Card> {
         let pool = card_pool_for_run(app);
         let mut offset = app.run.as_ref().map(|r| r.rare_offset).unwrap_or(-5);
-        sample_offer(&pool, RewardKind::Monster, &mut offset, rng)
+        let asc = app.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+        sample_offer(&pool, RewardKind::Monster, &mut offset, asc, rng)
     }
 
     #[test]

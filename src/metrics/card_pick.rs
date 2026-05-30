@@ -49,6 +49,7 @@ fn eval_gauntlet(
     enc2: &SpireApiEncounter,
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     n: u32,
     rng: &mut impl Rng,
 ) -> GauntletResult {
@@ -56,14 +57,14 @@ fn eval_gauntlet(
     let mut hp_deltas: Vec<i32> = Vec::with_capacity(n as usize);
 
     for _ in 0..n {
-        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, relics, rng);
+        let s1 = encounter_to_combat_with_deck(enc1, all_monsters, deck, hp, max_hp, relics, ascension, rng);
         let r1 = run_combat(s1, &GreedyDamagePolicy, rng);
         if !r1.player_alive {
             hp_deltas.push(-(hp as i32));
             continue;
         }
         let hp2 = r1.final_state.player.hp;
-        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, relics, rng);
+        let s2 = encounter_to_combat_with_deck(enc2, all_monsters, deck, hp2, max_hp, relics, ascension, rng);
         let r2 = run_combat(s2, &GreedyDamagePolicy, rng);
         hp_deltas.push(r1.player_hp_delta + r2.player_hp_delta);
         if r2.player_alive {
@@ -129,6 +130,7 @@ pub fn sim_pick_score(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> Vec<CardAdvice> {
     let pool: Vec<&SpireApiEncounter> = all_encounters
@@ -153,8 +155,8 @@ pub fn sim_pick_score(
 
     // Skip baseline — averaged over both encounter pairs.
     let skip = {
-        let ga = eval_gauntlet(deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, N_PER_PAIR, rng);
-        let gb = eval_gauntlet(deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, N_PER_PAIR, rng);
+        let ga = eval_gauntlet(deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, ascension, N_PER_PAIR, rng);
+        let gb = eval_gauntlet(deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, ascension, N_PER_PAIR, rng);
         avg_gauntlet(ga, gb)
     };
     let skip_score = gauntlet_score(&skip, max_hp);
@@ -166,8 +168,8 @@ pub fn sim_pick_score(
         .map(|(i, card)| {
             let mut new_deck = deck.to_vec();
             new_deck.push(card.clone());
-            let ga = eval_gauntlet(&new_deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, N_PER_PAIR, rng);
-            let gb = eval_gauntlet(&new_deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, N_PER_PAIR, rng);
+            let ga = eval_gauntlet(&new_deck, hp, max_hp, enc_a1, enc_a2, all_monsters, relics, ascension, N_PER_PAIR, rng);
+            let gb = eval_gauntlet(&new_deck, hp, max_hp, enc_b1, enc_b2, all_monsters, relics, ascension, N_PER_PAIR, rng);
             let g = avg_gauntlet(ga, gb);
             let score = gauntlet_score(&g, max_hp);
             CardAdvice {
@@ -372,7 +374,7 @@ mod tests {
     fn sim_pick_fallback_when_no_encounters() {
         let mut rng = StdRng::seed_from_u64(1);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], 0, &mut rng);
         assert!(!advice.is_empty());
         // All scores non-negative when heuristic fallback
         for a in &advice {
@@ -384,7 +386,7 @@ mod tests {
     fn sim_pick_includes_skip_option() {
         let mut rng = StdRng::seed_from_u64(2);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike()], &deck, 80, 80, "overgrowth", &[], &[], &[], 0, &mut rng);
         assert!(advice.iter().any(|a| a.card_index == usize::MAX));
     }
 
@@ -392,7 +394,7 @@ mod tests {
     fn sim_pick_sorted_descending() {
         let mut rng = StdRng::seed_from_u64(3);
         let deck = crate::domain::catalog::ironclad::starter_deck();
-        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], &mut rng);
+        let advice = sim_pick_score(&[strike(), rare_card()], &deck, 80, 80, "overgrowth", &[], &[], &[], 0, &mut rng);
         for w in advice.windows(2) {
             assert!(w[0].score >= w[1].score);
         }

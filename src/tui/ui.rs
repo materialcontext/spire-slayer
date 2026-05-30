@@ -796,6 +796,7 @@ fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(2),  // title
             Constraint::Min(6),     // character list + detail
+            Constraint::Length(2),  // ascension bar
             Constraint::Length(1),  // hint
         ])
         .split(area);
@@ -886,9 +887,19 @@ fn render_character_pick(frame: &mut Frame, app: &App, area: Rect) {
         rows[1],
     );
 
-    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [q] quit")
+    // Ascension bar
+    let asc_n = app.ascension_cursor;
+    let asc_label = if asc_n == 0 { "Normal".to_string() } else { format!("A{}", asc_n) };
+    let asc_bar = Paragraph::new(Line::from(vec![
+        Span::raw("  Ascension "),
+        Span::styled(asc_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("  [a/d to change]"),
+    ]));
+    frame.render_widget(asc_bar, rows[2]);
+
+    let hint = Paragraph::new("  [j/k] navigate  [Enter] select  [a/d] ascension  [q] quit")
         .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(hint, rows[2]);
+    frame.render_widget(hint, rows[3]);
 }
 
 /// Summarize a starting deck as "Strike ×5  Defend ×4  Bash ×1".

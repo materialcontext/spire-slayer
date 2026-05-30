@@ -133,8 +133,13 @@ pub fn simulate_path_choices(
             };
         }
 
-        // Ancient heals to full + boon relic.
-        state.hp = state.max_hp;
+        // Ancient heals (80% of missing at A2+, full below A2) + boon relic.
+        state.hp = if ascension >= 2 {
+            let missing = state.max_hp.saturating_sub(state.hp) as f32;
+            (state.hp as f32 + (missing * 0.80).floor()) as u32
+        } else {
+            state.max_hp
+        };
         credit_hp(&mut state, RELIC_HP_BOON);
 
         // ── Future acts: generated maps ────────────────────────────────────────
@@ -171,8 +176,13 @@ pub fn simulate_path_choices(
                 };
             }
 
-            // Heal to full + ancient boon before next act.
-            state.hp = state.max_hp;
+            // Ancient heals (80% of missing at A2+, full below A2) + boon relic.
+            state.hp = if state.ascension >= 2 {
+                let missing = state.max_hp.saturating_sub(state.hp) as f32;
+                (state.hp as f32 + (missing * 0.80).floor()) as u32
+            } else {
+                state.max_hp
+            };
             credit_hp(&mut state, RELIC_HP_BOON);
         }
 
@@ -260,14 +270,22 @@ fn simulate_act_map(
         col   = next as usize;
     }
 
-    // Boss fight.
+    // Boss fight (A10 glory: two sequential bosses)
     let boss_entry_hp = state.hp;
-    let boss_loss = sim_combat_loss(state, &boss_pool, sub_act, monsters, rng, 35);
-    if boss_loss >= state.hp {
-        state.hp = 0;
-        return ActResult { boss_entry_hp, boss_defeated: false, death_note: Some("Boss".into()) };
+    let boss_fights = if state.ascension >= 10 && sub_act == "glory" { 2 } else { 1 };
+    for fight_idx in 0..boss_fights {
+        let boss_loss = sim_combat_loss(state, &boss_pool, sub_act, monsters, rng, 35);
+        if boss_loss >= state.hp {
+            state.hp = 0;
+            let note = if boss_fights > 1 {
+                format!("Boss{}", fight_idx + 1)
+            } else {
+                "Boss".into()
+            };
+            return ActResult { boss_entry_hp, boss_defeated: false, death_note: Some(note) };
+        }
+        state.hp -= boss_loss;
     }
-    state.hp -= boss_loss;
 
     // Boss rewards: gold + card pick + rare relic.
     let boss_gold = if state.ascension >= 3 { 75 } else { 100 };
@@ -392,7 +410,7 @@ fn sim_combat_loss(
     let stats = compute_deck_stats_vs_pool(
         &state.deck, state.hp, state.max_hp, sub_act,
         pool, SIM_ENCOUNTERS, SIM_COMBATS,
-        monsters, &state.relics, rng,
+        monsters, &state.relics, state.ascension, rng,
     );
     (stats.mean_hp_loss.round() as u32).min(state.hp)
 }

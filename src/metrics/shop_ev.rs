@@ -46,13 +46,14 @@ pub fn score_shop_relic(
     current_relics: &[String],
     baseline_mean_hp_loss: f32,
     has_encounter_data: bool,
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> RelicAdvice {
     if has_encounter_data {
         let mut with_relic = current_relics.to_vec();
         with_relic.push(relic_id.to_string());
         let stats = compute_deck_stats(
-            deck, hp, max_hp, sub_act, all_encounters, all_monsters, &with_relic, rng,
+            deck, hp, max_hp, sub_act, all_encounters, all_monsters, &with_relic, ascension, rng,
         );
         let per_fight = baseline_mean_hp_loss - stats.mean_hp_loss;
         let total = per_fight * crate::metrics::map_ev::remaining_fights(sub_act);
@@ -91,6 +92,7 @@ pub fn compute_removal_hp_value(
     relics: &[String],
     baseline_mean_hp_loss: f32,
     has_encounter_data: bool,
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> f32 {
     if deck.len() <= 1 {
@@ -118,7 +120,7 @@ pub fn compute_removal_hp_value(
     let (base_loss, has_data) = if has_encounter_data && baseline_mean_hp_loss > 0.0 {
         (baseline_mean_hp_loss, true)
     } else {
-        let full = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng);
+        let full = compute_deck_stats(deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng);
         (full.mean_hp_loss, full.encounter_count > 0)
     };
 
@@ -127,7 +129,7 @@ pub fn compute_removal_hp_value(
     }
 
     let reduced = compute_deck_stats(
-        &deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
+        &deck_reduced, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng,
     );
     (base_loss - reduced.mean_hp_loss).max(0.0) * crate::metrics::map_ev::remaining_fights(sub_act)
 }
@@ -182,6 +184,7 @@ fn simulate_expected_card_value(
     all_encounters: &[SpireApiEncounter],
     all_monsters: &[SpireApiMonster],
     relics: &[String],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> Option<f32> {
     if class_cards.is_empty() || all_encounters.is_empty() {
@@ -195,7 +198,7 @@ fn simulate_expected_card_value(
             continue;
         }
         let advice = crate::metrics::card_pick::sim_pick_score(
-            &offered, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
+            &offered, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng,
         );
         let best_delta = advice
             .iter()
@@ -235,6 +238,7 @@ pub fn compute_shop_total_value(
     gold: u32,
     relics: &[String],
     class_cards: &[Card],
+    ascension: u8,
     rng: &mut impl Rng,
 ) -> f32 {
     // Expected best card: use sim when class catalog + encounter data are available.
@@ -248,7 +252,7 @@ pub fn compute_shop_total_value(
     const REMOVAL_PRICE: u32 = 75;
 
     let expected_card_hp = simulate_expected_card_value(
-        class_cards, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, rng,
+        class_cards, deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics, ascension, rng,
     ).unwrap_or(EXPECTED_CARD_HP);
 
     let mut candidates: Vec<(f32, u32)> = Vec::new();
@@ -258,7 +262,7 @@ pub fn compute_shop_total_value(
         let removal_hp = compute_removal_hp_value(
             deck, hp, max_hp, sub_act, all_encounters, all_monsters, relics,
             0.0, false, // no pre-computed baseline; function computes internally
-            rng,
+            ascension, rng,
         );
         if removal_hp > 0.0 {
             candidates.push((removal_hp, REMOVAL_PRICE));
@@ -326,7 +330,7 @@ mod tests {
         let advice = score_shop_relic(
             0, "UNKNOWN_RELIC", "Rare Relic",
             &deck(), 80, 80, "overgrowth",
-            &[], &[], &[], 0.0, false, &mut rng(),
+            &[], &[], &[], 0.0, false, 0, &mut rng(),
         );
         assert!(!advice.simulated);
         assert_eq!(advice.hp_value, 20.0);
@@ -337,7 +341,7 @@ mod tests {
         let advice = score_shop_relic(
             1, "FAKE", "Common Relic",
             &deck(), 80, 80, "overgrowth",
-            &[], &[], &[], 0.0, false, &mut rng(),
+            &[], &[], &[], 0.0, false, 0, &mut rng(),
         );
         assert_eq!(advice.hp_value, 5.0);
         assert_eq!(advice.relic_index, 1);
@@ -346,7 +350,7 @@ mod tests {
     #[test]
     fn removal_hp_no_data_no_curse() {
         let hp = compute_removal_hp_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], &[], 0.0, false, &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], &[], 0.0, false, 0, &mut rng(),
         );
         assert_eq!(hp, 3.0);
     }
@@ -356,14 +360,14 @@ mod tests {
         use crate::domain::card::{Card, CardType, Rarity};
         let mut d = deck();
         d.push(Card::new(999, "Wound", 255, CardType::Status, Rarity::Special, vec![]));
-        let hp = compute_removal_hp_value(&d, 80, 80, "overgrowth", &[], &[], &[], 0.0, false, &mut rng());
+        let hp = compute_removal_hp_value(&d, 80, 80, "overgrowth", &[], &[], &[], 0.0, false, 0, &mut rng());
         assert_eq!(hp, 12.0);
     }
 
     #[test]
     fn shop_total_value_zero_gold() {
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 0, &[], &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 0, &[], &[], 0, &mut rng(),
         );
         assert_eq!(v, 0.0);
     }
@@ -372,7 +376,7 @@ mod tests {
     fn shop_total_value_card_only() {
         // 80g: can afford card (75g) but not relic (210g)
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 80, &[], &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 80, &[], &[], 0, &mut rng(),
         );
         // Removal returns 3.0 (no data, no curse) — also 75g; tie goes to first in sorted order.
         // Card is 7 HP at 75g vs removal 3 HP at 75g: card wins ratio. Both cost 75g; only one fits.
@@ -383,7 +387,7 @@ mod tests {
     fn shop_total_value_ample_gold_covers_all() {
         // 400g covers removal (75) + card (75) + relic (210) = 360g
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 400, &[], &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 400, &[], &[], 0, &mut rng(),
         );
         // Card + relic at minimum (removal = 3.0 no-data); total ≥ 3 + 7 + 10 = 20
         assert!(v >= 17.0);
@@ -396,7 +400,7 @@ mod tests {
         // After buying card (75g), 135g left — not enough for relic (210g).
         // But removal (3HP, 75g) = 0.040 ratio — skip. So just card = 7 HP.
         let v = compute_shop_total_value(
-            &deck(), 80, 80, "overgrowth", &[], &[], 210, &[], &[], &mut rng(),
+            &deck(), 80, 80, "overgrowth", &[], &[], 210, &[], &[], 0, &mut rng(),
         );
         // Should be able to buy card (75g) with 135g remaining, can't afford relic (210g)
         // So v ≈ 7 HP (card) + maybe removal if it beats card ratio
