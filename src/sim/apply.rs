@@ -952,7 +952,7 @@ mod tests {
     use super::*;
     use crate::domain::card::{Card, CardType, Rarity};
     use crate::domain::combat::{CombatState, EnemyState, Intent, PlayerState};
-    use crate::domain::effect::{BuffType, CardEffect, OrbType};
+    use crate::domain::effect::{BuffType, CardEffect};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
