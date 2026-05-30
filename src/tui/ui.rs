@@ -571,6 +571,33 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::raw("  No deck stats computed yet.")));
     }
 
+    // ── Relics ────────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(Span::styled(
+        "  Relics:",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(ref run) = app.run {
+        if run.relics.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "    (none)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for relic in &run.relics {
+                lines.push(Line::from(Span::styled(
+                    format!("    \u{2022} {}", relic.name),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "    (no run loaded)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL)),
@@ -1072,38 +1099,43 @@ fn render_encounter_pick(frame: &mut Frame, app: &App, area: Rect) {
 fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
     use crate::domain::map::{MapPos, COLS, ROWS};
 
-    let chunks = Layout::default()
+    // ── Outer: context header / body / status bar (hints) ─────────────────────
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // header + run stats
-            Constraint::Min(0),    // map grid
-            Constraint::Length(2), // choices bar
-            Constraint::Length(1), // status
+            Constraint::Length(1), // context header: no key hints
+            Constraint::Min(0),    // map grid + sidebar
+            Constraint::Length(1), // status bar: key hints + threat
         ])
         .split(area);
 
-    // ── Header ─────────────────────────────────────────────────────────────────
+    // ── Header: context only ───────────────────────────────────────────────────
     let sub_act = app.run.as_ref().map(|r| r.sub_act.as_str()).unwrap_or("—");
     let floor_label = app.run.as_ref()
         .and_then(|r| r.map_pos)
         .map(|p| format!("Floor {}/15", p.floor + 1))
         .unwrap_or_else(|| "Floor —/15".to_string());
-    let header_line1 = format!(
-        " MAP \u{2014} {}  {}   [j/k] choose  [Enter] enter  [t/Esc] back",
-        capitalize(sub_act), floor_label,
-    );
-    let run_stats_line = app.run.as_ref().map(|r| {
-        let relic_names: Vec<&str> = r.relics.iter().map(|rel| rel.name.as_str()).collect();
-        let relics_str = if relic_names.is_empty() { "none".to_string() } else { relic_names.join(", ") };
-        format!(" HP {}/{}  Gold {}  | {}", r.hp, r.max_hp, r.gold, relics_str)
-    }).unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(header_line1, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
-            Line::from(Span::styled(run_stats_line, Style::default().fg(Color::DarkGray))),
-        ]),
-        chunks[0],
+        Paragraph::new(Span::styled(
+            format!(" MAP \u{2014} {}  {}", capitalize(sub_act), floor_label),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        outer[0],
     );
+
+    // ── Body: map column (fixed width) | sidebar (fills rest) ─────────────────
+    const LABEL_W: usize = 4;
+    const COL_W:   usize = 5; // " [X] "
+    // content width + 2 border chars = minimum panel width
+    const MAP_PANEL_W: u16 = (LABEL_W + COLS * COL_W + 2) as u16;
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(MAP_PANEL_W),
+            Constraint::Min(0),
+        ])
+        .split(outer[1]);
 
     // ── Map grid ───────────────────────────────────────────────────────────────
     let (run, map) = match app.run.as_ref().and_then(|r| r.map.as_ref().map(|m| (r, m))) {
@@ -1112,46 +1144,33 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             frame.render_widget(
                 Paragraph::new("  No map — press [t] to generate.")
                     .block(Block::default().borders(Borders::ALL)),
-                chunks[1],
+                body[0],
             );
-            render_statusbar(frame, app, chunks[3]);
+            render_statusbar(frame, app, outer[2]);
             return;
         }
     };
 
-    let cur_pos    = run.map_pos;
-    let choices    = app.map_choices();
+    let cur_pos = run.map_pos;
+    let choices = app.map_choices();
     let choices_floor: Option<usize> = match cur_pos {
         None      => Some(0),
         Some(pos) => if pos.floor + 1 < ROWS { Some(pos.floor + 1) } else { None },
     };
     let selected_col = choices.get(app.map_cursor).copied();
 
-    const LABEL_W: usize = 4;
-    const COL_W:   usize = 5; // " [X] "
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(ROWS * 2);
-
+    let mut map_lines: Vec<Line<'static>> = Vec::with_capacity(ROWS * 2);
     for floor in (0..ROWS).rev() {
         let game_floor  = floor + 1;
         let is_cur      = cur_pos.map(|p| p.floor) == Some(floor);
         let cur_floor_n = cur_pos.map(|p| p.floor);
 
-        // ── Node row ──────────────────────────────────────────────────────────
         let mut spans: Vec<Span<'static>> = Vec::new();
-
-        let label = if is_cur {
-            format!("{:2}▶ ", game_floor)
-        } else {
-            format!("{:2}  ", game_floor)
-        };
+        let label = if is_cur { format!("{:2}▶ ", game_floor) } else { format!("{:2}  ", game_floor) };
         spans.push(Span::styled(
             label,
-            if is_cur {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            },
+            if is_cur { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) }
+            else      { Style::default().fg(Color::DarkGray) },
         ));
 
         for col in 0..COLS {
@@ -1162,8 +1181,6 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             let is_past   = cur_floor_n.map(|cf| floor < cf).unwrap_or(false);
 
             let symbol = rt.map(|r| format!("[{}]", r.label())).unwrap_or_else(|| "   ".into());
-            let cell   = format!(" {} ", symbol);
-
             let style = if is_me {
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else if is_sel {
@@ -1177,72 +1194,87 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 map_rt_style(rt)
             };
-
-            spans.push(Span::styled(cell, style));
+            spans.push(Span::styled(format!(" {} ", symbol), style));
         }
-
-        lines.push(Line::from(spans));
-
-        // ── Connection row (edges from floor-1 → floor) ───────────────────────
+        map_lines.push(Line::from(spans));
         if floor > 0 {
-            lines.push(map_connection_row(floor - 1, map, LABEL_W, COL_W));
+            map_lines.push(map_connection_row(floor - 1, map, LABEL_W, COL_W));
         }
     }
 
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" MAP ")),
-        chunks[1],
+        Paragraph::new(map_lines).block(Block::default().borders(Borders::ALL).title(" MAP ")),
+        body[0],
     );
 
-    // ── Choices bar ────────────────────────────────────────────────────────────
-    let mut choice_spans: Vec<Span<'static>> = vec![Span::raw("  Choices: ")];
+    // ── Sidebar ───────────────────────────────────────────────────────────────
+    render_map_sidebar(frame, app, body[1], run, map, &choices, choices_floor);
+
+    render_statusbar(frame, app, outer[2]);
+}
+
+fn render_map_sidebar(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    run: &crate::domain::run::RunState,
+    map: &crate::domain::map::ActMap,
+    choices: &[u8],
+    choices_floor: Option<usize>,
+) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ── Run stats ─────────────────────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        format!("  HP {}/{}   Gold {}", run.hp, run.max_hp, run.gold),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::raw("")));
+
+    // ── Choices ───────────────────────────────────────────────────────────────
     if choices.is_empty() {
-        choice_spans.push(Span::styled(
-            "none (you are at the top)",
+        lines.push(Line::from(Span::styled(
+            "  You are at the top floor.",
             Style::default().fg(Color::DarkGray),
-        ));
+        )));
     } else {
+        lines.push(Line::from(Span::styled(
+            "  Next floor choices:",
+            Style::default().fg(Color::DarkGray),
+        )));
+
         let cf = choices_floor.unwrap_or(0);
         for (i, &col) in choices.iter().enumerate() {
-            let rt_label = map.room_type(cf, col as usize)
-                .map(|r| r.label())
-                .unwrap_or("?");
+            let rt_label = map.room_type(cf, col as usize).map(|r| r.label()).unwrap_or("?");
             let is_cursor = i == app.map_cursor;
+            let cursor_ch = if is_cursor { "▶" } else { " " };
 
-            // Prefer full-run projection data; fall back to simple delta.
             let proj = app.path_projections.iter().find(|p| p.col == col);
-            let label: String;
-            let style: Style;
-
-            if let Some(p) = proj {
+            let (text, style) = if let Some(p) = proj {
                 let outcome = if p.likely_win {
                     "WIN".to_string()
                 } else if let Some(ref dl) = p.death_label {
-                    format!("☠{dl}")
+                    format!("☠ {dl}")
                 } else {
                     "?".to_string()
                 };
-                // Boss HP summary: only show acts where boss was reached.
                 let boss_parts: Vec<String> = p.boss_entry_hp.iter().enumerate()
                     .filter(|&(_, &hp)| hp > 0)
                     .map(|(ai, &hp)| {
-                        let beat = p.boss_defeated[ai];
-                        if beat { format!("A{}:{hp}✓", ai + 1) }
-                        else    { format!("A{}:{hp}✗", ai + 1) }
+                        if p.boss_defeated[ai] { format!("A{}:{hp}✓", ai + 1) }
+                        else                   { format!("A{}:{hp}✗", ai + 1) }
                     })
                     .collect();
                 let boss_str = if boss_parts.is_empty() {
                     String::new()
                 } else {
-                    format!(" [{}]", boss_parts.join(" "))
+                    format!("  {}", boss_parts.join(" "))
                 };
-                let gold_str = format!(" +{}g", p.gold_earned);
-                label = if is_cursor {
-                    format!(" col{}[{}] {}{}{} ", col, rt_label, outcome, boss_str, gold_str)
-                } else {
-                    format!(" col{}[{}] {}{}{} ", col, rt_label, outcome, boss_str, gold_str)
-                };
-                style = if is_cursor {
+                let t = format!(
+                    "  {} [{}] col{}   {}{}   +{}g",
+                    cursor_ch, rt_label, col, outcome, boss_str, p.gold_earned,
+                );
+                let s = if is_cursor {
                     Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
                 } else if p.likely_win {
                     Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
@@ -1251,44 +1283,40 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(Color::LightRed)
                 };
+                (t, s)
             } else {
-                // Fall back to simple path_choices delta display.
                 let path_info = app.path_choices.iter().find(|pc| pc.col == col);
                 let path_str = path_info.map(|pc| {
                     let sign = if pc.total_hp_delta >= 0.0 { "+" } else { "" };
-                    format!("{sign}{:.0}hp +{:.0}g", pc.total_hp_delta, pc.expected_gold)
+                    format!("{sign}{:.0}hp  +{:.0}g", pc.total_hp_delta, pc.expected_gold)
                 }).unwrap_or_default();
                 let best_marker = path_info.map(|pc| pc.is_best).unwrap_or(false);
-                label = if path_str.is_empty() {
-                    format!(" col{}[{}] ", col, rt_label)
-                } else if best_marker {
-                    format!(" col{}[{}] {} ▲ ", col, rt_label, path_str)
-                } else {
-                    format!(" col{}[{}] {} ", col, rt_label, path_str)
-                };
-                style = if is_cursor {
+                let best_ch = if best_marker { "  ▲" } else { "" };
+                let t = format!("  {} [{}] col{}   {}{}", cursor_ch, rt_label, col, path_str, best_ch);
+                let s = if is_cursor {
                     Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
                 } else if best_marker {
                     Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::LightGreen)
                 };
-            }
+                (t, s)
+            };
 
-            choice_spans.push(Span::styled(label, style));
+            lines.push(Line::from(Span::styled(text, style)));
         }
-        // Show whether costs are from simulation or defaults
+
+        lines.push(Line::from(Span::raw("")));
         if let Some(pc) = app.path_choices.first() {
-            let tag = if pc.simulated { " [sim]" } else { " [est]" };
-            choice_spans.push(Span::styled(tag, Style::default().fg(Color::DarkGray)));
+            let tag = if pc.simulated { "  [sim]" } else { "  [est]" };
+            lines.push(Line::from(Span::styled(tag, Style::default().fg(Color::DarkGray))));
         }
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(choice_spans)).block(Block::default().borders(Borders::TOP)),
-        chunks[2],
-    );
 
-    render_statusbar(frame, app, chunks[3]);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Run ")),
+        area,
+    );
 }
 
 /// Build the connection row between array floor `floor_idx` and `floor_idx + 1`.
