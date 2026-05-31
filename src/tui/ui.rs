@@ -498,6 +498,108 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[2]);
 }
 
+// ── Scaling card check ────────────────────────────────────────────────────────
+
+struct ScalingOption {
+    name: &'static str,
+    note: &'static str,
+}
+
+fn class_scaling_options(class: &crate::domain::run::PlayerClass) -> &'static [ScalingOption] {
+    use crate::domain::run::PlayerClass::*;
+    // Listed in rough priority order (best scaler first).
+    // Matching is by card name; keep these in sync with cards_seed.json.
+    match class {
+        Ironclad => &[
+            ScalingOption { name: "Demon Form",   note: "+2 Str/turn, compounds each round" },
+            ScalingOption { name: "Inflame",      note: "+2 Str permanently"                },
+            ScalingOption { name: "Barricade",    note: "block persists between turns"      },
+            ScalingOption { name: "Juggernaut",   note: "damage per block gained"           },
+            ScalingOption { name: "Corruption",   note: "free Skills enable block chains"   },
+        ],
+        Silent => &[
+            ScalingOption { name: "Noxious Fumes", note: "stack Poison on all foes/turn"  },
+            ScalingOption { name: "Footwork",      note: "+2 Dex permanently"              },
+            ScalingOption { name: "Afterimage",    note: "+1 Block per card played"        },
+            ScalingOption { name: "Envenom",       note: "Poison on every attack hit"      },
+            ScalingOption { name: "Abrasive",      note: "+Dex permanently"               },
+        ],
+        Defect => &[
+            ScalingOption { name: "Defragment",    note: "+1 Focus permanently"            },
+            ScalingOption { name: "Echo Form",     note: "replay first card each turn"     },
+            ScalingOption { name: "Biased Cognition", note: "+4 Focus (decays 1/turn)"    },
+            ScalingOption { name: "Bulk Up",       note: "+Str and +Dex permanently"      },
+            ScalingOption { name: "Machine Learning", note: "+1 card drawn per turn"      },
+        ],
+        Regent => &[
+            ScalingOption { name: "Resonance",     note: "+Str via Skill plays"            },
+            ScalingOption { name: "Pillar of Creation", note: "strong stacking Power"      },
+            ScalingOption { name: "Sword Sage",    note: "escalating Power effect"         },
+            ScalingOption { name: "Genesis",       note: "resource generation Power"       },
+            ScalingOption { name: "Tyranny",       note: "compounding Power"               },
+        ],
+        Necrobinder => &[
+            ScalingOption { name: "Necro Mastery", note: "deck scaling Power"             },
+            ScalingOption { name: "Friendship",    note: "+Str permanently"                },
+            ScalingOption { name: "Reaper Form",   note: "form Power with growing effect" },
+            ScalingOption { name: "Lethality",     note: "Poison scaling power"           },
+            ScalingOption { name: "Pagestorm",     note: "recursive scaling Power"        },
+        ],
+    }
+}
+
+/// Append scaling-check lines to `out`. Shows which scaling cards the deck
+/// already contains (green), or warns and suggests the top 3 if none found.
+fn render_scaling_check(
+    out: &mut Vec<Line<'static>>,
+    deck: &[crate::domain::card::Card],
+    class: &crate::domain::run::PlayerClass,
+) {
+    let options = class_scaling_options(class);
+    let deck_names: std::collections::HashSet<&str> =
+        deck.iter().map(|c| c.name.as_str()).collect();
+
+    let have: Vec<&ScalingOption> = options
+        .iter()
+        .filter(|o| deck_names.contains(o.name))
+        .collect();
+
+    out.push(Line::from(Span::styled(
+        "  Boss scaling",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+
+    if have.is_empty() {
+        out.push(Line::from(Span::styled(
+            "    \u{26a0} No scaling card detected",
+            Style::default().fg(Color::Red),
+        )));
+        let suggestions: Vec<&str> = options
+            .iter()
+            .filter(|o| !deck_names.contains(o.name))
+            .take(3)
+            .map(|o| o.name)
+            .collect();
+        if !suggestions.is_empty() {
+            out.push(Line::from(Span::styled(
+                format!("    Consider: {}", suggestions.join(" \u{00b7} ")),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        for opt in have {
+            out.push(Line::from(vec![
+                Span::styled("    \u{2713} ", Style::default().fg(Color::Green)),
+                Span::styled(opt.name, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  \u{2014} {}", opt.note),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+}
+
 fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -587,15 +689,12 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
             )));
             stats.push(Line::from(Span::raw("")));
 
-            // Outcomes
-            let outcome_color = if s.kill_rate >= 0.7 { Color::Green }
-                else if s.kill_rate >= 0.4 { Color::Yellow } else { Color::Red };
+            // Avg HP loss per fight
+            let hp_color = if s.mean_hp_loss < 10.0 { Color::Green }
+                else if s.mean_hp_loss < 25.0 { Color::Yellow } else { Color::Red };
             stats.push(Line::from(Span::styled(
-                format!(
-                    "  Win rate: {:.0}%   Survive rate: {:.0}%   Avg HP loss: {:.0}",
-                    s.kill_rate * 100.0, s.survival_rate * 100.0, s.mean_hp_loss
-                ),
-                Style::default().fg(outcome_color),
+                format!("  Avg HP loss per fight: {:.0}", s.mean_hp_loss),
+                Style::default().fg(hp_color),
             )));
         } else {
             stats.push(Line::from(Span::styled(
@@ -605,6 +704,12 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
         }
     } else {
         stats.push(Line::from(Span::raw("  No deck stats computed yet.")));
+    }
+
+    // ── Scaling card check (boss prep) ───────────────────────────────────────
+    if let Some(ref run) = app.run {
+        stats.push(Line::from(Span::raw("")));
+        render_scaling_check(&mut stats, &run.deck, &run.class);
     }
 
     frame.render_widget(
