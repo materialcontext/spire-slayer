@@ -151,6 +151,10 @@ pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
         let w = if player_weak { s * 3 / 4 } else { s };
         (if target_vuln { w * 3 / 2 } else { w }) as f32
     };
+    // Osty attacks: no player Strength or Weak; enemy Vulnerable still applies.
+    let adj_osty_dmg = |base: u32| -> f32 {
+        (if target_vuln { base * 3 / 2 } else { base }) as f32
+    };
     let adj_blk = |base: u32| -> f32 {
         let b = base + dex;
         (if player_frail { b * 3 / 4 } else { b }) as f32
@@ -160,16 +164,18 @@ pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
 
     for effect in &card.effects {
         let delta: f32 = match effect {
-            CardEffect::Damage(d)                   => adj_dmg(*d),
-            CardEffect::DamageAll(d)                => adj_dmg(*d) * n,
-            CardEffect::DamageMulti { base, hits }  => adj_dmg(*base) * *hits as f32,
-            // Body Slam: damage = current block, still boosted by Strength/Vulnerable.
+            CardEffect::Damage(d) => if card.osty_attack { adj_osty_dmg(*d) } else { adj_dmg(*d) },
+            CardEffect::DamageAll(d) => if card.osty_attack { adj_osty_dmg(*d) * n } else { adj_dmg(*d) * n },
+            CardEffect::DamageMulti { base, hits } => if card.osty_attack { adj_osty_dmg(*base) * *hits as f32 } else { adj_dmg(*base) * *hits as f32 },
+            // Block-derived damage: Strength, Weak, and Vulnerable all apply normally.
             CardEffect::DamageEqBlock               => adj_dmg(state.player.block),
             CardEffect::Block(b)                    => adj_blk(*b) * 0.85,
             // Each energy ≈ 1 extra card play ≈ 7 adj-damage on average.
             CardEffect::Draw(n)                     => *n as f32 * 4.0,
             CardEffect::GainEnergy(e)               => *e as f32 * 7.0,
             CardEffect::LoseHp(h)                   => -(*h as f32),
+            // Enemy HP loss bypasses block/Strength — value it at face value
+            CardEffect::EnemyLoseHp(h)              => *h as f32,
             CardEffect::GainStars(n)                => *n as f32 * 2.0,
             CardEffect::ApplyToEnemy { buff, stacks }
                 => buff_enemy_value(buff, *stacks),
@@ -191,6 +197,13 @@ pub fn card_play_value(card: &Card, state: &CombatState) -> f32 {
             CardEffect::Passive(_) => 1.0,
         };
         score += delta;
+    }
+
+    // Retain cards won't be discarded at end of turn, so they're never wasted.
+    // Slightly deprioritize them so the greedy policy uses non-Retain cards first
+    // and saves Retain cards for turns where their value is actually needed.
+    if card.retain {
+        score *= 0.92;
     }
 
     score

@@ -29,8 +29,7 @@ pub struct DeckStats {
     pub bpt_p50: f32,
     pub bpt_p90: f32,
     pub mean_bpt: f32,
-    // Combat outcomes
-    pub kill_rate: f32,
+    // Combat outcomes (survival_rate kept for map-routing logic; not displayed in deck dash)
     pub survival_rate: f32,
     pub mean_hp_loss: f32,
     // Context
@@ -111,7 +110,6 @@ pub fn compute_deck_stats_vs_pool(
             bpt_p50: 0.0,
             bpt_p90: 0.0,
             mean_bpt: 0.0,
-            kill_rate: 0.0,
             survival_rate: 0.0,
             mean_hp_loss: 0.0,
             sub_act: sub_act.to_string(),
@@ -127,7 +125,6 @@ pub fn compute_deck_stats_vs_pool(
     let mut damages: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut blocks: Vec<f32> = Vec::with_capacity(total_playouts as usize);
     let mut hp_losses: Vec<f32> = Vec::with_capacity(total_playouts as usize);
-    let mut kills = 0u32;
     let mut survivals = 0u32;
 
     for enc in &sampled {
@@ -137,7 +134,6 @@ pub fn compute_deck_stats_vs_pool(
             damages.push(r.damage_dealt as f32 / r.turns.max(1) as f32);
             blocks.push(r.block_absorbed as f32 / r.turns.max(1) as f32);
             hp_losses.push((-r.player_hp_delta).max(0) as f32);
-            if r.combat_won { kills += 1; }
             if r.player_alive { survivals += 1; }
         }
     }
@@ -162,7 +158,6 @@ pub fn compute_deck_stats_vs_pool(
         bpt_p50: sorted_pct(&blocks, 50.0),
         bpt_p90: sorted_pct(&blocks, 90.0),
         mean_bpt: blocks.iter().sum::<f32>() / f,
-        kill_rate: kills as f32 / f,
         survival_rate: survivals as f32 / f,
         mean_hp_loss: hp_losses.iter().sum::<f32>() / f,
         sub_act: sub_act.to_string(),

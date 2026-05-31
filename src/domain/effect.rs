@@ -52,8 +52,11 @@ pub enum CardEffect {
     Draw(u32),
     /// Gain energy.
     GainEnergy(u32),
-    /// Lose HP (e.g. Hemokinesis, Offering).
+    /// Lose HP (e.g. Hemokinesis, Offering). Player self-damage.
     LoseHp(u32),
+    /// Enemy loses HP directly — bypasses block and is unaffected by Strength,
+    /// Weak, or Vulnerable (e.g. Capture Spirit, Haunt, Strangle per-card tick).
+    EnemyLoseHp(u32),
     /// Apply a buff/debuff to the target enemy.
     ApplyToEnemy { buff: BuffType, stacks: i32 },
     /// Apply a buff/debuff to all enemies.

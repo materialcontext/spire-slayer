@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 use super::apply;
 use super::playout::run_combat;
-use super::policy::{Action, GreedyDamagePolicy};
+use super::policy::{Action, GreedyDamagePolicy, card_play_value};
 use crate::domain::card::Card;
 use crate::domain::combat::CombatState;
 use crate::domain::effect::{BuffType, CardEffect};
@@ -15,6 +15,8 @@ use crate::metrics::combat as metrics;
 
 /// UCB1 exploration constant (√2).
 const C: f32 = std::f32::consts::SQRT_2;
+/// Weight of the heuristic prior in UCB1. Fades as `W_PRIOR * prior / (1 + visits)`.
+const W_PRIOR: f32 = 0.5;
 /// Independent rollouts run in parallel per MCTS expansion.
 const PARALLEL_ROLLOUTS: usize = 4;
 
@@ -50,7 +52,7 @@ type TreeAction = Option<Action>;
 struct MctsNode {
     /// Index of the parent node in the arena; None for the root.
     parent: Option<usize>,
-    /// The card-play action that produced this node. None for root.
+    /// The card-play action that produced this node. None for root or pass.
     action: Option<Action>,
     /// Combat state at this decision point (after `action` was applied).
     state: CombatState,
@@ -59,6 +61,9 @@ struct MctsNode {
     children: Vec<usize>,
     /// Actions not yet expanded into tree nodes. `None` = "pass turn early".
     untried: Vec<TreeAction>,
+    /// Normalised heuristic value ∈ [0, 1] from `card_play_value`. Biases UCB1
+    /// before rollouts populate the exploit term (fades as visits grow).
+    prior: f32,
 }
 
 impl MctsNode {
@@ -66,9 +71,10 @@ impl MctsNode {
         parent: Option<usize>,
         action: Option<Action>,
         state: CombatState,
+        prior: f32,
         rng: &mut impl Rng,
     ) -> Self {
-        // Build card-play actions, shuffle to remove ordering bias (item 4),
+        // Build card-play actions, shuffle to remove ordering bias,
         // then append "pass" last so it is tried only after all card plays.
         let mut card_plays = available_card_plays(&state);
         card_plays.shuffle(rng);
@@ -84,6 +90,22 @@ impl MctsNode {
             score_sum: 0.0,
             children: Vec::new(),
             untried,
+            prior,
+        }
+    }
+
+    /// Construct a terminal "pass turn" node: no card plays branch from here.
+    /// The state is a snapshot of the parent's state; `rollout` will call end_turn.
+    fn new_pass(parent: usize, state: CombatState) -> Self {
+        MctsNode {
+            parent: Some(parent),
+            action: None,
+            state,
+            visits: 0,
+            score_sum: 0.0,
+            children: Vec::new(),
+            untried: vec![], // terminal — no further card plays
+            prior: 0.0,
         }
     }
 
@@ -93,7 +115,11 @@ impl MctsNode {
         }
         let exploit = self.score_sum / self.visits as f32;
         let explore = C * ((parent_visits as f32).ln() / self.visits as f32).sqrt();
-        exploit + explore
+        // Heuristic prior fades to zero as visits accumulate, giving the rollouts
+        // increasing influence while still biasing cold-start exploration toward
+        // cards the greedy heuristic considers promising.
+        let prior = W_PRIOR * self.prior / (1.0 + self.visits as f32);
+        exploit + explore + prior
     }
 }
 
@@ -104,7 +130,10 @@ fn is_single_target_damage(card: &Card) -> bool {
     let has_single = card.effects.iter().any(|e| {
         matches!(
             e,
-            CardEffect::Damage(_) | CardEffect::DamageMulti { .. } | CardEffect::DamageEqBlock
+            CardEffect::Damage(_)
+                | CardEffect::DamageMulti { .. }
+                | CardEffect::DamageEqBlock
+                | CardEffect::EnemyLoseHp(_)
         )
     });
     let has_aoe = card.effects.iter().any(|e| matches!(e, CardEffect::DamageAll(_)));
@@ -339,7 +368,7 @@ pub fn best_play_sequence(
         .min(budget);
 
     let mut arena: Vec<MctsNode> = Vec::with_capacity(effective_budget as usize + 4);
-    arena.push(MctsNode::new(None, None, state.clone(), rng));
+    arena.push(MctsNode::new(None, None, state.clone(), 0.0, rng));
 
     let mut hp_losses: Vec<f32> = Vec::with_capacity(effective_budget as usize);
     let mut total_rollouts: u32 = 0;
@@ -355,11 +384,22 @@ pub fn best_play_sequence(
         } else {
             match arena[leaf].untried.pop().unwrap() {
                 None => {
-                    // Item 7: "pass turn early" — rollout from the current leaf
-                    // without creating a child node.
-                    leaf
+                    // "Pass turn early": create a proper terminal child so UCB1 can
+                    // track and re-exploit this option across iterations, rather than
+                    // rolling out from the leaf without recording the result.
+                    let pass_state = arena[leaf].state.clone();
+                    let child_idx = arena.len();
+                    arena.push(MctsNode::new_pass(leaf, pass_state));
+                    arena[leaf].children.push(child_idx);
+                    child_idx
                 }
                 Some(act) => {
+                    // Compute normalised heuristic prior from the card's value at the
+                    // parent state, before the card is removed from the hand.
+                    let prior = {
+                        let card = &arena[leaf].state.hand[act.card_hand_idx];
+                        (card_play_value(card, &arena[leaf].state) / 20.0).clamp(0.0, 1.0)
+                    };
                     let mut child_state = arena[leaf].state.clone();
                     let _ = apply::play_card(
                         &mut child_state,
@@ -368,7 +408,7 @@ pub fn best_play_sequence(
                         rng,
                     );
                     let child_idx = arena.len();
-                    arena.push(MctsNode::new(Some(leaf), Some(act), child_state, rng));
+                    arena.push(MctsNode::new(Some(leaf), Some(act), child_state, prior, rng));
                     arena[leaf].children.push(child_idx);
                     child_idx
                 }
@@ -630,8 +670,64 @@ mod tests {
             vec![CardEffect::DamageAll(5)]);
         let sk = Card::new(3, "Defend", 1, CardType::Skill, Rarity::Basic,
             vec![CardEffect::Block(5)]);
+        let lose_hp = Card::new(4, "Haunt", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::EnemyLoseHp(12)]);
         assert!(is_single_target_damage(&s));
         assert!(!is_single_target_damage(&aoe));
         assert!(!is_single_target_damage(&sk));
+        assert!(is_single_target_damage(&lose_hp));
+    }
+
+    #[test]
+    fn four_cost_card_not_available_with_three_energy() {
+        // A 4-cost card must not appear in available actions when player has only 3 energy.
+        let heavy = Card::new(10, "HeavyHitter", 4, CardType::Attack, Rarity::Rare,
+            vec![CardEffect::Damage(30)]);
+        let state = make_state(vec![heavy], 50);
+        // state starts with 3 energy (default)
+        assert_eq!(state.energy, 3);
+        let actions = available_card_plays(&state);
+        assert!(actions.is_empty(), "4-cost card should not be playable with 3 energy");
+    }
+
+    #[test]
+    fn x_cost_card_is_always_playable_with_any_energy() {
+        // X-cost cards (cost=255) are playable as long as energy > 0.
+        let mut xcost = Card::new(11, "Whirlwind", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::DamageAll(5)]);
+        xcost.cost = 255;
+        let mut state = make_state(vec![xcost], 50);
+        state.energy = 1;
+        let actions = available_card_plays(&state);
+        assert!(!actions.is_empty(), "X-cost card should be playable with 1 energy");
+    }
+
+    #[test]
+    fn x_cost_card_not_playable_with_zero_energy() {
+        let mut xcost = Card::new(12, "Whirlwind", 1, CardType::Attack, Rarity::Uncommon,
+            vec![CardEffect::DamageAll(5)]);
+        xcost.cost = 255;
+        let mut state = make_state(vec![xcost], 50);
+        state.energy = 0;
+        let actions = available_card_plays(&state);
+        assert!(actions.is_empty(), "X-cost card must not play at 0 energy");
+    }
+
+    #[test]
+    fn evaluate_actions_replays_correct_cards() {
+        // Verify that evaluate_actions correctly replays a multi-card sequence
+        // even after the hand shrinks on each play.
+        let s1 = Card::new(1, "Strike", 1, CardType::Attack, Rarity::Basic,
+            vec![CardEffect::Damage(6)]);
+        let s2 = Card::new(2, "Strike2", 1, CardType::Attack, Rarity::Basic,
+            vec![CardEffect::Damage(6)]);
+        let state = make_state(vec![s1, s2], 50);
+        let actions = vec![
+            Action { card_hand_idx: 0, target_idx: 0 },
+            Action { card_hand_idx: 0, target_idx: 0 }, // idx=0 again after first card removed
+        ];
+        let (dmg, _hp) = evaluate_actions(&state, &actions, &mut rng());
+        // Two strikes of 6 each → 12 total damage
+        assert!((dmg - 12.0).abs() < 1.0, "expected ~12 damage, got {dmg}");
     }
 }

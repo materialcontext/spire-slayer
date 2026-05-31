@@ -192,7 +192,7 @@ fn render_enemies(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Color::Red
     };
-    let player_text = vec![
+    let mut player_text = vec![
         Line::from(vec![
             Span::raw("  HP: "),
             Span::styled(
@@ -213,6 +213,21 @@ fn render_enemies(frame: &mut Frame, app: &App, area: Rect) {
             combat.turn
         ))),
     ];
+    // Show relics from the run so they're visible during combat.
+    if let Some(ref run) = app.run {
+        if !run.relics.is_empty() {
+            player_text.push(Line::from(Span::styled(
+                "  Relics:",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            for relic in &run.relics {
+                player_text.push(Line::from(Span::styled(
+                    format!("    \u{2022} {}", relic.name),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
+        }
+    }
     let player_block = Block::default().title(" PLAYER ").borders(Borders::ALL);
     frame.render_widget(
         Paragraph::new(Text::from(player_text)).block(player_block),
@@ -273,38 +288,40 @@ fn render_potion_advice(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_statusbar(frame: &mut Frame, app: &App, area: Rect) {
-    let threat_label = app
-        .combat
-        .as_ref()
-        .map(|c| {
-            let ts = threat_score(c);
-            if ts >= 0.6 {
-                ("HIGH", Color::Red)
-            } else if ts >= 0.3 {
-                ("MEDIUM", Color::Yellow)
-            } else {
-                ("LOW", Color::Green)
-            }
-        })
-        .unwrap_or(("—", Color::DarkGray));
-
     let status = if app.status_message.is_empty() {
         "".to_string()
     } else {
         format!("  {}", app.status_message)
     };
 
-    let hint = match app.mode {
-        AppMode::MapView => "  [v]ev  [d]eck  [?]stats  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
-        _                => "  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit",
+    let (hint, threat_spans) = match app.mode {
+        AppMode::MapView => (
+            "  [v]ev  [d]eck  [?]stats  [e]combat-advisor  [j/k]cursor  [Enter]enter  [t/Esc]back  [q]uit",
+            vec![],
+        ),
+        _ => {
+            // Combat screen: show Threat indicator
+            let threat_label = app.combat.as_ref().map(|c| {
+                let ts = threat_score(c);
+                if ts >= 0.6 { ("HIGH", Color::Red) }
+                else if ts >= 0.3 { ("MEDIUM", Color::Yellow) }
+                else { ("LOW", Color::Green) }
+            });
+            let spans = if let Some((label, color)) = threat_label {
+                vec![
+                    Span::raw("          Threat: "),
+                    Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                ]
+            } else {
+                vec![]
+            };
+            ("  [s]im  [d]eck  [p]ick  [v]ev  [e]dit  [n]ew  [q]uit", spans)
+        }
     };
-    let line = Line::from(vec![
-        Span::raw(hint),
-        Span::raw(status),
-        Span::raw("          Threat: "),
-        Span::styled(threat_label.0, Style::default().fg(threat_label.1).add_modifier(Modifier::BOLD)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+
+    let mut spans = vec![Span::raw(hint), Span::raw(status)];
+    spans.extend(threat_spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
@@ -481,6 +498,108 @@ fn render_card_pick(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, rows[2]);
 }
 
+// ── Scaling card check ────────────────────────────────────────────────────────
+
+struct ScalingOption {
+    name: &'static str,
+    note: &'static str,
+}
+
+fn class_scaling_options(class: &crate::domain::run::PlayerClass) -> &'static [ScalingOption] {
+    use crate::domain::run::PlayerClass::*;
+    // Listed in rough priority order (best scaler first).
+    // Matching is by card name; keep these in sync with cards_seed.json.
+    match class {
+        Ironclad => &[
+            ScalingOption { name: "Demon Form",   note: "+2 Str/turn, compounds each round" },
+            ScalingOption { name: "Inflame",      note: "+2 Str permanently"                },
+            ScalingOption { name: "Barricade",    note: "block persists between turns"      },
+            ScalingOption { name: "Juggernaut",   note: "damage per block gained"           },
+            ScalingOption { name: "Corruption",   note: "free Skills enable block chains"   },
+        ],
+        Silent => &[
+            ScalingOption { name: "Noxious Fumes", note: "stack Poison on all foes/turn"  },
+            ScalingOption { name: "Footwork",      note: "+2 Dex permanently"              },
+            ScalingOption { name: "Afterimage",    note: "+1 Block per card played"        },
+            ScalingOption { name: "Envenom",       note: "Poison on every attack hit"      },
+            ScalingOption { name: "Abrasive",      note: "+Dex permanently"               },
+        ],
+        Defect => &[
+            ScalingOption { name: "Defragment",    note: "+1 Focus permanently"            },
+            ScalingOption { name: "Echo Form",     note: "replay first card each turn"     },
+            ScalingOption { name: "Biased Cognition", note: "+4 Focus (decays 1/turn)"    },
+            ScalingOption { name: "Bulk Up",       note: "+Str and +Dex permanently"      },
+            ScalingOption { name: "Machine Learning", note: "+1 card drawn per turn"      },
+        ],
+        Regent => &[
+            ScalingOption { name: "Resonance",     note: "+Str via Skill plays"            },
+            ScalingOption { name: "Pillar of Creation", note: "strong stacking Power"      },
+            ScalingOption { name: "Sword Sage",    note: "escalating Power effect"         },
+            ScalingOption { name: "Genesis",       note: "resource generation Power"       },
+            ScalingOption { name: "Tyranny",       note: "compounding Power"               },
+        ],
+        Necrobinder => &[
+            ScalingOption { name: "Necro Mastery", note: "deck scaling Power"             },
+            ScalingOption { name: "Friendship",    note: "+Str permanently"                },
+            ScalingOption { name: "Reaper Form",   note: "form Power with growing effect" },
+            ScalingOption { name: "Lethality",     note: "Poison scaling power"           },
+            ScalingOption { name: "Pagestorm",     note: "recursive scaling Power"        },
+        ],
+    }
+}
+
+/// Append scaling-check lines to `out`. Shows which scaling cards the deck
+/// already contains (green), or warns and suggests the top 3 if none found.
+fn render_scaling_check(
+    out: &mut Vec<Line<'static>>,
+    deck: &[crate::domain::card::Card],
+    class: &crate::domain::run::PlayerClass,
+) {
+    let options = class_scaling_options(class);
+    let deck_names: std::collections::HashSet<&str> =
+        deck.iter().map(|c| c.name.as_str()).collect();
+
+    let have: Vec<&ScalingOption> = options
+        .iter()
+        .filter(|o| deck_names.contains(o.name))
+        .collect();
+
+    out.push(Line::from(Span::styled(
+        "  Boss scaling",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+
+    if have.is_empty() {
+        out.push(Line::from(Span::styled(
+            "    \u{26a0} No scaling card detected",
+            Style::default().fg(Color::Red),
+        )));
+        let suggestions: Vec<&str> = options
+            .iter()
+            .filter(|o| !deck_names.contains(o.name))
+            .take(3)
+            .map(|o| o.name)
+            .collect();
+        if !suggestions.is_empty() {
+            out.push(Line::from(Span::styled(
+                format!("    Consider: {}", suggestions.join(" \u{00b7} ")),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        for opt in have {
+            out.push(Line::from(vec![
+                Span::styled("    \u{2713} ", Style::default().fg(Color::Green)),
+                Span::styled(opt.name, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  \u{2014} {}", opt.note),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+}
+
 fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -570,15 +689,12 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
             )));
             stats.push(Line::from(Span::raw("")));
 
-            // Outcomes
-            let outcome_color = if s.kill_rate >= 0.7 { Color::Green }
-                else if s.kill_rate >= 0.4 { Color::Yellow } else { Color::Red };
+            // Avg HP loss per fight
+            let hp_color = if s.mean_hp_loss < 10.0 { Color::Green }
+                else if s.mean_hp_loss < 25.0 { Color::Yellow } else { Color::Red };
             stats.push(Line::from(Span::styled(
-                format!(
-                    "  Win rate: {:.0}%   Survive rate: {:.0}%   Avg HP loss: {:.0}",
-                    s.kill_rate * 100.0, s.survival_rate * 100.0, s.mean_hp_loss
-                ),
-                Style::default().fg(outcome_color),
+                format!("  Avg HP loss per fight: {:.0}", s.mean_hp_loss),
+                Style::default().fg(hp_color),
             )));
         } else {
             stats.push(Line::from(Span::styled(
@@ -588,6 +704,12 @@ fn render_deck_dash(frame: &mut Frame, app: &App, area: Rect) {
         }
     } else {
         stats.push(Line::from(Span::raw("  No deck stats computed yet.")));
+    }
+
+    // ── Scaling card check (boss prep) ───────────────────────────────────────
+    if let Some(ref run) = app.run {
+        stats.push(Line::from(Span::raw("")));
+        render_scaling_check(&mut stats, &run.deck, &run.class);
     }
 
     frame.render_widget(
@@ -1205,6 +1327,11 @@ fn render_map_view(frame: &mut Frame, app: &App, area: Rect) {
                     .block(Block::default().borders(Borders::ALL)),
                 body[0],
             );
+            // Still render the deck column so relics/deck are visible even before a map
+            // is generated (e.g. during act transition ancient boon → map).
+            if let Some(ref run) = app.run {
+                render_map_deck_column(frame, app, body[2], run);
+            }
             render_statusbar(frame, app, outer[2]);
             return;
         }

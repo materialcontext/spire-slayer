@@ -3,7 +3,7 @@ use rand::Rng;
 use thiserror::Error;
 
 use crate::domain::ai::{AiCondition, AiRuntime, AiStateKind, EnemyAiScript, RepeatConstraint};
-use crate::domain::card::{Card, CardType};
+use crate::domain::card::{Card, CardType, Enchantment};
 use crate::domain::combat::{CombatState, EnemyState, Intent};
 use crate::domain::effect::{BuffType, CardEffect, OrbType};
 use crate::domain::encounter::map_intent;
@@ -26,19 +26,33 @@ pub enum SimError {
 
 /// Damage a single hit of `base` deals, accounting for Strength, Weak, Vulnerable.
 /// Also applies relic passive modifiers: RED_SKULL, PAPER_PHROG, PAPER_KRANE.
+/// Set `add_strength` to false for block-derived damage (e.g. DamageEqBlock) where
+/// Strength does not apply — only Weak/Vulnerable modifiers do.
 fn compute_hit(base: u32, state: &CombatState, target_idx: usize) -> u32 {
-    let mut strength = state.player.buff(&BuffType::Strength);
-    // RED_SKULL: +3 Strength while HP ≤ 50%
-    if state.has_relic("RED_SKULL") && state.player.hp * 2 <= state.player.max_hp {
-        strength += 3;
-    }
+    compute_hit_inner(base, state, target_idx, true)
+}
+
+fn compute_hit_no_strength(base: u32, state: &CombatState, target_idx: usize) -> u32 {
+    compute_hit_inner(base, state, target_idx, false)
+}
+
+fn compute_hit_inner(base: u32, state: &CombatState, target_idx: usize, add_strength: bool) -> u32 {
     let weak = state.player.buff(&BuffType::Weak) > 0;
     let vulnerable = state.enemies[target_idx].buff(&BuffType::Vulnerable) > 0;
 
-    let raw = if strength >= 0 {
-        base + strength as u32
+    let raw = if add_strength {
+        let mut strength = state.player.buff(&BuffType::Strength);
+        // RED_SKULL: +3 Strength while HP ≤ 50%
+        if state.has_relic("RED_SKULL") && state.player.hp * 2 <= state.player.max_hp {
+            strength += 3;
+        }
+        if strength >= 0 {
+            base + strength as u32
+        } else {
+            base.saturating_sub((-strength) as u32)
+        }
     } else {
-        base.saturating_sub((-strength) as u32)
+        base
     };
     // PAPER_KRANE: Weak deals 40% less (3/5) instead of 25% less (3/4)
     let after_weak = if weak {
@@ -132,6 +146,23 @@ fn damage_player(state: &mut CombatState, dmg: u32) {
 
 /// Draw `n` cards from the draw pile into hand.
 /// When the draw pile is empty, the discard pile is shuffled into it.
+/// Pull all Innate cards from the draw pile into hand (called before the regular draw).
+/// Innate cards are always in your opening hand; they don't count against hand_size.
+pub fn draw_innate_cards(state: &mut CombatState) {
+    let mut innate_indices: Vec<usize> = state.draw_pile
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.innate)
+        .map(|(i, _)| i)
+        .collect();
+    // Remove back-to-front to preserve indices
+    innate_indices.sort_unstable_by(|a, b| b.cmp(a));
+    for i in innate_indices {
+        let card = state.draw_pile.remove(i);
+        state.hand.push(card);
+    }
+}
+
 pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
     for _ in 0..n {
         if state.draw_pile.is_empty() {
@@ -144,8 +175,28 @@ pub fn draw_cards(state: &mut CombatState, n: usize, rng: &mut impl Rng) {
             if state.has_relic("THE_ABACUS") {
                 state.player.block += 6;
             }
+            // PERFECT_FIT: move those cards to the top of the freshly-shuffled pile
+            let has_pf = state.draw_pile.iter()
+                .any(|c| c.enchantments.iter().any(|e| matches!(e, Enchantment::PerfectFit)));
+            if has_pf {
+                let mut top: Vec<Card> = Vec::new();
+                let mut rest: Vec<Card> = Vec::new();
+                for c in state.draw_pile.drain(..) {
+                    if c.enchantments.iter().any(|e| matches!(e, Enchantment::PerfectFit)) {
+                        top.push(c);
+                    } else {
+                        rest.push(c);
+                    }
+                }
+                top.extend(rest);
+                state.draw_pile = top;
+            }
         }
-        let card = state.draw_pile.remove(0);
+        let mut card = state.draw_pile.remove(0);
+        // SLITHER: randomize cost 0–3 each time this card is drawn
+        if card.enchantments.iter().any(|e| matches!(e, Enchantment::Slither)) {
+            card.cost = rng.gen_range(0u8..=3u8);
+        }
         state.hand.push(card);
     }
 }
@@ -258,16 +309,22 @@ fn trigger_orb_passives(state: &mut CombatState, rng: &mut impl Rng) {
 /// Apply a single card effect to the combat state.
 ///
 /// `Passive` effects are no-ops in the simulator; they are display-only.
+/// `osty_attack`: damage comes from Osty (the ally), so player Strength and
+/// Weak debuff are excluded — only enemy Vulnerable applies.
 pub(crate) fn apply_effect(
     state: &mut CombatState,
     effect: &CardEffect,
     target_idx: usize,
+    osty_attack: bool,
     rng: &mut impl Rng,
 ) {
+    let hit = |d, st: &CombatState, t| {
+        if osty_attack { compute_hit_no_strength(d, st, t) } else { compute_hit(d, st, t) }
+    };
     match effect {
         CardEffect::Damage(d) => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
-                let dmg = compute_hit(*d, state, target_idx);
+                let dmg = hit(*d, state, target_idx);
                 let thorns = damage_enemy(state, target_idx, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -277,10 +334,10 @@ pub(crate) fn apply_effect(
 
         CardEffect::DamageAll(d) => {
             // Collect (index, damage, thorns) before mutating.
-            let hits: Vec<(usize, u32, u32)> = (0..state.enemies.len())
+            let hit_list: Vec<(usize, u32, u32)> = (0..state.enemies.len())
                 .filter(|&i| state.enemies[i].is_alive())
                 .map(|i| {
-                    let dmg = compute_hit(*d, state, i);
+                    let dmg = hit(*d, state, i);
                     let thorns = state.enemies[i]
                         .buffs
                         .get(&BuffType::Thorns)
@@ -291,7 +348,7 @@ pub(crate) fn apply_effect(
                 })
                 .collect();
 
-            for (i, dmg, thorns) in hits {
+            for (i, dmg, thorns) in hit_list {
                 damage_enemy(state, i, dmg);
                 if thorns > 0 {
                     damage_player(state, thorns);
@@ -313,7 +370,7 @@ pub(crate) fn apply_effect(
                     if !state.enemies[target_idx].is_alive() {
                         break;
                     }
-                    let dmg = compute_hit(*base, state, target_idx);
+                    let dmg = hit(*base, state, target_idx);
                     damage_enemy(state, target_idx, dmg);
                     if thorns > 0 {
                         damage_player(state, thorns);
@@ -325,6 +382,8 @@ pub(crate) fn apply_effect(
         CardEffect::DamageEqBlock => {
             if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
                 let base = state.player.block;
+                // Block value is the base; Strength, Weak, and Vulnerable all apply normally.
+                // Osty flag is ignored here — DamageEqBlock is always a player action.
                 let dmg = compute_hit(base, state, target_idx);
                 let thorns = damage_enemy(state, target_idx, dmg);
                 if thorns > 0 {
@@ -351,6 +410,13 @@ pub(crate) fn apply_effect(
 
         CardEffect::LoseHp(h) => {
             state.player.hp = state.player.hp.saturating_sub(*h);
+        }
+
+        CardEffect::EnemyLoseHp(h) => {
+            // Direct HP loss: bypasses block, Strength, Weak, and Vulnerable.
+            if target_idx < state.enemies.len() && state.enemies[target_idx].is_alive() {
+                state.enemies[target_idx].hp = state.enemies[target_idx].hp.saturating_sub(*h);
+            }
         }
 
         CardEffect::ApplyToEnemy { buff, stacks } => {
@@ -444,7 +510,7 @@ pub fn play_card(
     }
 
     // Commit: remove from hand, spend energy
-    let card = state.hand.remove(card_hand_idx);
+    let mut card = state.hand.remove(card_hand_idx);
     // X-cost (255) spends all remaining energy; regular cards spend their printed cost
     let cost_spent = if card.cost == 255 { state.energy } else { card.cost };
     state.energy -= cost_spent;
@@ -480,7 +546,7 @@ pub fn play_card(
         } else {
             effect.clone()
         };
-        apply_effect(state, &effective, target_idx, rng);
+        apply_effect(state, &effective, target_idx, card.osty_attack, rng);
     }
 
     // ── Post-play relic triggers ───────────────────────────────────────────
@@ -540,8 +606,102 @@ pub fn play_card(
         }
     }
 
-    // Powers are exhausted (removed from game); other cards go to discard unless flagged
-    if card.exhausts || card.card_type == CardType::Power {
+    // ── Enchantment post-play triggers ────────────────────────────────────
+    // Pass 1: read enchantment state (immutable borrow of card.enchantments)
+    let mut do_replay = false;
+    let mut gain_energy: u8 = 0;
+    let mut draw_extra: usize = 0;
+    let mut vigorous_bonus: u32 = 0;
+    let mut momentum_per_play: u32 = 0;
+    let mut slumbering_discount: u8 = 0;
+    let mut has_goopy = false;
+
+    for enc in &card.enchantments {
+        match enc {
+            Enchantment::Replay { used: false } => do_replay = true,
+            Enchantment::Sown { energy, used: false } => gain_energy = (*energy).min(u8::MAX as u32) as u8,
+            Enchantment::Swift { cards, used: false } => draw_extra = *cards as usize,
+            Enchantment::Vigorous { bonus, used: false } => vigorous_bonus = *bonus,
+            Enchantment::Momentum { per_play } => momentum_per_play = *per_play,
+            Enchantment::SlumberingEssence { discount } => slumbering_discount = *discount,
+            Enchantment::Goopy { .. } => has_goopy = true,
+            _ => {}
+        }
+    }
+
+    // Apply state side-effects that don't need card mutability
+    if gain_energy > 0 {
+        state.energy = state.energy.saturating_add(gain_energy);
+    }
+    if draw_extra > 0 {
+        draw_cards(state, draw_extra, rng);
+    }
+    if vigorous_bonus > 0 && target_idx < state.enemies.len() {
+        // Vigorous bonus is unmodified extra damage (no Strength/Weak/Vulnerable)
+        let thorns = damage_enemy(state, target_idx, vigorous_bonus);
+        if thorns > 0 {
+            damage_player(state, thorns);
+        }
+    }
+
+    // REPLAY (GLAM / SPIRAL): immediately re-apply the card's effects for free.
+    // Uses the same `effects` clone from the initial play (i.e. pre-Momentum values)
+    // so the replay is truly "identical" to the first play. Relic post-play triggers
+    // and energy costs are NOT repeated. Dead targets are handled naturally by
+    // apply_effect's own is_alive() guards.
+    if do_replay {
+        for effect in &effects {
+            apply_effect(state, effect, target_idx, card.osty_attack, rng);
+        }
+    }
+
+    // Pass 2: mutate card enchantment state
+    for enc in &mut card.enchantments {
+        match enc {
+            Enchantment::Replay { used } => *used = true,
+            Enchantment::Sown { used, .. } => *used = true,
+            Enchantment::Swift { used, .. } => *used = true,
+            Enchantment::Vigorous { used, .. } => *used = true,
+            Enchantment::Goopy { cumulative } => *cumulative += 1,
+            _ => {}
+        }
+    }
+
+    // MOMENTUM: permanently raise card's attack damage for this combat
+    if momentum_per_play > 0 {
+        for eff in &mut card.effects {
+            match eff {
+                CardEffect::Damage(d) | CardEffect::DamageAll(d) => *d += momentum_per_play,
+                CardEffect::DamageMulti { base, .. } => *base += momentum_per_play,
+                _ => {}
+            }
+        }
+    }
+
+    // GOOPY: permanently raise this card's block by 1 each play
+    if has_goopy {
+        for eff in &mut card.effects {
+            if let CardEffect::Block(b) = eff {
+                *b += 1;
+            }
+        }
+    }
+
+    // SLUMBERING_ESSENCE: restore original cost before returning card to discard
+    if slumbering_discount > 0 {
+        card.cost = card.cost.saturating_add(slumbering_discount);
+        for enc in &mut card.enchantments {
+            if let Enchantment::SlumberingEssence { discount } = enc {
+                *discount = 0;
+            }
+        }
+    }
+
+    // Dispose of the played card
+    if card.eternal {
+        // TEZCATARAS_EMBER: card returns to hand
+        state.hand.push(card);
+    } else if card.exhausts || card.card_type == CardType::Power {
         state.exhaust_pile.push(card);
     } else {
         state.discard_pile.push(card);
@@ -792,11 +952,30 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
         }
     }
 
-    // ── Discard hand ───────────────────────────────────────────────────────
+    // ── SlumberingEssence: reduce cost for cards in hand at end of turn ───
+    for i in 0..state.hand.len() {
+        let has_se = state.hand[i]
+            .enchantments
+            .iter()
+            .any(|e| matches!(e, Enchantment::SlumberingEssence { .. }));
+        if has_se && state.hand[i].cost > 0 {
+            state.hand[i].cost -= 1;
+            for enc in &mut state.hand[i].enchantments {
+                if let Enchantment::SlumberingEssence { discount } = enc {
+                    *discount += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Discard hand (Retain cards stay; Ethereal cards exhaust) ──────────
     let drained: Vec<Card> = state.hand.drain(..).collect();
     for card in drained {
         if card.ethereal {
             state.exhaust_pile.push(card);
+        } else if card.retain {
+            state.hand.push(card); // kept for next turn
         } else {
             state.discard_pile.push(card);
         }
@@ -879,8 +1058,11 @@ pub fn end_turn(state: &mut CombatState, rng: &mut impl Rng) -> bool {
     state.energy = state.energy_max;
     state.turn += 1;
 
-    // Draw new hand
-    draw_cards(state, state.hand_size as usize, rng);
+    // Draw new hand: Innate cards first (always in opening hand), then regular draw
+    draw_innate_cards(state);
+    let innate_drawn = state.hand.len();
+    let regular_draw = (state.hand_size as usize).saturating_sub(innate_drawn);
+    draw_cards(state, regular_draw, rng);
 
     // ── Player start-of-turn relic effects (after drawing) ────────────────
     // BOUND_PHYLACTERY: Summon 1 per turn (≈ +1 Block)
@@ -991,6 +1173,34 @@ fn map_power_id_to_buff(id: &str) -> Option<BuffType> {
 }
 
 /// Resolve a single enemy's intent against the player.
+/// Auto-play all IMBUED cards at the start of a new combat.
+///
+/// Call this after drawing the opening hand (innate + regular draw) but before
+/// the player's first turn. Imbued cards are played in the order they appear in
+/// the draw pile; they target enemy slot 0 by default.
+pub fn apply_imbued(state: &mut CombatState, rng: &mut impl Rng) {
+    loop {
+        // Find the first imbued card in the draw pile
+        let idx = state.draw_pile
+            .iter()
+            .position(|c| c.enchantments.iter().any(|e| matches!(e, Enchantment::Imbued)));
+        let Some(draw_idx) = idx else { break };
+
+        // Move to hand, then play it
+        let card = state.draw_pile.remove(draw_idx);
+        state.hand.push(card);
+        let hand_idx = state.hand.len() - 1;
+
+        if state.hand[hand_idx].is_playable(state.energy) {
+            let _ = play_card(state, hand_idx, 0, rng);
+        } else {
+            // Not enough energy; move to discard without playing
+            let card = state.hand.remove(hand_idx);
+            state.discard_pile.push(card);
+        }
+    }
+}
+
 fn resolve_enemy_intent(state: &mut CombatState, enemy_idx: usize) {
     let intent = state.enemies[enemy_idx].intent.clone();
     let enemy_weak = state.enemies[enemy_idx].buff(&BuffType::Weak) > 0;
@@ -1245,6 +1455,50 @@ mod tests {
     }
 
     #[test]
+    fn retain_card_stays_in_hand_after_turn() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        let retained = Card::new(99, "Pummel", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_retain();
+        state.hand.push(retained);
+        state.draw_pile = vec![];
+        end_turn(&mut state, &mut rng());
+        assert!(state.hand.iter().any(|c| c.name == "Pummel"), "Retain card should stay in hand");
+        assert!(state.discard_pile.iter().all(|c| c.name != "Pummel"), "Retain card should not be discarded");
+    }
+
+    #[test]
+    fn innate_card_always_in_opening_hand() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        // Fill draw pile with non-innate cards + one innate card at the end
+        state.draw_pile = (0..10).map(|_| strike()).collect();
+        let innate = Card::new(99, "Warpath", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_innate();
+        state.draw_pile.push(innate);
+        state.hand.clear();
+        draw_innate_cards(&mut state);
+        assert!(state.hand.iter().any(|c| c.name == "Warpath"), "Innate card should be drawn first");
+        assert_eq!(state.hand.len(), 1, "Only the innate card should be pulled");
+    }
+
+    #[test]
+    fn innate_reduces_regular_draw_count() {
+        use crate::domain::card::Card;
+        let mut state = basic_state();
+        state.draw_pile = (0..10).map(|_| strike()).collect();
+        let innate = Card::new(99, "Warpath", 1, CardType::Attack, Rarity::Common, vec![])
+            .with_innate();
+        state.draw_pile.push(innate);
+        // Simulate start_turn: innate drawn first, then hand_size - 1 more
+        draw_innate_cards(&mut state);
+        let innate_count = state.hand.len();
+        let regular_draw = (state.hand_size as usize).saturating_sub(innate_count);
+        draw_cards(&mut state, regular_draw, &mut rng());
+        assert_eq!(state.hand.len(), state.hand_size as usize, "Total hand should equal hand_size");
+    }
+
+    #[test]
     fn poison_ticks_on_end_turn() {
         let mut state = basic_state();
         *state.enemies[0].buffs.entry(BuffType::Poison).or_insert(0) = 3;
@@ -1376,6 +1630,17 @@ mod tests {
         state.hand.push(body_slam());
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
         assert_eq!(state.enemies[0].hp, 50); // no damage
+    }
+
+    #[test]
+    fn damage_eq_block_uses_strength() {
+        let mut state = basic_state();
+        state.player.block = 15;
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) = 5;
+        state.hand.push(body_slam());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // Body Slam: block (15) + Strength (5) = 20 damage → 50 - 20 = 30
+        assert_eq!(state.enemies[0].hp, 30);
     }
 
     // ── Relic: ANCHOR ─────────────────────────────────────────────────────────
@@ -1561,5 +1826,334 @@ mod tests {
         state.player.hp = 1;
         end_turn(&mut state, &mut rng()); // Both spent — should die
         assert_eq!(state.player.hp, 0, "Should die when both safety nets are spent");
+    }
+
+    // ── Enchantment tests ─────────────────────────────────────────────────────
+
+    fn strike_with(enchantment_id: &str, amount: u32) -> Card {
+        let mut c = strike();
+        c.apply_enchantment(enchantment_id, amount);
+        c
+    }
+
+    fn defend_with(enchantment_id: &str, amount: u32) -> Card {
+        let mut c = defend();
+        c.apply_enchantment(enchantment_id, amount);
+        c
+    }
+
+    #[test]
+    fn sharp_increases_damage() {
+        let mut state = basic_state();
+        state.hand.push(strike_with("SHARP", 3));
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 41); // 50 - (6+3)
+    }
+
+    #[test]
+    fn instinct_doubles_damage() {
+        let mut state = basic_state();
+        state.hand.push(strike_with("INSTINCT", 0));
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 38); // 50 - 12
+    }
+
+    #[test]
+    fn adroit_adds_block() {
+        let mut state = basic_state();
+        state.hand.push(defend_with("ADROIT", 4));
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.player.block, 9); // 5+4
+    }
+
+    #[test]
+    fn nimble_boosts_block() {
+        let mut state = basic_state();
+        state.hand.push(defend_with("NIMBLE", 3));
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.player.block, 8); // 5+3
+    }
+
+    #[test]
+    fn royally_approved_sets_innate_and_retain() {
+        let mut c = strike();
+        c.apply_enchantment("ROYALLY_APPROVED", 0);
+        assert!(c.innate);
+        assert!(c.retain);
+    }
+
+    #[test]
+    fn steady_sets_retain() {
+        let mut c = strike();
+        c.apply_enchantment("STEADY", 0);
+        assert!(c.retain);
+    }
+
+    #[test]
+    fn souls_power_removes_exhaust() {
+        let mut c = Card::new(99, "Offering", 0, CardType::Skill, Rarity::Common,
+            vec![CardEffect::LoseHp(6)]);
+        c.exhausts = true;
+        c.apply_enchantment("SOULS_POWER", 0);
+        assert!(!c.exhausts);
+    }
+
+    #[test]
+    fn tezcataras_ember_sets_cost_zero_and_eternal() {
+        let mut c = strike();
+        c.apply_enchantment("TEZCATARAS_EMBER", 0);
+        assert_eq!(c.cost, 0);
+        assert!(c.eternal);
+    }
+
+    #[test]
+    fn eternal_card_returns_to_hand_after_play() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("TEZCATARAS_EMBER", 0);
+        state.hand.push(c);
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.hand.len(), 1, "Eternal card should return to hand");
+        assert!(state.discard_pile.is_empty());
+    }
+
+    #[test]
+    fn replay_glam_applies_effects_twice_first_play() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        state.hand.push(c);
+        // First play: Strike (6) + Replay (6) = 12 damage total
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 38, "Replay should deal damage twice");
+        assert!(state.hand.is_empty(), "No copy placed in hand");
+        assert_eq!(state.discard_pile.len(), 1, "Card goes to discard after play");
+    }
+
+    #[test]
+    fn replay_glam_does_not_replay_second_play() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        // Manually mark as used (as if already played once this combat)
+        for enc in &mut c.enchantments {
+            if let Enchantment::Replay { used } = enc { *used = true; }
+        }
+        state.hand.push(c);
+        // Second play: only 6 damage (no replay)
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 44, "No replay on second play");
+    }
+
+    #[test]
+    fn replay_glam_does_nothing_when_target_dead() {
+        let mut state = basic_state();
+        state.enemies[0].hp = 5; // strike kills it
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        state.hand.push(c);
+        // Strike kills enemy (5 dmg → dead), replay damage is a no-op
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 0, "Enemy dead after first hit");
+        // If replay applied to dead target, hp stays at 0 (not negative)
+        assert_eq!(state.enemies[0].hp, 0);
+    }
+
+    #[test]
+    fn momentum_increases_damage_each_play() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("MOMENTUM", 2);
+        state.draw_pile.push(c);
+        draw_cards(&mut state, 1, &mut rng());
+        // First play: 6 damage, then card gains +2
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 44); // 50-6
+        // Card should now have 8 damage (6+2)
+        assert_eq!(state.discard_pile[0].effects[0], CardEffect::Damage(8));
+    }
+
+    #[test]
+    fn sown_grants_energy_first_play_only() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("SOWN", 1);
+        state.hand.push(c.clone());
+        // First play: gain 1 energy; started with 3, spent 1, gain 1 → net 3
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.energy, 3); // 3 - 1 + 1
+
+        // Second play: no energy gain
+        state.energy = 3;
+        let card_in_discard = state.discard_pile.remove(0);
+        state.hand.push(card_in_discard);
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.energy, 2); // 3 - 1, no bonus
+    }
+
+    #[test]
+    fn swift_draws_cards_first_play_only() {
+        let mut state = basic_state();
+        // Fill draw pile
+        for _ in 0..3 {
+            state.draw_pile.push(defend());
+        }
+        let mut c = strike();
+        c.apply_enchantment("SWIFT", 2);
+        state.hand.push(c.clone());
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.hand.len(), 2, "Swift should draw 2 cards on first play");
+
+        // Second play: no draw
+        state.hand.clear();
+        let card_in_discard = state.discard_pile.remove(0);
+        state.hand.push(card_in_discard);
+        let hand_before = state.hand.len();
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.hand.len(), hand_before - 1, "Swift should not draw again");
+    }
+
+    #[test]
+    fn vigorous_deals_bonus_damage_first_play_only() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("VIGOROUS", 5);
+        state.hand.push(c.clone());
+        // First play: 6 + 5 = 11 damage
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 39); // 50 - 11
+
+        // Second play: only base 6 damage
+        state.enemies[0].hp = 50;
+        let card_in_discard = state.discard_pile.remove(0);
+        state.hand.push(card_in_discard);
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 44); // 50 - 6
+    }
+
+    #[test]
+    fn slumber_reduces_cost_each_turn_in_hand() {
+        let mut state = basic_state();
+        let mut c = Card::new(99, "Heavy", 3, CardType::Attack, Rarity::Common,
+            vec![CardEffect::Damage(10)]);
+        c.apply_enchantment("SLUMBERING_ESSENCE", 0);
+        state.hand.push(c);
+        // Turn 1: cost 3, end of turn → cost 2
+        end_turn(&mut state, &mut rng());
+        // Card retained? No — "Heavy" doesn't have retain. It goes to discard.
+        // Let's use a retain card so it stays in hand across turns.
+        // Actually let's just check the discard pile value after end_turn.
+        // The card is in hand at end_turn time → cost should be decremented, then discarded.
+        let discarded = state.discard_pile.iter().find(|c| c.name == "Heavy");
+        // After being discarded, card.cost should still be 2 (reduced during end_turn)
+        if let Some(card) = discarded {
+            assert_eq!(card.cost, 2, "Cost should drop by 1 after one turn in hand");
+        }
+    }
+
+    #[test]
+    fn slumber_resets_cost_on_play() {
+        let mut state = basic_state();
+        let mut c = Card::new(99, "Heavy", 3, CardType::Attack, Rarity::Common,
+            vec![CardEffect::Damage(10)]);
+        c.apply_enchantment("SLUMBERING_ESSENCE", 0);
+        c.retain = true; // keep it in hand for 2 turns
+        state.hand.push(c);
+
+        // Turn 1 end: cost 3 → 2, retained
+        end_turn(&mut state, &mut rng());
+        // Turn 2 end: cost 2 → 1, retained
+        end_turn(&mut state, &mut rng());
+        assert_eq!(state.hand[0].cost, 1, "Cost should be 1 after 2 turns");
+
+        // Now play it (costs 1, not 3)
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        // Card goes to discard with restored cost
+        let discarded = &state.discard_pile[0];
+        assert_eq!(discarded.cost, 3, "Cost should reset to original after playing");
+    }
+
+    #[test]
+    fn slither_randomizes_cost_on_draw() {
+        let mut state = basic_state();
+        let mut c = Card::new(99, "Slithery", 2, CardType::Attack, Rarity::Common,
+            vec![CardEffect::Damage(8)]);
+        c.apply_enchantment("SLITHER", 0);
+        state.draw_pile.push(c);
+        draw_cards(&mut state, 1, &mut rng());
+        let drawn_cost = state.hand[0].cost;
+        assert!(drawn_cost <= 3, "Slither cost should be 0-3");
+    }
+
+    #[test]
+    fn perfect_fit_moves_to_top_after_shuffle() {
+        let mut state = basic_state();
+        // 4 regular cards in draw pile, 1 PerfectFit in discard
+        for i in 0..4 {
+            state.draw_pile.push(Card::new(i, "Filler", 1, CardType::Attack, Rarity::Common,
+                vec![CardEffect::Damage(1)]));
+        }
+        let mut pf = defend();
+        pf.apply_enchantment("PERFECT_FIT", 0);
+        state.discard_pile.push(pf);
+
+        // Drain draw pile so the next draw triggers a shuffle
+        state.draw_pile.clear();
+        draw_cards(&mut state, 1, &mut rng());
+        assert_eq!(state.hand[0].name, "Defend", "PerfectFit card should be on top after shuffle");
+    }
+
+    #[test]
+    fn goopy_increases_block_each_play() {
+        let mut state = basic_state();
+        let mut c = defend();
+        c.apply_enchantment("GOOPY", 0);
+        assert!(c.exhausts, "Goopy adds Exhaust");
+
+        // Each play boosts the block by 1 permanently
+        state.hand.push(c);
+        play_card(&mut state, 0, 0, &mut rng()).unwrap(); // block = 5, then effects bumped to 6
+        let exhausted = &state.exhaust_pile[0];
+        assert_eq!(exhausted.effects.iter().filter_map(|e| {
+            if let CardEffect::Block(b) = e { Some(*b) } else { None }
+        }).next(), Some(6), "Block effect should be 6 after first Goopy play");
+    }
+
+    #[test]
+    fn apply_imbued_plays_imbued_card_at_combat_start() {
+        let mut state = basic_state();
+        // One imbued defend in draw pile
+        let mut c = defend();
+        c.apply_enchantment("IMBUED", 0);
+        state.draw_pile.push(c);
+        apply_imbued(&mut state, &mut rng());
+        // Defend should have been played (block gained) and exhausted
+        assert_eq!(state.player.block, 5, "Imbued Defend should grant block");
+        assert!(state.draw_pile.is_empty());
+        assert!(state.exhaust_pile.is_empty()); // Defend doesn't exhaust normally
+        assert_eq!(state.discard_pile.len(), 1);
+    }
+
+    #[test]
+    fn reset_combat_enchantments_restores_flags() {
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        c.apply_enchantment("SOWN", 2);
+        // Simulate used state
+        for enc in &mut c.enchantments {
+            match enc {
+                Enchantment::Replay { used } => *used = true,
+                Enchantment::Sown { used, .. } => *used = true,
+                _ => {}
+            }
+        }
+        c.reset_combat_enchantments();
+        for enc in &c.enchantments {
+            match enc {
+                Enchantment::Replay { used } => assert!(!used, "Replay should reset"),
+                Enchantment::Sown { used, .. } => assert!(!used, "Sown should reset"),
+                _ => {}
+            }
+        }
     }
 }

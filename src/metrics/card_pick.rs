@@ -260,17 +260,38 @@ pub fn score_single(card: &Card, deck: &[Card], _act: u8) -> f32 {
     let new_synergy = synergy_score(&extended) as i32;
     let synergy_delta = ((new_synergy - base_synergy).max(0) as f32) * 0.10;
 
-    let cost = card.cost.clamp(1, 254) as f32;
     let output = (card.base_damage() + card.base_block()) as f32;
-    let efficiency = if output > 0.0 {
-        (output / cost / 20.0).min(0.30)
+    // X-cost (255): value scales with available energy; use a fixed estimate.
+    // Regular cards: raise the cap from 0.30 → 0.50 so efficient 1-cost cards
+    // can differentiate from efficient 3-cost cards.
+    let efficiency = if card.cost == 255 {
+        0.20
+    } else if output > 0.0 {
+        let cost = card.cost.clamp(1, 254) as f32;
+        (output / cost / 20.0).min(0.50)
     } else {
         0.10
     };
 
+    // 4+-cost cards usually can't be played in a standard 3-energy turn without
+    // an energy relic or Black Star. Apply a reliability penalty for the pick
+    // heuristic so we don't recommend them blindly early in a run.
+    let cost_penalty = if card.cost >= 4 && card.cost != 255 { -0.15 } else { 0.0 };
+
     let dilution_bonus = (1.0 / (deck.len() as f32 + 1.0)).min(0.15);
 
+    // Keyword modifiers that affect pick value
+    // Ethereal: might get exhausted before you use it — slight penalty to reliability
+    let ethereal_penalty = if card.ethereal { -0.08 } else { 0.0 };
+    // Exhaust: permanently removes itself from the deck — reduces card density over time
+    let exhaust_penalty = if card.exhausts { -0.05 } else { 0.0 };
+    // Innate: always in opening hand — slight bonus for reliability
+    let innate_bonus = if card.innate { 0.05 } else { 0.0 };
+    // Retain: available across turns — slight bonus for flexibility
+    let retain_bonus = if card.retain { 0.04 } else { 0.0 };
+
     rarity_weight + synergy_delta + efficiency + dilution_bonus
+        + ethereal_penalty + exhaust_penalty + innate_bonus + retain_bonus + cost_penalty
 }
 
 /// Rank the offered cards best-first using heuristics only (no simulation).
