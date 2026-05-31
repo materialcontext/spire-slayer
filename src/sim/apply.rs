@@ -644,6 +644,17 @@ pub fn play_card(
         }
     }
 
+    // REPLAY (GLAM / SPIRAL): immediately re-apply the card's effects for free.
+    // Uses the same `effects` clone from the initial play (i.e. pre-Momentum values)
+    // so the replay is truly "identical" to the first play. Relic post-play triggers
+    // and energy costs are NOT repeated. Dead targets are handled naturally by
+    // apply_effect's own is_alive() guards.
+    if do_replay {
+        for effect in &effects {
+            apply_effect(state, effect, target_idx, card.osty_attack, rng);
+        }
+    }
+
     // Pass 2: mutate card enchantment state
     for enc in &mut card.enchantments {
         match enc {
@@ -686,19 +697,6 @@ pub fn play_card(
         }
     }
 
-    // REPLAY: build copy with the Replay already marked used so it doesn't re-trigger
-    let replay_copy: Option<Card> = if do_replay {
-        let mut copy = card.clone();
-        for enc in &mut copy.enchantments {
-            if let Enchantment::Replay { used } = enc {
-                *used = true;
-            }
-        }
-        Some(copy)
-    } else {
-        None
-    };
-
     // Dispose of the played card
     if card.eternal {
         // TEZCATARAS_EMBER: card returns to hand
@@ -707,11 +705,6 @@ pub fn play_card(
         state.exhaust_pile.push(card);
     } else {
         state.discard_pile.push(card);
-    }
-
-    // REPLAY copy goes to hand after the original is disposed
-    if let Some(copy) = replay_copy {
-        state.hand.push(copy);
     }
 
     Ok(())
@@ -1925,18 +1918,45 @@ mod tests {
     }
 
     #[test]
-    fn replay_glam_puts_copy_in_hand() {
+    fn replay_glam_applies_effects_twice_first_play() {
         let mut state = basic_state();
         let mut c = strike();
         c.apply_enchantment("GLAM", 0);
         state.hand.push(c);
+        // First play: Strike (6) + Replay (6) = 12 damage total
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
-        // Original in discard, copy in hand
-        assert_eq!(state.hand.len(), 1, "Replay copy should be in hand");
-        assert_eq!(state.discard_pile.len(), 1);
-        // Playing the copy should NOT put another copy in hand
+        assert_eq!(state.enemies[0].hp, 38, "Replay should deal damage twice");
+        assert!(state.hand.is_empty(), "No copy placed in hand");
+        assert_eq!(state.discard_pile.len(), 1, "Card goes to discard after play");
+    }
+
+    #[test]
+    fn replay_glam_does_not_replay_second_play() {
+        let mut state = basic_state();
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        // Manually mark as used (as if already played once this combat)
+        for enc in &mut c.enchantments {
+            if let Enchantment::Replay { used } = enc { *used = true; }
+        }
+        state.hand.push(c);
+        // Second play: only 6 damage (no replay)
         play_card(&mut state, 0, 0, &mut rng()).unwrap();
-        assert!(state.hand.is_empty(), "Second play should not replay again");
+        assert_eq!(state.enemies[0].hp, 44, "No replay on second play");
+    }
+
+    #[test]
+    fn replay_glam_does_nothing_when_target_dead() {
+        let mut state = basic_state();
+        state.enemies[0].hp = 5; // strike kills it
+        let mut c = strike();
+        c.apply_enchantment("GLAM", 0);
+        state.hand.push(c);
+        // Strike kills enemy (5 dmg → dead), replay damage is a no-op
+        play_card(&mut state, 0, 0, &mut rng()).unwrap();
+        assert_eq!(state.enemies[0].hp, 0, "Enemy dead after first hit");
+        // If replay applied to dead target, hp stays at 0 (not negative)
+        assert_eq!(state.enemies[0].hp, 0);
     }
 
     #[test]
