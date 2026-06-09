@@ -1873,6 +1873,14 @@ impl App {
                         let name = card.name.clone();
                         run.deck.push(card);
                         self.status_message = format!("Bought {} for {}g ({} cards, {}g left)", name, price, run.deck.len(), run.gold);
+                        // Track card purchase in pending shop
+                        if let Some(ref mut pending) = self.pending_shop {
+                            pending.purchases.push(crate::domain::run_history::ShopPurchase {
+                                name: name.clone(),
+                                cost: price,
+                                kind: "Card".to_string(),
+                            });
+                        }
                         self.shop_cards.remove(self.shop_cursor);
                         self.shop_card_prices.remove(self.shop_cursor);
                         if let Some(ref mut di) = self.shop_discounted_card_idx {
@@ -1900,6 +1908,14 @@ impl App {
                         let desc = relic.description.clone().unwrap_or_default();
                         run.relics.push(crate::domain::run::Relic::new(&relic.id, &relic.name, desc));
                         self.status_message = format!("Bought {} for {}g ({}g left)", relic.name, price, run.gold);
+                        // Track relic purchase in pending shop
+                        if let Some(ref mut pending) = self.pending_shop {
+                            pending.purchases.push(crate::domain::run_history::ShopPurchase {
+                                name: relic.name.clone(),
+                                cost: price,
+                                kind: "Relic".to_string(),
+                            });
+                        }
                         self.shop_relics.remove(relic_idx);
                         self.shop_relic_prices.remove(relic_idx);
                         let new_total = self.shop_cards.len() + self.shop_relics.len() + if self.shop_has_removal { 1 } else { 0 };
@@ -1920,11 +1936,40 @@ impl App {
                         self.shop_removal_price = r_base + 25 * run.card_removals_bought;
                         self.shop_has_removal = false;
                         self.status_message = format!("Card removal purchased for {}g ({}g left)", price, run.gold);
+                        // Track removal cost in pending shop
+                        if let Some(ref mut pending) = self.pending_shop {
+                            pending.removal_cost = Some(price);
+                        }
                         if self.shop_cursor > 0 { self.shop_cursor -= 1; }
                     }
                 }
             }
             KeyCode::Esc => {
+                // Finalize shop history entry before exiting
+                if let Some(pending) = self.pending_shop.take() {
+                    use crate::domain::run_history::{EntryDetail, HistoryEntry, ShopEntry};
+                    let gold_after = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                    let hp_after = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                    let floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+                    let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+                    let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+                    let gold_spent = pending.gold_before.saturating_sub(gold_after);
+                    let entry = HistoryEntry {
+                        floor, act, sub_act,
+                        room_label: "Shop".to_string(),
+                        hp_before: pending.hp, hp_after,
+                        gold_before: pending.gold_before, gold_after,
+                        detail: EntryDetail::Shop(ShopEntry {
+                            gold_spent,
+                            purchases: pending.purchases,
+                            card_removed: pending.card_removed,
+                            removal_cost: pending.removal_cost,
+                        }),
+                    };
+                    if let Some(ref mut run) = self.run {
+                        run.history.push(entry);
+                    }
+                }
                 self.shop_cards.clear();
                 self.shop_card_advice.clear();
                 self.shop_card_prices.clear();
