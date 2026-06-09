@@ -330,6 +330,16 @@ pub fn apply_start_of_combat_relics(state: &mut CombatState) {
     if state.has_relic("LANTERN") { state.energy_max += 1; }
     // PHILOSOPHERS_STONE: +1 energy per turn modelled as +1 energy_max
     if state.has_relic("PHILOSOPHERS_STONE") { state.energy_max += 1; }
+    // VENERABLE_TEA_SET: +2 energy at combat start (after resting)
+    if state.has_relic("VENERABLE_TEA_SET") { state.energy_max += 2; }
+    // FAKE_VENERABLE_TEA_SET: +1 energy at combat start
+    if state.has_relic("FAKE_VENERABLE_TEA_SET") { state.energy_max += 1; }
+    // GIRYA stacks: each _GIRYA_STACK_N phantom relic grants +1 permanent Strength.
+    // These are encoded with unique indices to survive HashSet deduplication.
+    let girya_str = state.relics.iter().filter(|r| r.starts_with("_GIRYA_STACK_")).count() as i32;
+    if girya_str > 0 {
+        *state.player.buffs.entry(BuffType::Strength).or_insert(0) += girya_str;
+    }
 
     // ── Debuffs on all enemies ─────────────────────────────────────────────
     if state.has_relic("BAG_OF_MARBLES")     { apply_all_enemies(state, BuffType::Vulnerable, 1); }

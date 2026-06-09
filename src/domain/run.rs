@@ -85,6 +85,12 @@ pub struct RunState {
     /// History of all nodes visited this run, in order.
     #[serde(default)]
     pub history: Vec<crate::domain::run_history::HistoryEntry>,
+    /// Number of Girya uses this run (max 3).
+    #[serde(default)]
+    pub girya_uses: u32,
+    /// Permanent Strength accumulated from Girya; applied at combat start.
+    #[serde(default)]
+    pub girya_stacks: i32,
 }
 
 impl RunState {
@@ -114,7 +120,14 @@ impl RunState {
             had_darv_act2: false,
             boss_name: None,
             history: Vec::new(),
+            girya_uses: 0,
+            girya_stacks: 0,
         }
+    }
+
+    /// Returns true if the player currently holds the relic with the given ID.
+    pub fn has_relic(&self, id: &str) -> bool {
+        self.relics.iter().any(|r| r.id == id)
     }
 
     /// Generate (or regenerate) the map for the current sub-act.

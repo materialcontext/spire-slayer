@@ -45,6 +45,14 @@ pub struct EventEntry {
 pub struct RestEntry {
     pub hp_gained: u32,       // >0 if healed, 0 if smithed
     pub card_smithed: Option<String>,
+    #[serde(default)]
+    pub max_hp_gained: u32,       // STONE_HUMIDIFIER
+    #[serde(default)]
+    pub relic_dug: Option<String>, // SHOVEL
+    #[serde(default)]
+    pub strength_lifted: u32,      // GIRYA
+    #[serde(default)]
+    pub card_dreamed: Option<String>, // DREAM_CATCHER
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

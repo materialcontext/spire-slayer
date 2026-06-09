@@ -1738,7 +1738,7 @@ fn render_event_room(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::metrics::rest::RestAction;
+    use crate::metrics::rest::{RestAction, heal_amount, eternal_feather_heal};
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1755,37 +1755,98 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
     frame.render_widget(header, rows[0]);
 
-    // Build option lines
-    let (hp, max_hp) = app.run.as_ref()
-        .map(|r| (r.hp, r.max_hp))
-        .unwrap_or((80, 80));
-    let heal_amount = ((max_hp as f32) * 0.30).floor() as u32;
-    let healed_hp = (hp + heal_amount).min(max_hp);
+    let run = match app.run.as_ref() {
+        Some(r) => r,
+        None => return,
+    };
 
-    let smith_label = app.rest_advice.as_ref().and_then(|a| {
-        if let RestAction::Smith(idx) = a.action {
-            app.run.as_ref().and_then(|r| r.deck.get(idx)).map(|c| c.name.clone())
-        } else {
-            None
-        }
-    }).unwrap_or_else(|| "—".to_string());
-
-    let recommended = app.rest_advice.as_ref().map(|a| {
-        matches!(a.action, RestAction::Heal)
-    }).unwrap_or(true);
+    let (hp, max_hp) = (run.hp, run.max_hp);
+    let h_amount = heal_amount(run);
+    let healed_hp = (hp + h_amount).min(max_hp);
+    let ef_heal = eternal_feather_heal(run);
+    let has_tent = run.has_relic("MINIATURE_TENT");
     let reason = app.rest_advice.as_ref().map(|a| a.reason.as_str()).unwrap_or("");
 
-    let options = [
-        format!("Heal    restore {} HP ({} → {})", heal_amount, hp, healed_hp),
-        format!("Smith   upgrade {}", smith_label),
-    ];
-    let rec_idx: usize = if recommended { 0 } else { 1 };
+    // Recommended index
+    let rec_action = app.rest_advice.as_ref().map(|a| &a.action);
+    let rec_idx: usize = app.rest_options.iter().position(|o| {
+        match (rec_action, o) {
+            (Some(RestAction::Heal),     RestAction::Heal)     => true,
+            (Some(RestAction::Smith(_)), RestAction::Smith(_)) => true,
+            (Some(RestAction::Dig),      RestAction::Dig)      => true,
+            (Some(RestAction::Lift),     RestAction::Lift)     => true,
+            (Some(RestAction::Dream),    RestAction::Dream)    => true,
+            _ => false,
+        }
+    }).unwrap_or(0);
 
-    let mut lines: Vec<Line> = options.iter().enumerate().map(|(i, label)| {
-        let is_cursor   = i == app.rest_cursor;
-        let is_rec      = i == rec_idx;
-        let rec_marker  = if is_rec { " ★" } else { "  " };
-        let prefix      = if is_cursor { "▶ " } else { "  " };
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Eternal Feather auto-heal note
+    if ef_heal > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  Eternal Feather: auto-healed +{} HP on entry", ef_heal),
+            Style::default().fg(Color::Green),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    // Miniature Tent note
+    if has_tent {
+        lines.push(Line::from(Span::styled(
+            "  Miniature Tent: all options will be applied".to_string(),
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    // STONE_HUMIDIFIER note
+    if run.has_relic("STONE_HUMIDIFIER") {
+        lines.push(Line::from(Span::styled(
+            "  Stone Humidifier: +5 Max HP when resting".to_string(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // TINY_MAILBOX note
+    if run.has_relic("TINY_MAILBOX") {
+        lines.push(Line::from(Span::styled(
+            "  Tiny Mailbox: receive 2 potions when resting".to_string(),
+            Style::default().fg(Color::Magenta),
+        )));
+    }
+
+    // Build option labels from rest_options
+    let options: Vec<String> = if app.rest_options.is_empty() {
+        vec![
+            format!("Heal    restore {} HP ({} → {})", h_amount, hp, healed_hp),
+            "Smith   upgrade card".to_string(),
+        ]
+    } else {
+        app.rest_options.iter().map(|opt| match opt {
+            RestAction::Heal => format!(
+                "Heal    restore {} HP ({} → {}){}",
+                h_amount, hp, healed_hp,
+                if run.has_relic("REGAL_PILLOW") { " [+15 Regal Pillow]" } else { "" }
+            ),
+            RestAction::Smith(_) => {
+                use crate::metrics::rest::smith_candidates;
+                let best = smith_candidates(&run.deck).into_iter().next();
+                let name = best.map(|(_, c)| c.name.clone()).unwrap_or_else(|| "—".to_string());
+                format!("Smith   upgrade {}", name)
+            }
+            RestAction::Dig  => "Dig     obtain random relic [Shovel]".to_string(),
+            RestAction::Lift => format!("Lift    +1 Strength [Girya {}/{} uses]", run.girya_uses + 1, 3),
+            RestAction::Dream => "Dream   add a card to deck [Dream Catcher]".to_string(),
+        }).collect()
+    };
+
+    // Option rows
+    for (i, label) in options.iter().enumerate() {
+        let is_cursor = i == app.rest_cursor;
+        let is_rec    = i == rec_idx;
+        let rec_mark  = if is_rec { " ★" } else { "  " };
+        let prefix    = if is_cursor { "▶ " } else { "  " };
         let style = if is_cursor {
             Style::default().fg(Color::Black).bg(Color::Green)
         } else if is_rec {
@@ -1793,10 +1854,10 @@ fn render_rest_site(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        Line::from(vec![
-            Span::styled(format!("{prefix}{label}{rec_marker}"), style),
-        ])
-    }).collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{prefix}{label}{rec_mark}"), style),
+        ]));
+    }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
@@ -2829,8 +2890,13 @@ fn render_run_history(frame: &mut Frame, app: &App, area: Rect) {
                 }
                 EntryDetail::Event(e) => format!("   {} → {}", e.event_name, e.option_chosen),
                 EntryDetail::Rest(r) => {
-                    if r.hp_gained > 0 { format!("   heal +{} HP", r.hp_gained) }
-                    else { format!("   smith: {}", r.card_smithed.as_deref().unwrap_or("?")) }
+                    let mut parts: Vec<String> = Vec::new();
+                    if r.hp_gained > 0 { parts.push(format!("heal +{}", r.hp_gained)); }
+                    if let Some(ref c) = r.card_smithed { parts.push(format!("smith {}", c)); }
+                    if r.strength_lifted > 0 { parts.push("+STR (Girya)".to_string()); }
+                    if let Some(ref rel) = r.relic_dug { parts.push(format!("dug {}", rel)); }
+                    if parts.is_empty() { "   rest".to_string() }
+                    else { format!("   {}", parts.join(", ")) }
                 }
                 EntryDetail::Treasure(t) => {
                     let act = if t.taken { "took" } else { "skipped" };
@@ -2930,11 +2996,42 @@ fn render_run_history(frame: &mut Frame, app: &App, area: Rect) {
                                 format!("     Healed +{} HP", r.hp_gained),
                                 Style::default().fg(Color::Green),
                             )));
-                        } else {
+                        }
+                        if let Some(ref c) = r.card_smithed {
                             lines.push(Line::from(Span::styled(
-                                format!("     Upgraded: {}",
-                                    r.card_smithed.as_deref().unwrap_or("?")),
+                                format!("     Upgraded: {}", c),
                                 Style::default().fg(Color::Yellow),
+                            )));
+                        }
+                        if r.strength_lifted > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Girya: +{} Strength", r.strength_lifted),
+                                Style::default().fg(Color::Red),
+                            )));
+                        }
+                        if let Some(ref rel) = r.relic_dug {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Dug up: {}", rel),
+                                Style::default().fg(Color::Yellow),
+                            )));
+                        }
+                        if r.max_hp_gained > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Stone Humidifier: +{} Max HP", r.max_hp_gained),
+                                Style::default().fg(Color::Cyan),
+                            )));
+                        }
+                        if let Some(ref c) = r.card_dreamed {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Dream Catcher: added {}", c),
+                                Style::default().fg(Color::Magenta),
+                            )));
+                        }
+                        if r.hp_gained == 0 && r.card_smithed.is_none() && r.strength_lifted == 0
+                            && r.relic_dug.is_none() {
+                            lines.push(Line::from(Span::styled(
+                                "     (rest)".to_string(),
+                                Style::default().fg(Color::DarkGray),
                             )));
                         }
                     }

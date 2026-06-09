@@ -18,7 +18,7 @@ use crate::metrics::run_ev::{compute_run_ev, RunEv};
 use crate::metrics::deck_dash::{compute_deck_stats, DeckStats};
 use crate::metrics::event::{advise_event, EventOptionAdvice};
 use crate::metrics::map_ev::{compute_map_ev, events_for_sub_act, MapEvData};
-use crate::metrics::rest::{advise_rest, RestAction, RestAdvice};
+use crate::metrics::rest::{RestAction, RestAdvice};
 use crate::sim::mcts::{best_play_sequence, PlayAdvice};
 use crate::sim::playout::playout_n;
 use crate::sim::policy::GreedyDamagePolicy;
@@ -123,6 +123,10 @@ pub struct App {
     /// Rest site recommendation and current selection (0=Heal, 1=Smith).
     pub rest_advice: Option<RestAdvice>,
     pub rest_cursor: usize,
+    /// Available rest site options for the current rest node (computed in open_rest_site).
+    pub rest_options: Vec<crate::metrics::rest::RestAction>,
+    /// When DREAM_CATCHER is active, this is set after a rest confirms; triggers card pick.
+    pub dream_catcher_pending: bool,
     /// Deck indices of upgradeable cards sorted best→worst for SmithPick mode.
     pub smith_candidates: Vec<usize>,
     pub smith_cursor: usize,
@@ -253,6 +257,8 @@ impl App {
             class_cards: Vec::new(),
             rest_advice: None,
             rest_cursor: 0,
+            rest_options: Vec::new(),
+            dream_catcher_pending: false,
             smith_candidates: Vec::new(),
             smith_cursor: 0,
             active_event: None,
@@ -366,8 +372,8 @@ impl App {
             AppMode::CharacterPick  => self.handle_key_character(key, rng),
             AppMode::EncounterPick  => self.handle_key_encounter(key, rng),
             AppMode::MapView        => self.handle_key_map_view(key, rng),
-            AppMode::RestSite       => self.handle_key_rest_site(key),
-            AppMode::SmithPick      => self.handle_key_smith_pick(key),
+            AppMode::RestSite       => self.handle_key_rest_site(key, rng),
+            AppMode::SmithPick      => self.handle_key_smith_pick(key, rng),
             AppMode::EventRoom      => self.handle_key_event_room(key),
             AppMode::TreasureRoom   => self.handle_key_treasure_room(key, rng),
             AppMode::Shop           => self.handle_key_shop(key),
@@ -1214,91 +1220,402 @@ impl App {
     }
 
     fn open_rest_site(&mut self) {
-        if let Some(ref run) = self.run {
-            let advice = advise_rest(run);
-            self.rest_cursor = match advice.action {
-                RestAction::Heal    => 0,
-                RestAction::Smith(_) => 1,
-            };
-            self.rest_advice = Some(advice);
+        use crate::metrics::rest::{available_rest_options, eternal_feather_heal, advise_rest};
+        let Some(ref mut run) = self.run else {
+            self.mode = AppMode::RestSite;
+            return;
+        };
+
+        // ETERNAL_FEATHER: auto-heal on entry
+        let feather_hp = eternal_feather_heal(run);
+        if feather_hp > 0 {
+            run.hp = (run.hp + feather_hp).min(run.max_hp);
+            self.status_message = format!("Eternal Feather: +{} HP on entry", feather_hp);
         }
+
+        // Compute available options and advice
+        let opts = available_rest_options(run);
+        let advice = advise_rest(run);
+
+        // Find recommended index
+        let rec_idx = opts.iter().position(|o| {
+            match (&advice.action, o) {
+                (RestAction::Heal,     RestAction::Heal)     => true,
+                (RestAction::Smith(_), RestAction::Smith(_)) => true,
+                (RestAction::Dig,      RestAction::Dig)      => true,
+                (RestAction::Lift,     RestAction::Lift)     => true,
+                (RestAction::Dream,    RestAction::Dream)    => true,
+                _ => false,
+            }
+        }).unwrap_or(0);
+
+        self.rest_options = opts;
+        self.rest_cursor = rec_idx;
+        self.rest_advice = Some(advice);
         self.mode = AppMode::RestSite;
     }
 
-    fn handle_key_rest_site(&mut self, key: KeyEvent) {
+    fn handle_key_rest_site(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
+        let n = self.rest_options.len().max(2);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.rest_cursor = (self.rest_cursor + 1) % 2;
+                self.rest_cursor = (self.rest_cursor + 1) % n;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.rest_cursor = self.rest_cursor.saturating_sub(1).max(0);
-                if self.rest_cursor == 0 { self.rest_cursor = 0; }
+                if self.rest_cursor == 0 { self.rest_cursor = n - 1; }
+                else { self.rest_cursor -= 1; }
             }
-            KeyCode::Enter => self.confirm_rest(),
+            KeyCode::Enter => self.confirm_rest(rng),
             KeyCode::Esc => self.mode = AppMode::MapView,
             KeyCode::Char('q') => self.mode = AppMode::Exiting,
             _ => {}
         }
     }
 
-    fn confirm_rest(&mut self) {
-        let Some(ref _run) = self.run else { return; };
-        let _ = _run;
-        let run = self.run.as_mut().unwrap();
-        if self.rest_cursor == 0 {
-            let old_hp = run.hp;
-            let old_gold = run.gold;
-            run.heal();
-            let hp_gained = run.hp.saturating_sub(old_hp);
-            // Record heal in history
-            {
-                use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
-                let entry = HistoryEntry {
-                    floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
-                    room_label: "Rest".to_string(),
-                    hp_before: old_hp, hp_after: run.hp,
-                    gold_before: old_gold, gold_after: old_gold,
-                    detail: EntryDetail::Rest(RestEntry { hp_gained, card_smithed: None }),
-                };
-                run.history.push(entry);
-            }
-            self.status_message = format!("Healed to {} HP", run.hp);
-            self.rest_advice = None;
-            self.mode = AppMode::MapView;
+    fn confirm_rest(&mut self, rng: &mut impl rand::Rng) {
+        let Some(run) = self.run.as_ref() else { return; };
+        let has_tent = run.has_relic("MINIATURE_TENT");
+
+        if has_tent {
+            self.apply_all_rest_options(rng);
         } else {
-            use crate::metrics::rest::smith_candidates;
-            let candidates: Vec<usize> = smith_candidates(&run.deck)
-                .into_iter().map(|(i, _)| i).collect();
-            if candidates.is_empty() {
-                let old_hp = run.hp;
-                let old_gold = run.gold;
-                run.heal();
-                let hp_gained = run.hp.saturating_sub(old_hp);
-                // Record heal (fallback from smith) in history
-                {
-                    use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
-                    let entry = HistoryEntry {
-                        floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
-                        room_label: "Rest".to_string(),
-                        hp_before: old_hp, hp_after: run.hp,
-                        gold_before: old_gold, gold_after: old_gold,
-                        detail: EntryDetail::Rest(RestEntry { hp_gained, card_smithed: None }),
-                    };
-                    run.history.push(entry);
-                }
-                self.status_message = format!("Healed to {} HP", run.hp);
-                self.rest_advice = None;
-                self.mode = AppMode::MapView;
-            } else {
-                self.smith_candidates = candidates;
-                self.smith_cursor = 0;
-                self.rest_advice = None;
-                self.mode = AppMode::SmithPick;
+            let action = self.rest_options.get(self.rest_cursor).cloned()
+                .unwrap_or(RestAction::Heal);
+            match action {
+                RestAction::Heal     => self.apply_rest_heal(rng),
+                RestAction::Smith(_) => self.enter_smith_pick(rng),
+                RestAction::Dig      => self.apply_rest_dig(rng),
+                RestAction::Lift     => self.apply_rest_lift(rng),
+                RestAction::Dream    => { self.apply_rest_heal(rng); }
             }
         }
     }
 
-    fn handle_key_smith_pick(&mut self, key: KeyEvent) {
+    fn apply_rest_heal(&mut self, rng: &mut impl rand::Rng) {
+        use crate::metrics::rest::heal_amount;
+        use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+
+        let run = self.run.as_mut().unwrap();
+        let old_hp = run.hp;
+        let h = heal_amount(run);
+        run.hp = (run.hp + h).min(run.max_hp);
+        let hp_gained = run.hp.saturating_sub(old_hp);
+
+        // STONE_HUMIDIFIER: +5 max HP when resting
+        let mut max_hp_gained = 0u32;
+        if run.has_relic("STONE_HUMIDIFIER") {
+            run.max_hp += 5;
+            max_hp_gained = 5;
+        }
+
+        // TINY_MAILBOX: award 2 random potions when resting
+        let has_mailbox = run.has_relic("TINY_MAILBOX");
+        let has_dream = run.has_relic("DREAM_CATCHER");
+        let hp_after = run.hp;
+        let gold = run.gold;
+        let floor = run.floor;
+        let act = run.act;
+        let sub_act = run.sub_act.clone();
+
+        if has_mailbox {
+            self.award_potions(2, rng);
+        }
+
+        let run = self.run.as_mut().unwrap();
+        let entry = HistoryEntry {
+            floor, act, sub_act,
+            room_label: "Rest".to_string(),
+            hp_before: old_hp, hp_after,
+            gold_before: gold, gold_after: gold,
+            detail: EntryDetail::Rest(RestEntry {
+                hp_gained, card_smithed: None, max_hp_gained,
+                relic_dug: None, strength_lifted: 0, card_dreamed: None,
+            }),
+        };
+        run.history.push(entry);
+        self.status_message = format!("Healed +{} HP", hp_gained);
+        self.rest_advice = None;
+
+        if has_dream {
+            self.open_dream_catcher_pick(rng);
+        } else {
+            self.mode = AppMode::MapView;
+        }
+    }
+
+    fn apply_rest_dig(&mut self, rng: &mut impl rand::Rng) {
+        use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+        use rand::seq::SliceRandom;
+
+        let class_pool = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+        let pool: Vec<crate::data::api::SpireApiRelic> = self.relics.iter()
+            .filter(|r| {
+                let rarity = r.rarity.as_deref().unwrap_or("");
+                let p = r.pool.as_deref().unwrap_or("shared");
+                matches!(rarity, "Common Relic" | "Uncommon Relic" | "Rare Relic")
+                    && (p == "shared" || p == class_pool)
+            })
+            .cloned()
+            .collect();
+
+        let relic_name = if let Some(relic) = pool.choose(rng).cloned() {
+            let name = relic.name.clone();
+            let id = relic.id.clone();
+            let desc = relic.description.clone().unwrap_or_default();
+            if let Some(run) = self.run.as_mut() {
+                run.relics.push(crate::domain::run::Relic::new(id, name.clone(), desc));
+            }
+            name
+        } else {
+            "Unknown Relic".to_string()
+        };
+
+        // STONE_HUMIDIFIER
+        let mut max_hp_gained = 0u32;
+        if self.run.as_ref().map(|r| r.has_relic("STONE_HUMIDIFIER")).unwrap_or(false) {
+            if let Some(run) = self.run.as_mut() { run.max_hp += 5; }
+            max_hp_gained = 5;
+        }
+        // TINY_MAILBOX
+        let has_mailbox = self.run.as_ref().map(|r| r.has_relic("TINY_MAILBOX")).unwrap_or(false);
+        let has_dream = self.run.as_ref().map(|r| r.has_relic("DREAM_CATCHER")).unwrap_or(false);
+        if has_mailbox {
+            self.award_potions(2, rng);
+        }
+
+        let run = self.run.as_mut().unwrap();
+        let entry = HistoryEntry {
+            floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
+            room_label: "Rest".to_string(),
+            hp_before: run.hp, hp_after: run.hp,
+            gold_before: run.gold, gold_after: run.gold,
+            detail: EntryDetail::Rest(RestEntry {
+                hp_gained: 0, card_smithed: None, max_hp_gained,
+                relic_dug: Some(relic_name.clone()), strength_lifted: 0, card_dreamed: None,
+            }),
+        };
+        run.history.push(entry);
+        self.status_message = format!("Dug up: {}", relic_name);
+        self.rest_advice = None;
+
+        if has_dream {
+            self.open_dream_catcher_pick(rng);
+        } else {
+            self.mode = AppMode::MapView;
+        }
+    }
+
+    fn apply_rest_lift(&mut self, rng: &mut impl rand::Rng) {
+        use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+
+        let run = self.run.as_mut().unwrap();
+        let had_uses = run.girya_uses;
+        if run.girya_uses < 3 {
+            run.girya_uses += 1;
+            run.girya_stacks += 1;
+        }
+        let strength_lifted = if run.girya_uses > had_uses { 1 } else { 0 };
+        let uses_now = run.girya_uses;
+
+        // STONE_HUMIDIFIER
+        let mut max_hp_gained = 0u32;
+        if run.has_relic("STONE_HUMIDIFIER") {
+            run.max_hp += 5;
+            max_hp_gained = 5;
+        }
+
+        let has_mailbox = run.has_relic("TINY_MAILBOX");
+        let has_dream = run.has_relic("DREAM_CATCHER");
+        let hp = run.hp;
+        let gold = run.gold;
+        let floor = run.floor;
+        let act = run.act;
+        let sub_act = run.sub_act.clone();
+
+        if has_mailbox {
+            self.award_potions(2, rng);
+        }
+
+        let run = self.run.as_mut().unwrap();
+        let entry = HistoryEntry {
+            floor, act, sub_act,
+            room_label: "Rest".to_string(),
+            hp_before: hp, hp_after: hp,
+            gold_before: gold, gold_after: gold,
+            detail: EntryDetail::Rest(RestEntry {
+                hp_gained: 0, card_smithed: None, max_hp_gained,
+                relic_dug: None, strength_lifted, card_dreamed: None,
+            }),
+        };
+        run.history.push(entry);
+        self.status_message = format!("Gained +1 Strength from Girya ({}/3 uses)", uses_now);
+        self.rest_advice = None;
+
+        if has_dream {
+            self.open_dream_catcher_pick(rng);
+        } else {
+            self.mode = AppMode::MapView;
+        }
+    }
+
+    fn enter_smith_pick(&mut self, rng: &mut impl rand::Rng) {
+        use crate::metrics::rest::smith_candidates;
+        let run = self.run.as_mut().unwrap();
+        let candidates: Vec<usize> = smith_candidates(&run.deck)
+            .into_iter().map(|(i, _)| i).collect();
+        if candidates.is_empty() {
+            self.apply_rest_heal(rng);
+        } else {
+            self.smith_candidates = candidates;
+            self.smith_cursor = 0;
+            self.rest_advice = None;
+            self.mode = AppMode::SmithPick;
+        }
+    }
+
+    fn apply_all_rest_options(&mut self, rng: &mut impl rand::Rng) {
+        use crate::metrics::rest::{RestAction, available_rest_options, heal_amount, smith_candidates};
+        use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+        use rand::seq::SliceRandom;
+
+        let opts: Vec<RestAction> = self.run.as_ref()
+            .map(|r| available_rest_options(r))
+            .unwrap_or_default();
+
+        let hp_before = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+        let gold_before = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+        let mut hp_gained = 0u32;
+        let mut card_smithed: Option<String> = None;
+        let mut relic_dug: Option<String> = None;
+        let mut strength_lifted = 0u32;
+        let mut max_hp_gained = 0u32;
+
+        for opt in &opts {
+            match opt {
+                RestAction::Heal => {
+                    let run = self.run.as_mut().unwrap();
+                    let h = heal_amount(run);
+                    let old = run.hp;
+                    run.hp = (run.hp + h).min(run.max_hp);
+                    hp_gained += run.hp.saturating_sub(old);
+                }
+                RestAction::Smith(_) => {
+                    let run = self.run.as_mut().unwrap();
+                    let candidates: Vec<usize> = smith_candidates(&run.deck)
+                        .into_iter().map(|(i, _)| i).collect();
+                    if let Some(&idx) = candidates.first() {
+                        if run.smith(idx) {
+                            card_smithed = Some(run.deck[idx].name.clone());
+                        }
+                    }
+                }
+                RestAction::Dig => {
+                    let class_pool = self.run.as_ref().map(|r| char_color(&r.class)).unwrap_or("ironclad");
+                    let pool: Vec<crate::data::api::SpireApiRelic> = self.relics.iter()
+                        .filter(|r| {
+                            let rarity = r.rarity.as_deref().unwrap_or("");
+                            let p = r.pool.as_deref().unwrap_or("shared");
+                            matches!(rarity, "Common Relic" | "Uncommon Relic" | "Rare Relic")
+                                && (p == "shared" || p == class_pool)
+                        })
+                        .cloned()
+                        .collect();
+                    if let Some(relic) = pool.choose(rng).cloned() {
+                        let name = relic.name.clone();
+                        let id = relic.id.clone();
+                        let desc = relic.description.clone().unwrap_or_default();
+                        if let Some(run) = self.run.as_mut() {
+                            run.relics.push(crate::domain::run::Relic::new(id, name.clone(), desc));
+                        }
+                        relic_dug = Some(name);
+                    }
+                }
+                RestAction::Lift => {
+                    let run = self.run.as_mut().unwrap();
+                    if run.girya_uses < 3 {
+                        run.girya_uses += 1;
+                        run.girya_stacks += 1;
+                        strength_lifted = 1;
+                    }
+                }
+                RestAction::Dream => {} // handled below via open_dream_catcher_pick
+            }
+        }
+
+        // STONE_HUMIDIFIER
+        if self.run.as_ref().map(|r| r.has_relic("STONE_HUMIDIFIER")).unwrap_or(false) {
+            if let Some(run) = self.run.as_mut() { run.max_hp += 5; }
+            max_hp_gained = 5;
+        }
+        // TINY_MAILBOX
+        let has_mailbox = self.run.as_ref().map(|r| r.has_relic("TINY_MAILBOX")).unwrap_or(false);
+        let has_dream = self.run.as_ref().map(|r| r.has_relic("DREAM_CATCHER")).unwrap_or(false);
+        if has_mailbox {
+            self.award_potions(2, rng);
+        }
+
+        let run = self.run.as_mut().unwrap();
+        let entry = HistoryEntry {
+            floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
+            room_label: "Rest".to_string(),
+            hp_before, hp_after: run.hp,
+            gold_before, gold_after: run.gold,
+            detail: EntryDetail::Rest(RestEntry {
+                hp_gained, card_smithed, max_hp_gained,
+                relic_dug, strength_lifted, card_dreamed: None,
+            }),
+        };
+        run.history.push(entry);
+
+        let mut msg_parts: Vec<String> = Vec::new();
+        if hp_gained > 0 { msg_parts.push(format!("+{} HP", hp_gained)); }
+        if strength_lifted > 0 { msg_parts.push("+1 Strength (Girya)".to_string()); }
+        self.status_message = if msg_parts.is_empty() { "Rested (Miniature Tent).".to_string() }
+                              else { format!("Miniature Tent: {}", msg_parts.join(", ")) };
+        self.rest_advice = None;
+
+        if has_dream {
+            self.open_dream_catcher_pick(rng);
+        } else {
+            self.mode = AppMode::MapView;
+        }
+    }
+
+    fn award_potions(&mut self, count: usize, rng: &mut impl rand::Rng) {
+        use rand::seq::SliceRandom;
+        let class_pool_str = self.run.as_ref()
+            .map(|r| r.class.to_string().to_lowercase())
+            .unwrap_or_else(|| "ironclad".to_string());
+
+        for _ in 0..count {
+            let pool: Vec<&crate::data::api::SpireApiPotion> = self.all_potions.iter()
+                .filter(|p| {
+                    let pv = p.pool.as_deref().unwrap_or("shared");
+                    pv == "shared" || pv == class_pool_str.as_str()
+                })
+                .collect();
+            let Some(chosen) = pool.choose(rng).map(|p| (*p).clone()) else { continue };
+            let run = self.run.as_mut().unwrap();
+            if let Some(slot) = run.potions.iter_mut().find(|s| s.is_none()) {
+                let desc = chosen.description.clone().unwrap_or_default();
+                *slot = Some(crate::domain::run::Potion::new(&chosen.id, &chosen.name, desc));
+            }
+        }
+    }
+
+    fn open_dream_catcher_pick(&mut self, rng: &mut impl rand::Rng) {
+        let pool = card_pool_for_run(self);
+        let asc = self.run.as_ref().map(|r| r.ascension).unwrap_or(0);
+        let offered = if let Some(run) = self.run.as_mut() {
+            sample_offer(&pool, crate::domain::reward::RewardKind::Monster, &mut run.rare_offset, asc, rng)
+        } else {
+            pool.into_iter().take(3).collect()
+        };
+        self.dream_catcher_pending = true;
+        self.load_pick(offered, rng, AppMode::MapView);
+    }
+
+    fn handle_key_smith_pick(&mut self, key: KeyEvent, rng: &mut impl rand::Rng) {
         let n = self.smith_candidates.len();
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1314,6 +1631,12 @@ impl App {
                     if run.smith(deck_idx) {
                         let name = run.deck[deck_idx].name.clone();
                         self.status_message = format!("Upgraded {}", name);
+                        // STONE_HUMIDIFIER passive
+                        let mut max_hp_gained = 0u32;
+                        if run.has_relic("STONE_HUMIDIFIER") {
+                            run.max_hp += 5;
+                            max_hp_gained = 5;
+                        }
                         // Record smith in history
                         {
                             use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
@@ -1325,10 +1648,28 @@ impl App {
                                 detail: EntryDetail::Rest(RestEntry {
                                     hp_gained: 0,
                                     card_smithed: Some(pre_smith_name),
+                                    max_hp_gained,
+                                    relic_dug: None,
+                                    strength_lifted: 0,
+                                    card_dreamed: None,
                                 }),
                             };
                             run.history.push(entry);
                         }
+                        // Capture TINY_MAILBOX and DREAM_CATCHER flags before releasing borrow
+                        let has_mailbox = run.has_relic("TINY_MAILBOX");
+                        let has_dream_after = run.has_relic("DREAM_CATCHER");
+                        // run borrow ends here (NLL); subsequent calls re-borrow self
+                        if has_mailbox {
+                            self.award_potions(2, rng);
+                        }
+                        self.smith_candidates.clear();
+                        if has_dream_after {
+                            self.open_dream_catcher_pick(rng);
+                        } else {
+                            self.mode = AppMode::MapView;
+                        }
+                        return;
                     }
                 }
                 self.smith_candidates.clear();
@@ -2764,6 +3105,11 @@ fn relic_ids_from_run(run: Option<&crate::domain::run::RunState>) -> Vec<String>
         // can model the correct trigger order (Fairy fires before Lizard Tail).
         if r.potions.iter().any(|s| s.as_ref().map(|p| p.id == "FAIRY_IN_A_BOTTLE").unwrap_or(false)) {
             ids.push("FAIRY_IN_A_BOTTLE".to_string());
+        }
+        // GIRYA stacks: encode each stack as a unique phantom relic ID so the combat
+        // simulator can apply permanent Strength. Use indexed IDs to survive HashSet dedup.
+        for i in 0..r.girya_stacks {
+            ids.push(format!("_GIRYA_STACK_{}", i));
         }
         ids
     }).unwrap_or_default()
