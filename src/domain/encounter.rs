@@ -29,7 +29,12 @@ pub fn encounters_for_act<'a>(
     sub_act: &str,
 ) -> Vec<&'a SpireApiEncounter> {
     if sub_act == "all" {
-        return encounters.iter().collect();
+        // Exclude event-room-specific encounters (no act assigned, triggered only
+        // from specific event nodes — not part of the normal combat pool).
+        return encounters
+            .iter()
+            .filter(|e| !e.id.ends_with("_EVENT_ENCOUNTER"))
+            .collect();
     }
     // "boss" across all sub-acts
     if sub_act == "boss" {
@@ -536,5 +541,28 @@ mod tests {
         assert_eq!(encounters_for_act(&all, "underdocks").len(), 1);
         assert_eq!(encounters_for_act(&all, "hive").len(), 1);
         assert_eq!(encounters_for_act(&all, "all").len(), 4);
+    }
+
+    #[test]
+    fn encounters_for_act_all_excludes_event_encounters() {
+        let make_with_id = |id: &str, act: Option<&str>| SpireApiEncounter {
+            id: id.to_string(),
+            name: id.to_string(),
+            room_type: Some("Monster".to_string()),
+            is_weak: None,
+            act: act.map(|s| s.to_string()),
+            tags: vec![],
+            monsters: vec![],
+            loss_text: None,
+        };
+        let all = vec![
+            make_with_id("normal_fight", Some("Act 1 - Overgrowth")),
+            make_with_id("FAKE_MERCHANT_EVENT_ENCOUNTER", None),
+            make_with_id("BATTLEWORN_DUMMY_EVENT_ENCOUNTER", None),
+        ];
+        // "all" should exclude event-encounter-suffixed entries
+        assert_eq!(encounters_for_act(&all, "all").len(), 1);
+        // sub_act filter naturally excludes act=None encounters
+        assert_eq!(encounters_for_act(&all, "overgrowth").len(), 1);
     }
 }

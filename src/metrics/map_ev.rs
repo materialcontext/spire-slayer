@@ -59,12 +59,17 @@ fn sub_act_to_act_number(sub_act: &str) -> u8 {
     }
 }
 
-/// Returns `false` if any precondition string explicitly restricts to a different act.
-/// Non-act preconditions (gold, HP, potions, etc.) are intentionally ignored here —
-/// we can only gate by act without a full RunState.
+/// Returns `false` if any precondition string explicitly restricts to a different act
+/// or requires multiplayer.
+/// Non-act, non-MP preconditions (gold, HP, potions, etc.) are intentionally ignored —
+/// we can only gate by act/mode without a full RunState.
 fn passes_act_preconditions(preconditions: &[String], act_number: u8) -> bool {
     for prec in preconditions {
         let lower = prec.to_lowercase();
+        // Multiplayer-only events: exclude from solo simulation
+        if lower.contains("more than one character") || lower.contains("requires multiple") {
+            return false;
+        }
         // Match "act N only", "act N–M only", "act N+", "act N–M"
         let Some(rest) = lower.strip_prefix("act ") else { continue };
         // Strip trailing " only" if present

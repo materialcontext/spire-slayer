@@ -388,9 +388,20 @@ pub mod colorless {
     pub fn all_cards() -> Vec<Card> {
         load_api_cards()
             .iter()
-            .filter(|c| c.color.as_deref() == Some("colorless"))
+            .filter(|c| {
+                c.color.as_deref() == Some("colorless") && !is_multiplayer_only(c)
+            })
             .map(api_to_domain)
             .collect()
+    }
+
+    /// Returns true for cards whose effects only make sense with multiple players.
+    fn is_multiplayer_only(c: &crate::data::api::SpireApiCard) -> bool {
+        let desc = c.description.as_deref().unwrap_or("").to_lowercase();
+        desc.contains("another player")
+            || desc.contains("another character")
+            || desc.contains("all players")
+            || desc.contains("other players")
     }
 }
 
