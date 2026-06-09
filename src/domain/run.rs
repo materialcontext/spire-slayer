@@ -82,6 +82,9 @@ pub struct RunState {
     pub had_darv_act2: bool,
     /// Boss name for the current act, determined at map generation time (shown on map view).
     pub boss_name: Option<String>,
+    /// History of all nodes visited this run, in order.
+    #[serde(default)]
+    pub history: Vec<crate::domain::run_history::HistoryEntry>,
 }
 
 impl RunState {
@@ -110,6 +113,7 @@ impl RunState {
             ascension: 0,
             had_darv_act2: false,
             boss_name: None,
+            history: Vec::new(),
         }
     }
 

@@ -46,6 +46,7 @@ pub enum AppMode {
     Simulating,
     Calibration,
     Statistics,
+    RunHistory,
     Exiting,
 }
 
@@ -62,6 +63,33 @@ pub enum AfterTreasure {
     BossCardPick,
     /// Load a normal/elite card pick and return to the map.
     CombatCardPick(Vec<Card>),
+}
+
+/// Accumulated data for the combat room currently being resolved.
+/// Set when entering a Monster/Elite/Boss room; consumed by apply_card_pick.
+#[derive(Debug, Clone)]
+struct PendingCombat {
+    floor: u8,
+    act: u8,
+    sub_act: String,
+    room_label: String,
+    hp_before: u32,
+    hp_after: u32,
+    gold_before: u32,
+    gold_after: u32,
+    encounter_name: String,
+    turns: Vec<crate::domain::run_history::TurnRecord>,
+    relic_gained: Option<String>,
+}
+
+/// Accumulated shop receipt; set when shop opens, consumed when player exits.
+#[derive(Debug, Clone)]
+struct PendingShop {
+    hp: u32,
+    gold_before: u32,
+    purchases: Vec<crate::domain::run_history::ShopPurchase>,
+    card_removed: Option<String>,
+    removal_cost: Option<u32>,
 }
 
 pub struct App {
@@ -182,6 +210,14 @@ pub struct App {
     pub shop_potions: Vec<(String, String, u32)>,
     /// Cursor index for shop potions (separate from main shop_cursor).
     pub shop_potion_cursor: usize,
+    /// Whether the currently selected history entry is expanded.
+    pub history_expanded: bool,
+    /// Mode to return to when exiting RunHistory.
+    pub history_return: AppMode,
+    /// Accumulated combat data while waiting for card pick.
+    pending_combat: Option<PendingCombat>,
+    /// Accumulated shop data while the shop is open.
+    pending_shop: Option<PendingShop>,
 }
 
 impl App {
@@ -265,6 +301,10 @@ impl App {
             is_boss: false,
             shop_potions: Vec::new(),
             shop_potion_cursor: 0,
+            history_expanded: false,
+            history_return: AppMode::MapView,
+            pending_combat: None,
+            pending_shop: None,
         };
         app.refresh_filter();
         app
@@ -340,6 +380,7 @@ impl App {
             AppMode::Victory        => self.handle_key_victory(key),
             AppMode::Calibration    => self.handle_key_calibration(key),
             AppMode::Statistics     => self.handle_key_statistics(key),
+            AppMode::RunHistory     => self.handle_key_run_history(key),
             AppMode::Simulating | AppMode::Exiting => {}
         }
     }
@@ -407,6 +448,14 @@ impl App {
             }
             KeyCode::Enter => {
                 self.select_map_node(rng);
+            }
+            KeyCode::Char('h') => {
+                self.history_return = AppMode::MapView;
+                self.selected_row = self.run.as_ref()
+                    .map(|r| r.history.len().saturating_sub(1))
+                    .unwrap_or(0);
+                self.history_expanded = false;
+                self.mode = AppMode::RunHistory;
             }
             _ => {}
         }
@@ -1007,8 +1056,27 @@ impl App {
             } else {
                 pool.into_iter().take(3).collect()
             };
+            // === history: capture pre-boss state ===
+            let hist_hp_before = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+            let hist_gold_before = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+            let hist_floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+            let hist_act   = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+            let hist_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
             self.apply_combat_hp_loss(RoomType::Boss, rng);
             self.apply_post_combat_relics();
+            // === history: capture post-boss state and run recorded sim ===
+            let hist_hp_after = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+            let hist_gold_after = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+            let (hist_enc_name, hist_turns) = self.run_history_sim(RoomType::Boss, rng);
+            self.pending_combat = Some(PendingCombat {
+                floor: hist_floor, act: hist_act, sub_act: hist_sub_act,
+                room_label: "Boss".to_string(),
+                hp_before: hist_hp_before, hp_after: hist_hp_after,
+                gold_before: hist_gold_before, gold_after: hist_gold_after,
+                encounter_name: hist_enc_name,
+                turns: hist_turns,
+                relic_gained: None,
+            });
             self.open_boss_relic_room(offered, rng);
             return;
         }
@@ -1069,9 +1137,29 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                // === history: capture pre-combat state ===
+                let hist_hp_before = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                let hist_gold_before = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                let hist_floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+                let hist_act   = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+                let hist_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+                let hist_label = if rt == RoomType::Elite { "Elite".to_string() } else { "Monster".to_string() };
                 self.apply_combat_hp_loss(rt, rng);
                 self.apply_post_combat_relics();
                 self.apply_combat_gold(rt);
+                // === history: capture post-combat state and run recorded sim ===
+                let hist_hp_after = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                let hist_gold_after = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                let (hist_enc_name, hist_turns) = self.run_history_sim(rt, rng);
+                self.pending_combat = Some(PendingCombat {
+                    floor: hist_floor, act: hist_act, sub_act: hist_sub_act,
+                    room_label: hist_label,
+                    hp_before: hist_hp_before, hp_after: hist_hp_after,
+                    gold_before: hist_gold_before, gold_after: hist_gold_after,
+                    encounter_name: hist_enc_name,
+                    turns: hist_turns,
+                    relic_gained: None,
+                });
                 if rt == RoomType::Elite {
                     // Elite potion drop: 40% chance
                     self.maybe_award_elite_potion(rng);
@@ -1093,8 +1181,27 @@ impl App {
                 } else {
                     pool.into_iter().take(3).collect()
                 };
+                // === history: capture pre-boss state ===
+                let hist_hp_before = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                let hist_gold_before = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                let hist_floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+                let hist_act   = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+                let hist_sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
                 self.apply_combat_hp_loss(RoomType::Boss, rng);
                 self.apply_post_combat_relics();
+                // === history: capture post-boss state and run recorded sim ===
+                let hist_hp_after = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                let hist_gold_after = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                let (hist_enc_name, hist_turns) = self.run_history_sim(RoomType::Boss, rng);
+                self.pending_combat = Some(PendingCombat {
+                    floor: hist_floor, act: hist_act, sub_act: hist_sub_act,
+                    room_label: "Boss".to_string(),
+                    hp_before: hist_hp_before, hp_after: hist_hp_after,
+                    gold_before: hist_gold_before, gold_after: hist_gold_after,
+                    encounter_name: hist_enc_name,
+                    turns: hist_turns,
+                    relic_gained: None,
+                });
                 // Open boss relic chest first, then card pick, then act transition.
                 self.open_boss_relic_room(offered, rng);
             }
@@ -1139,7 +1246,22 @@ impl App {
         let _ = _run;
         let run = self.run.as_mut().unwrap();
         if self.rest_cursor == 0 {
+            let old_hp = run.hp;
+            let old_gold = run.gold;
             run.heal();
+            let hp_gained = run.hp.saturating_sub(old_hp);
+            // Record heal in history
+            {
+                use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+                let entry = HistoryEntry {
+                    floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
+                    room_label: "Rest".to_string(),
+                    hp_before: old_hp, hp_after: run.hp,
+                    gold_before: old_gold, gold_after: old_gold,
+                    detail: EntryDetail::Rest(RestEntry { hp_gained, card_smithed: None }),
+                };
+                run.history.push(entry);
+            }
             self.status_message = format!("Healed to {} HP", run.hp);
             self.rest_advice = None;
             self.mode = AppMode::MapView;
@@ -1148,7 +1270,22 @@ impl App {
             let candidates: Vec<usize> = smith_candidates(&run.deck)
                 .into_iter().map(|(i, _)| i).collect();
             if candidates.is_empty() {
+                let old_hp = run.hp;
+                let old_gold = run.gold;
                 run.heal();
+                let hp_gained = run.hp.saturating_sub(old_hp);
+                // Record heal (fallback from smith) in history
+                {
+                    use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+                    let entry = HistoryEntry {
+                        floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
+                        room_label: "Rest".to_string(),
+                        hp_before: old_hp, hp_after: run.hp,
+                        gold_before: old_gold, gold_after: old_gold,
+                        detail: EntryDetail::Rest(RestEntry { hp_gained, card_smithed: None }),
+                    };
+                    run.history.push(entry);
+                }
                 self.status_message = format!("Healed to {} HP", run.hp);
                 self.rest_advice = None;
                 self.mode = AppMode::MapView;
@@ -1173,9 +1310,25 @@ impl App {
             KeyCode::Enter => {
                 if let Some(&deck_idx) = self.smith_candidates.get(self.smith_cursor) {
                     let run = self.run.as_mut().unwrap();
+                    let pre_smith_name = run.deck.get(deck_idx).map(|c| c.name.clone()).unwrap_or_default();
                     if run.smith(deck_idx) {
                         let name = run.deck[deck_idx].name.clone();
                         self.status_message = format!("Upgraded {}", name);
+                        // Record smith in history
+                        {
+                            use crate::domain::run_history::{EntryDetail, HistoryEntry, RestEntry};
+                            let entry = HistoryEntry {
+                                floor: run.floor, act: run.act, sub_act: run.sub_act.clone(),
+                                room_label: "Rest".to_string(),
+                                hp_before: run.hp, hp_after: run.hp,
+                                gold_before: run.gold, gold_after: run.gold,
+                                detail: EntryDetail::Rest(RestEntry {
+                                    hp_gained: 0,
+                                    card_smithed: Some(pre_smith_name),
+                                }),
+                            };
+                            run.history.push(entry);
+                        }
                     }
                 }
                 self.smith_candidates.clear();
@@ -1224,6 +1377,34 @@ impl App {
                     .unwrap_or("?")
                     .to_string();
                 self.status_message = format!("Chose: {title}");
+                // Record event choice in history
+                {
+                    use crate::domain::run_history::{EntryDetail, EventEntry, HistoryEntry};
+                    let event_name = self.active_event.as_ref()
+                        .map(|e| e.name.as_str())
+                        .unwrap_or("Event")
+                        .to_string();
+                    let option_chosen = self.active_event.as_ref()
+                        .and_then(|e| e.options.get(self.event_cursor))
+                        .and_then(|o| o.title.as_deref())
+                        .unwrap_or("?")
+                        .to_string();
+                    let hp = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                    let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                    let floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+                    let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+                    let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+                    let entry = HistoryEntry {
+                        floor, act, sub_act,
+                        room_label: "Event".to_string(),
+                        hp_before: hp, hp_after: hp,
+                        gold_before: gold, gold_after: gold,
+                        detail: EntryDetail::Event(EventEntry { event_name, option_chosen }),
+                    };
+                    if let Some(ref mut run) = self.run {
+                        run.history.push(entry);
+                    }
+                }
                 self.active_event = None;
                 self.event_advice.clear();
                 self.mode = AppMode::MapView;
@@ -1277,6 +1458,12 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => { self.relic_cursor = 1; }
             KeyCode::Char('k') | KeyCode::Up   => { self.relic_cursor = 0; }
             KeyCode::Enter => {
+                // Capture relic name before it's consumed
+                let relic_offered_name = self.offered_relic.as_ref()
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| "Unknown Relic".into());
+                let taken = self.relic_cursor == 0;
+                let is_combat_relic = self.after_treasure.is_some(); // true for elite/boss
                 if self.relic_cursor == 0 {
                     if let (Some(relic), Some(run)) = (self.offered_relic.take(), self.run.as_mut()) {
                         let desc = relic.description.clone().unwrap_or_default();
@@ -1286,6 +1473,35 @@ impl App {
                 } else {
                     self.status_message = "Skipped relic".to_string();
                     self.offered_relic = None;
+                }
+                // Track relic in pending combat (elite/boss) OR push standalone treasure entry
+                if is_combat_relic {
+                    if taken {
+                        if let Some(ref mut pending) = self.pending_combat {
+                            pending.relic_gained = Some(relic_offered_name);
+                        }
+                    }
+                } else {
+                    // Standalone treasure room
+                    use crate::domain::run_history::{EntryDetail, HistoryEntry, TreasureEntry};
+                    let hp = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+                    let gold = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+                    let floor = self.run.as_ref().map(|r| r.floor).unwrap_or(0);
+                    let act = self.run.as_ref().map(|r| r.act).unwrap_or(1);
+                    let sub_act = self.run.as_ref().map(|r| r.sub_act.clone()).unwrap_or_default();
+                    let entry = HistoryEntry {
+                        floor, act, sub_act,
+                        room_label: "Treasure".to_string(),
+                        hp_before: hp, hp_after: hp,
+                        gold_before: gold, gold_after: gold,
+                        detail: EntryDetail::Treasure(TreasureEntry {
+                            relic_offered: relic_offered_name,
+                            taken,
+                        }),
+                    };
+                    if let Some(ref mut run) = self.run {
+                        run.history.push(entry);
+                    }
                 }
                 self.finish_treasure_room(rng);
             }
@@ -1585,6 +1801,16 @@ impl App {
         self.shop_cursor = 0;
         self.shop_potions = shop_potions;
         self.shop_potion_cursor = 0;
+        // Initialize pending shop receipt
+        let shop_hp = self.run.as_ref().map(|r| r.hp).unwrap_or(0);
+        let shop_gold_before = self.run.as_ref().map(|r| r.gold).unwrap_or(0);
+        self.pending_shop = Some(PendingShop {
+            hp: shop_hp,
+            gold_before: shop_gold_before,
+            purchases: Vec::new(),
+            card_removed: None,
+            removal_cost: None,
+        });
         self.mode = AppMode::Shop;
     }
 
@@ -1752,16 +1978,20 @@ impl App {
     }
 
     fn apply_card_pick(&mut self) {
-        let Some(advice) = self.card_advice.get(self.selected_row) else { return; };
+        // Extract card_index first so the immutable borrow of card_advice ends
+        // before any mutable self borrows (log_event, run.history.push, etc.).
+        let card_index = match self.card_advice.get(self.selected_row) {
+            Some(a) => a.card_index,
+            None => return,
+        };
 
         // Build telemetry before mutating state.
-        let offered = &self.offered_cards;
         let tel_choices: Vec<ScoredChoice> = self.card_advice.iter()
             .map(|a| ScoredChoice {
                 label: if a.card_index == usize::MAX {
                     "Skip".into()
                 } else {
-                    offered.get(a.card_index).map(|c| c.name.clone()).unwrap_or_default()
+                    self.offered_cards.get(a.card_index).map(|c| c.name.clone()).unwrap_or_default()
                 },
                 hp_delta: a.delta_hp,
             })
@@ -1776,12 +2006,38 @@ impl App {
             chose_index: self.selected_row,
         };
 
-        if advice.card_index == usize::MAX {
+        if card_index == usize::MAX {
             self.status_message = "Skipped card reward".to_string();
             self.log_event(tel_event);
+            // Finalize history entry for the combat that preceded this card pick (skipped)
+            if let Some(pending) = self.pending_combat.take() {
+                use crate::domain::run_history::{CombatEntry, EntryDetail, HistoryEntry};
+                let entry = HistoryEntry {
+                    floor: pending.floor,
+                    act: pending.act,
+                    sub_act: pending.sub_act,
+                    room_label: pending.room_label,
+                    hp_before: pending.hp_before,
+                    hp_after: pending.hp_after,
+                    gold_before: pending.gold_before,
+                    gold_after: pending.gold_after,
+                    detail: EntryDetail::Combat(CombatEntry {
+                        encounter_name: pending.encounter_name,
+                        hp_lost: pending.hp_before.saturating_sub(pending.hp_after),
+                        gold_gained: pending.gold_after.saturating_sub(pending.gold_before),
+                        turns: pending.turns,
+                        card_picked: None,
+                        relic_gained: pending.relic_gained,
+                    }),
+                };
+                if let Some(ref mut run) = self.run {
+                    run.history.push(entry);
+                }
+            }
             return;
         }
-        let card = self.offered_cards.get(advice.card_index).cloned();
+        let card_name = self.offered_cards.get(card_index).map(|c| c.name.clone());
+        let card = self.offered_cards.get(card_index).cloned();
         if let Some(card) = card {
             let name = card.name.clone();
             if let Some(ref mut run) = self.run {
@@ -1790,6 +2046,31 @@ impl App {
             }
         }
         self.log_event(tel_event);
+        // Finalize history entry for the combat that preceded this card pick
+        if let Some(pending) = self.pending_combat.take() {
+            use crate::domain::run_history::{CombatEntry, EntryDetail, HistoryEntry};
+            let entry = HistoryEntry {
+                floor: pending.floor,
+                act: pending.act,
+                sub_act: pending.sub_act,
+                room_label: pending.room_label,
+                hp_before: pending.hp_before,
+                hp_after: pending.hp_after,
+                gold_before: pending.gold_before,
+                gold_after: pending.gold_after,
+                detail: EntryDetail::Combat(CombatEntry {
+                    encounter_name: pending.encounter_name,
+                    hp_lost: pending.hp_before.saturating_sub(pending.hp_after),
+                    gold_gained: pending.gold_after.saturating_sub(pending.gold_before),
+                    turns: pending.turns,
+                    card_picked: card_name,
+                    relic_gained: pending.relic_gained,
+                }),
+            };
+            if let Some(ref mut run) = self.run {
+                run.history.push(entry);
+            }
+        }
     }
 
     /// Deduct expected HP loss for a combat room from the current run.
@@ -2148,6 +2429,82 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_key_run_history(&mut self, key: KeyEvent) {
+        let n = self.run.as_ref().map(|r| r.history.len()).unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if n > 0 {
+                    self.selected_row = (self.selected_row + 1).min(n - 1);
+                    self.history_expanded = false;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.selected_row > 0 {
+                    self.selected_row -= 1;
+                    self.history_expanded = false;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.history_expanded = !self.history_expanded;
+            }
+            KeyCode::Esc | KeyCode::Char('h') => {
+                self.selected_row = 0;
+                self.history_expanded = false;
+                self.mode = self.history_return.clone();
+            }
+            KeyCode::Char('q') => { self.mode = AppMode::Exiting; }
+            _ => {}
+        }
+    }
+
+    /// Run one recorded combat against a sampled encounter for history display.
+    /// Returns (encounter_name, turn_records).
+    fn run_history_sim(
+        &self,
+        room_type: crate::domain::map::RoomType,
+        rng: &mut impl rand::Rng,
+    ) -> (String, Vec<crate::domain::run_history::TurnRecord>) {
+        use crate::domain::encounter::normalize_act;
+        use crate::domain::map::RoomType;
+        use crate::domain::encounter::encounter_to_combat_with_deck;
+        use crate::sim::playout::run_combat_recorded;
+        use crate::sim::policy::GreedyDamagePolicy;
+        use rand::seq::SliceRandom;
+
+        let Some(ref run) = self.run else { return ("Unknown".into(), vec![]); };
+        let sub_act = run.sub_act.clone();
+        let deck = run.deck.clone();
+        let hp = run.hp;
+        let max_hp = run.max_hp;
+        let relics = relic_ids_from_run(Some(run));
+        let ascension = run.ascension;
+
+        let room_str = match room_type {
+            RoomType::Monster => "Monster",
+            RoomType::Elite   => "Elite",
+            RoomType::Boss    => "Boss",
+            _                 => return ("Unknown".into(), vec![]),
+        };
+
+        let pool: Vec<&crate::data::api::SpireApiEncounter> = self.encounters.iter()
+            .filter(|e| {
+                let act = e.act.as_deref().map(normalize_act).unwrap_or("other");
+                act == sub_act && e.room_type.as_deref() == Some(room_str)
+            })
+            .collect();
+
+        let Some(enc) = pool.choose(rng) else {
+            return (format!("{sub_act} {room_str}"), vec![]);
+        };
+
+        let encounter_name = enc.name.clone();
+        let state = encounter_to_combat_with_deck(
+            enc, &self.monsters, &deck, hp, max_hp, &relics, ascension, rng,
+        );
+        let (_, turns) = run_combat_recorded(state, &GreedyDamagePolicy, rng);
+        (encounter_name, turns)
     }
 }
 

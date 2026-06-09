@@ -123,6 +123,83 @@ pub fn run_combat(
     }
 }
 
+/// Run one full combat and record per-turn breakdowns for history display.
+/// Returns (CombatResult, Vec<TurnRecord>).
+pub fn run_combat_recorded(
+    mut state: CombatState,
+    policy: &dyn Policy,
+    rng: &mut impl Rng,
+) -> (CombatResult, Vec<crate::domain::run_history::TurnRecord>) {
+    use crate::domain::run_history::TurnRecord;
+
+    let initial_hp = state.player.hp;
+    let initial_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
+    let mut total_block = 0u32;
+    let mut turn_records: Vec<TurnRecord> = Vec::new();
+    let mut turn_num = 1u32;
+
+    if state.hand.is_empty() {
+        let n = state.hand_size as usize;
+        apply::draw_cards(&mut state, n, rng);
+    }
+
+    loop {
+        let hp_before = state.player.hp;
+        let mut cards_played: Vec<String> = Vec::new();
+        let enemy_hp_before: u32 = state.enemies.iter().map(|e| e.hp).sum();
+
+        // Player phase
+        loop {
+            if state.is_over() { break; }
+            match policy.select_action(&state) {
+                None => break,
+                Some(action) => {
+                    let name = state.hand.get(action.card_hand_idx)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+                    if apply::play_card(&mut state, action.card_hand_idx, action.target_idx, rng).is_err() {
+                        break;
+                    }
+                    cards_played.push(name);
+                }
+            }
+        }
+
+        let block_gained = state.player.block;
+        let enemy_hp_mid: u32 = state.enemies.iter().map(|e| e.hp).sum();
+
+        if !state.is_over() && turn_num < MAX_TURNS {
+            total_block += block_gained;
+            apply::end_turn(&mut state, rng);
+        }
+
+        let hp_after = state.player.hp;
+        turn_records.push(TurnRecord {
+            turn: turn_num,
+            cards_played,
+            damage_dealt: enemy_hp_before.saturating_sub(enemy_hp_mid),
+            block_gained,
+            player_hp_before: hp_before,
+            player_hp_after: hp_after,
+        });
+
+        if state.is_over() || turn_num >= MAX_TURNS { break; }
+        turn_num += 1;
+    }
+
+    let final_enemy_hp: u32 = state.enemies.iter().map(|e| e.hp).sum();
+    let result = CombatResult {
+        player_hp_delta: state.player.hp as i32 - initial_hp as i32,
+        turns: state.turn,
+        player_alive: state.player.is_alive(),
+        combat_won: state.is_won(),
+        final_state: state,
+        damage_dealt: initial_enemy_hp.saturating_sub(final_enemy_hp),
+        block_absorbed: total_block,
+    };
+    (result, turn_records)
+}
+
 // ── Core playout ───────────────────────────────────────────────────────────
 
 /// Execute one full turn using `policy`, then run the enemy phase.

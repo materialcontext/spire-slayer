@@ -48,6 +48,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppMode::Victory      => render_victory(frame, app, area),
         AppMode::Calibration  => render_calibration(frame, app, area),
         AppMode::Statistics   => render_statistics(frame, app, area),
+        AppMode::RunHistory   => render_run_history(frame, app, area),
         AppMode::Exiting      => {}
     }
 }
@@ -2750,4 +2751,233 @@ mod tests {
         app.mode = crate::tui::app::AppMode::Statistics;
         terminal.draw(|frame| render(frame, &app)).unwrap();
     }
+
+    #[test]
+    fn render_run_history_does_not_panic() {
+        let mut terminal = make_terminal();
+        let mut app = make_empty_app();
+        app.mode = crate::tui::app::AppMode::RunHistory;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+    }
+}
+
+fn render_run_history(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::domain::run_history::EntryDetail;
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(4), Constraint::Length(1)])
+        .split(area);
+
+    let title = Paragraph::new(" RUN HISTORY   j/k navigate  Enter expand  h/Esc back")
+        .block(Block::default().borders(Borders::BOTTOM))
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(title, rows[0]);
+
+    let history = app.run.as_ref().map(|r| r.history.as_slice()).unwrap_or(&[]);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if history.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No history yet — visit map nodes to build history.".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (i, entry) in history.iter().enumerate() {
+            let selected = i == app.selected_row;
+            let prefix = if selected { "▶ " } else { "  " };
+
+            let room_color = match entry.room_label.as_str() {
+                "Elite"    => Color::Yellow,
+                "Boss"     => Color::Red,
+                "Shop"     => Color::Cyan,
+                "Event"    => Color::Magenta,
+                "Rest"     => Color::Green,
+                "Treasure" => Color::Yellow,
+                _          => Color::White,
+            };
+
+            let hp_delta = entry.hp_after as i32 - entry.hp_before as i32;
+            let hp_str = format!("{:+}", hp_delta);
+            let hp_color = if hp_delta >= 0 { Color::Green } else { Color::Red };
+            let gold_delta = entry.gold_after as i32 - entry.gold_before as i32;
+
+            let summary = format!(
+                "{}[F{:02}] {:<9} HP {}->{} ({})   Gold {}->{}",
+                prefix,
+                entry.floor,
+                entry.room_label,
+                entry.hp_before, entry.hp_after, hp_str,
+                entry.gold_before, entry.gold_after,
+            );
+
+            let base_style = if selected {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(room_color)
+            };
+
+            // Summary line with inline detail
+            let detail_inline = match &entry.detail {
+                EntryDetail::Combat(c) => {
+                    let card = c.card_picked.as_deref().unwrap_or("skip");
+                    format!("   {} → {}", c.encounter_name, card)
+                }
+                EntryDetail::Shop(s) => {
+                    let n = s.purchases.len();
+                    format!("   {} item(s), -{} gold", n, s.gold_spent)
+                }
+                EntryDetail::Event(e) => format!("   {} → {}", e.event_name, e.option_chosen),
+                EntryDetail::Rest(r) => {
+                    if r.hp_gained > 0 { format!("   heal +{} HP", r.hp_gained) }
+                    else { format!("   smith: {}", r.card_smithed.as_deref().unwrap_or("?")) }
+                }
+                EntryDetail::Treasure(t) => {
+                    let act = if t.taken { "took" } else { "skipped" };
+                    format!("   {} {}", act, t.relic_offered)
+                }
+                EntryDetail::AncientBoon(a) => format!("   {}", a.boon_name),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(summary, base_style),
+                Span::styled(detail_inline, Style::default().fg(Color::DarkGray)),
+                if selected && !app.history_expanded {
+                    Span::styled("  [Enter]".to_string(), Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+
+            // Expanded detail block
+            if selected && app.history_expanded {
+                match &entry.detail {
+                    EntryDetail::Combat(c) => {
+                        lines.push(Line::from(Span::styled(
+                            format!("     Encounter: {}   HP lost: {}   Gold gained: {}",
+                                c.encounter_name, c.hp_lost, c.gold_gained),
+                            Style::default().fg(Color::White),
+                        )));
+                        let card_str = c.card_picked.as_deref().unwrap_or("(skipped)");
+                        let card_color = if c.card_picked.is_some() { Color::Green } else { Color::DarkGray };
+                        lines.push(Line::from(Span::styled(
+                            format!("     Card reward: {}", card_str),
+                            Style::default().fg(card_color),
+                        )));
+                        if let Some(ref relic) = c.relic_gained {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Relic: {}", relic),
+                                Style::default().fg(Color::Yellow),
+                            )));
+                        }
+                        if !c.turns.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "     ── simulated turns ──".to_string(),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                            for t in &c.turns {
+                                let cards = if t.cards_played.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    t.cards_played.join(", ")
+                                };
+                                let hp_ch = t.player_hp_after as i32 - t.player_hp_before as i32;
+                                lines.push(Line::from(Span::styled(
+                                    format!("     T{}: {}  |  {}dmg {}blk  HP {}→{} ({:+})",
+                                        t.turn, cards,
+                                        t.damage_dealt, t.block_gained,
+                                        t.player_hp_before, t.player_hp_after, hp_ch,
+                                    ),
+                                    Style::default().fg(Color::White),
+                                )));
+                            }
+                        }
+                    }
+                    EntryDetail::Shop(s) => {
+                        if s.purchases.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "     (nothing purchased)".to_string(),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                        for p in &s.purchases {
+                            lines.push(Line::from(Span::styled(
+                                format!("     {} [{}]  {} gold", p.name, p.kind, p.cost),
+                                Style::default().fg(Color::White),
+                            )));
+                        }
+                        if let Some(ref removed) = s.card_removed {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Removed: {}  ({} gold)",
+                                    removed, s.removal_cost.unwrap_or(0)),
+                                Style::default().fg(Color::Red),
+                            )));
+                        }
+                    }
+                    EntryDetail::Event(e) => {
+                        lines.push(Line::from(Span::styled(
+                            format!("     Event: {}", e.event_name),
+                            Style::default().fg(Color::White),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            format!("     Chose: {}", e.option_chosen),
+                            Style::default().fg(Color::Cyan),
+                        )));
+                    }
+                    EntryDetail::Rest(r) => {
+                        if r.hp_gained > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Healed +{} HP", r.hp_gained),
+                                Style::default().fg(Color::Green),
+                            )));
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                format!("     Upgraded: {}",
+                                    r.card_smithed.as_deref().unwrap_or("?")),
+                                Style::default().fg(Color::Yellow),
+                            )));
+                        }
+                    }
+                    EntryDetail::Treasure(t) => {
+                        let (action, color) = if t.taken {
+                            ("Took", Color::Green)
+                        } else {
+                            ("Skipped", Color::DarkGray)
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("     {} relic: {}", action, t.relic_offered),
+                            Style::default().fg(color),
+                        )));
+                    }
+                    EntryDetail::AncientBoon(a) => {
+                        lines.push(Line::from(Span::styled(
+                            format!("     Boon: {}", a.boon_name),
+                            Style::default().fg(Color::Magenta),
+                        )));
+                    }
+                }
+                lines.push(Line::from(Span::raw("")));
+            }
+        }
+    }
+
+    // Scroll to keep selected entry visible
+    let viewport = rows[1].height as usize;
+    let total = lines.len();
+    let scroll = if total > viewport {
+        let lines_per_entry = if app.history_expanded { 8 } else { 1 };
+        let sel_line = app.selected_row * lines_per_entry;
+        sel_line.saturating_sub(viewport / 2).min(total.saturating_sub(viewport))
+    } else {
+        0
+    };
+
+    let visible: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(viewport).collect();
+    let body = Paragraph::new(visible);
+    frame.render_widget(body, rows[1]);
+
+    let count = app.run.as_ref().map(|r| r.history.len()).unwrap_or(0);
+    let status = Paragraph::new(format!(" {} nodes in history", count))
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(status, rows[2]);
 }

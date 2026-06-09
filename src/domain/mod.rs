@@ -8,3 +8,4 @@ pub mod encounter;
 pub mod map;
 pub mod reward;
 pub mod run;
+pub mod run_history;
